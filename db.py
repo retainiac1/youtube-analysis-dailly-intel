@@ -259,6 +259,39 @@ def finish_run(conn: sqlite3.Connection, run_id: int, finished_at: str,
     conn.commit()
 
 
+def fetch_ranking_pool(conn: sqlite3.Connection) -> list[dict]:
+    """Return the tracked-video pool used to compute rankings, as plain dicts
+    (not sqlite3.Row). Window filtering is done in Python (swipefile.eligible_pool)
+    by parsing datetimes — not in SQL — so the boundary is robust to timestamp
+    format drift. The pool is bounded by discovery, so a full fetch is cheap."""
+    cur = conn.execute(
+        "SELECT video_id, buckets, views_to_subs_ratio, view_count, published_at "
+        "FROM videos"
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def replace_rankings(conn: sqlite3.Connection, run_date: str, bucket: str,
+                     ranked: list[tuple[str, float]], captured_at: str) -> None:
+    """Idempotently replace one lane's rankings for `run_date`: delete all rows
+    for (run_date, bucket), then insert `ranked` as ranks 1..len(ranked). Does NOT
+    commit — the caller wraps this in a transaction. Rows for other dates/buckets
+    are untouched, so dated history accumulates. An empty `ranked` writes zero rows
+    after the delete (the supported empty-lane state)."""
+    conn.execute(
+        "DELETE FROM rankings WHERE run_date = ? AND bucket = ?",
+        (run_date, bucket),
+    )
+    conn.executemany(
+        "INSERT INTO rankings (run_date, bucket, rank, video_id, metric_value, "
+        "captured_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (run_date, bucket, rank, video_id, metric_value, captured_at)
+            for rank, (video_id, metric_value) in enumerate(ranked, start=1)
+        ],
+    )
+
+
 @contextmanager
 def transaction(conn: sqlite3.Connection):
     """Run a write-phase atomically: commit on success, roll back on any

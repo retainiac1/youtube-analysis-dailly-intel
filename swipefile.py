@@ -37,8 +37,11 @@ from config import (
     SEARCH_RELEVANCE_LANGUAGE,
     SHORT_MAX_SECONDS,
     STATE_FILE,
+    TOP_N,
+    VALID_BUCKETS,
     VIDEOS_QUOTA_COST,
     ConfigError,
+    get_published_after,
     now_local_iso,
     validate_config,
 )
@@ -507,6 +510,83 @@ def persist_snapshots(conn, run_id: int, snapshot_args, captured_at: str) -> Non
                                view_count, like_count, comment_count)
 
 
+# --- Rankings (Phase 3) ------------------------------------------------------
+
+def rank_sort_key(row: dict) -> tuple:
+    """Total-order ranking key: views_to_subs_ratio desc, then view_count desc,
+    then video_id asc. The final video_id tiebreak makes the order fully
+    deterministic even when both metrics tie, so re-runs on identical data
+    produce identical rankings."""
+    return (-row["views_to_subs_ratio"], -(row["view_count"] or 0), row["video_id"])
+
+
+def compute_rankings(pool: list[dict], valid_buckets: set[str],
+                     top_n: int) -> dict[str, list[tuple[str, float]]]:
+    """Compute the top-`top_n` ranking for every lane from the tracked pool.
+
+    `pool` rows are dicts with `video_id`, `buckets` (pipe-joined sorted set),
+    `views_to_subs_ratio`, and `view_count`. Rows whose `views_to_subs_ratio` is
+    None (hidden/missing counts) are excluded from ranking. Returns a dict keyed
+    by every bucket in `valid_buckets` plus 'overall', each mapping to an ordered
+    list of (video_id, views_to_subs_ratio) of length <= top_n. A lane with no
+    qualifying videos maps to an empty list (the key is always present)."""
+    eligible = [row for row in pool if row["views_to_subs_ratio"] is not None]
+
+    def lane(rows: list[dict]) -> list[tuple[str, float]]:
+        ranked = sorted(rows, key=rank_sort_key)[:top_n]
+        return [(row["video_id"], row["views_to_subs_ratio"]) for row in ranked]
+
+    rankings = {"overall": lane(eligible)}
+    for bucket in valid_buckets:
+        members = [row for row in eligible if bucket in row["buckets"].split("|")]
+        rankings[bucket] = lane(members)
+    return rankings
+
+
+def _rank_phase(conn, rankings: dict[str, list[tuple[str, float]]],
+                run_date: str, captured_at: str) -> None:
+    """Replace every lane's rankings for `run_date` in one transaction. Logs each
+    lane's row count (including empty lanes). Raises on DB failure so the caller
+    can mark the run partial without losing already-persisted videos."""
+    with db.transaction(conn):
+        for bucket, ranked in rankings.items():
+            db.replace_rankings(conn, run_date, bucket, ranked, captured_at)
+            print(f"  ranked {bucket}: {len(ranked)} rows", file=sys.stderr)
+
+
+def within_window(published_at: str, cutoff_dt: datetime) -> bool:
+    """Return whether `published_at` (an RFC3339 API timestamp) is at or after
+    `cutoff_dt`. Both sides are compared as aware datetimes (instants), never as
+    strings — so fractional seconds or an offset form at the boundary are handled
+    correctly. An unparseable timestamp returns False (excluded)."""
+    try:
+        published_dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return published_dt >= cutoff_dt
+
+
+def eligible_pool(rows: list[dict], cutoff_dt: datetime) -> list[dict]:
+    """Filter the fetched pool to videos published within the window (published_at
+    >= cutoff_dt), comparing instants via within_window. Rows with an unparseable
+    published_at are dropped and logged. Null-metric exclusion is NOT done here —
+    that stays in compute_rankings."""
+    kept = []
+    for row in rows:
+        if within_window(row["published_at"], cutoff_dt):
+            kept.append(row)
+        else:
+            published_at = row.get("published_at")
+            # Distinguish a parse failure (drop + log) from simply being old.
+            try:
+                datetime.fromisoformat((published_at or "").replace("Z", "+00:00"))
+            except (ValueError, TypeError, AttributeError):
+                print(f"WARNING: unparseable published_at {published_at!r} for "
+                      f"video {row.get('video_id')!r}, excluded from ranking",
+                      file=sys.stderr)
+    return kept
+
+
 def _print_dry_run() -> None:
     """Print the planned queries and estimated quota cost without making any API
     calls (the --dry-run path). Output goes to stderr."""
@@ -722,6 +802,23 @@ def main() -> None:
         persist_partial = _persist_all(
             conn, run_id, video_records, channel_records, snapshot_args, now
         )
+
+        # Recompute all three rankings from the persisted pool (DB-first so a
+        # later --refresh can reuse this same path). A failure here is non-fatal:
+        # persisted videos are kept and the run is marked partial.
+        try:
+            cutoff_dt = datetime.fromisoformat(
+                get_published_after().replace("Z", "+00:00")
+            )
+            pool = eligible_pool(db.fetch_ranking_pool(conn), cutoff_dt)
+            rankings = compute_rankings(pool, VALID_BUCKETS, TOP_N)
+            run_date = now[:10]  # Eastern calendar date (offset never shifts it)
+            db.run_with_db_retry(
+                lambda: _rank_phase(conn, rankings, run_date, now)
+            )
+        except Exception as e:
+            persist_partial = True
+            print(f"WARNING: ranking phase failed, continuing: {e}", file=sys.stderr)
 
         if quota_aborted:
             status = "quota_exceeded"
