@@ -1,0 +1,692 @@
+import argparse
+import csv
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
+
+import db
+from config import (
+    BLOCKED_CATEGORY_IDS,
+    CHANNEL_BATCH_SIZE,
+    CHANNELS_QUOTA_COST,
+    COMMENTS_PER_VIDEO,
+    COMMENTS_QUOTA_COST,
+    COMMENTS_SHEET_COLUMNS,
+    CSV_COLUMNS,
+    DB_PATH,
+    MIN_VIEWS,
+    OUTPUT_CSV,
+    OUTPUT_XLSX_BASE,
+    PUBLISHED_AFTER,
+    PUBLISHED_BEFORE,
+    RESULTS_PER_QUERY,
+    SEARCH_QUERIES,
+    SEARCH_QUOTA_COST,
+    SEARCH_RELEVANCE_LANGUAGE,
+    SHORT_MAX_SECONDS,
+    STATE_FILE,
+    VIDEOS_QUOTA_COST,
+    ConfigError,
+    now_local_iso,
+    validate_config,
+)
+
+THUMBNAIL_PRIORITY = ["maxres", "standard", "high", "medium", "default"]
+
+
+def build_youtube_client(api_key: str):
+    return build("youtube", "v3", developerKey=api_key)
+
+
+def search_videos(youtube, query: str) -> list[str]:
+    params = {
+        "q": query,
+        "type": "video",
+        "videoDuration": "short",
+        "publishedAfter": PUBLISHED_AFTER,
+        "order": "viewCount",
+        "maxResults": RESULTS_PER_QUERY,
+        "part": "snippet",
+        "relevanceLanguage": SEARCH_RELEVANCE_LANGUAGE,
+    }
+    if PUBLISHED_BEFORE:
+        params["publishedBefore"] = PUBLISHED_BEFORE
+
+    response = youtube.search().list(**params).execute()
+    return [item["id"]["videoId"] for item in response.get("items", [])]
+
+
+def fetch_video_details(youtube, video_ids: list[str]) -> list[dict]:
+    if not video_ids:
+        return []
+    response = youtube.videos().list(
+        id=",".join(video_ids),
+        part="snippet,statistics,contentDetails,status,topicDetails",
+    ).execute()
+    return response.get("items", [])
+
+
+def parse_duration(iso_duration: str) -> int:
+    match = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso_duration)
+    if not match:
+        return 0
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def filter_videos(videos: list[dict], min_views: int, max_duration: int) -> list[dict]:
+    kept = []
+    for video in videos:
+        status = video.get("status", {})
+        if status.get("madeForKids", False):
+            continue
+
+        category_id = video["snippet"].get("categoryId", "")
+        if category_id in BLOCKED_CATEGORY_IDS:
+            continue
+
+        lang = video["snippet"].get("defaultAudioLanguage", "")
+        if lang and not lang.startswith("en"):
+            continue
+
+        duration = parse_duration(video["contentDetails"]["duration"])
+        views = int(video["statistics"].get("viewCount", 0))
+        if duration <= max_duration and views >= min_views:
+            kept.append(video)
+    return kept
+
+
+def best_thumbnail(thumbnails: dict) -> str:
+    for key in THUMBNAIL_PRIORITY:
+        if key in thumbnails:
+            return thumbnails[key]["url"]
+    return ""
+
+
+def fetch_channel_details(youtube, channel_ids: list[str], quota_counter: list[int]) -> dict[str, dict]:
+    channel_map: dict[str, dict] = {}
+    for i in range(0, len(channel_ids), CHANNEL_BATCH_SIZE):
+        batch = channel_ids[i:i + CHANNEL_BATCH_SIZE]
+        response = api_call_with_retry(
+            lambda b=batch: youtube.channels().list(
+                id=",".join(b),
+                part="snippet,statistics,brandingSettings",
+            ).execute(),
+            quota_counter,
+            CHANNELS_QUOTA_COST,
+        )
+        if response is None:
+            break
+        for ch in response.get("items", []):
+            ch_stats = ch.get("statistics", {})
+            ch_snippet = ch.get("snippet", {})
+            ch_branding = ch.get("brandingSettings", {}).get("channel", {})
+            channel_map[ch["id"]] = {
+                "subscriber_count": ch_stats.get("subscriberCount", "0"),
+                "channel_video_count": ch_stats.get("videoCount", "0"),
+                "channel_total_views": ch_stats.get("viewCount", "0"),
+                "channel_created_date": ch_snippet.get("publishedAt", "")[:10],
+                "channel_country": ch_branding.get("country", ch_snippet.get("country", "")),
+                "channel_keywords": ch_branding.get("keywords", ""),
+            }
+    return channel_map
+
+
+def fetch_top_comments(youtube, video_id: str, quota_counter: list[int]) -> str:
+    response = api_call_with_retry(
+        lambda: youtube.commentThreads().list(
+            part="snippet",
+            videoId=video_id,
+            maxResults=COMMENTS_PER_VIDEO,
+            order="relevance",
+            textFormat="plainText",
+        ).execute(),
+        quota_counter,
+        COMMENTS_QUOTA_COST,
+    )
+    if response is None:
+        return ""
+
+    comments = []
+    for item in response.get("items", []):
+        top = item["snippet"]["topLevelComment"]["snippet"]
+        author = top.get("authorDisplayName", "Unknown")
+        text = top.get("textDisplay", "").replace("|", "/").replace("\n", " ")[:200]
+        likes = top.get("likeCount", 0)
+        comments.append(f"{author}: {text} ({likes})")
+    return "|".join(comments)
+
+
+def format_video_row(video: dict, matched_queries: list[str],
+                     channel_info: dict, top_comments_str: str) -> dict:
+    snippet = video["snippet"]
+    stats = video["statistics"]
+    content = video["contentDetails"]
+    status = video.get("status", {})
+    topics = video.get("topicDetails", {})
+
+    published = snippet["publishedAt"][:10]
+    description = snippet.get("description", "")[:500]
+    video_views = int(stats.get("viewCount", 0))
+    sub_count = int(channel_info.get("subscriber_count", 0))
+
+    raw_topics = topics.get("topicCategories", [])
+    topic_names = [url.rstrip("/").split("/")[-1].replace("_", " ") for url in raw_topics]
+
+    return {
+        "social_media": "YouTube Shorts",
+        "hook": "",
+        "first_10_sec": "",
+        "format": "Short",
+        "date": published,
+        "likes": int(stats.get("likeCount", 0)),
+        "saves": "",
+        "views": video_views,
+        "thumbnail": best_thumbnail(snippet.get("thumbnails", {})),
+        "link": f"https://youtube.com/shorts/{video['id']}",
+        "title": snippet["title"],
+        "description": description,
+        "channel": snippet["channelTitle"],
+        "channel_id": snippet["channelId"],
+        "subscriber_count": sub_count,
+        "channel_video_count": int(channel_info.get("channel_video_count", 0)),
+        "channel_total_views": int(channel_info.get("channel_total_views", 0)),
+        "channel_created_date": channel_info.get("channel_created_date", ""),
+        "channel_country": channel_info.get("channel_country", ""),
+        "channel_keywords": channel_info.get("channel_keywords", ""),
+        "views_to_subs_ratio": round(video_views / max(sub_count, 1), 2),
+        "category_id": snippet.get("categoryId", ""),
+        "audio_language": snippet.get("defaultAudioLanguage", ""),
+        "definition": content.get("definition", ""),
+        "has_captions": content.get("caption", "false") == "true",
+        "made_for_kids": status.get("madeForKids", False),
+        "tags": "|".join(snippet.get("tags", [])),
+        "topic_categories": "|".join(topic_names),
+        "top_comments": top_comments_str,
+        "duration_seconds": parse_duration(content["duration"]),
+        "matched_queries": "|".join(matched_queries),
+    }
+
+
+def dedupe_videos(all_results: list[tuple[str, dict]]) -> tuple[dict[str, dict], dict[str, list[str]]]:
+    seen: dict[str, dict] = {}
+    query_map: dict[str, list[str]] = {}
+
+    for query, video in all_results:
+        vid = video["id"]
+        if vid not in seen:
+            seen[vid] = video
+            query_map[vid] = [query]
+        else:
+            if query not in query_map[vid]:
+                query_map[vid].append(query)
+
+    return seen, query_map
+
+
+def write_csv(rows: list[dict], output_path: str) -> None:
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_xlsx(rows: list[dict], output_path: str, seen_videos: dict[str, dict],
+               comments_data: dict[str, str]) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Swipe File"
+
+    hyperlink_font = Font(color="0563C1", underline="single")
+
+    for col_idx, col_name in enumerate(CSV_COLUMNS, start=1):
+        ws.cell(row=1, column=col_idx, value=col_name)
+
+    thumbnail_col = CSV_COLUMNS.index("thumbnail") + 1
+    link_col = CSV_COLUMNS.index("link") + 1
+    url_columns = {thumbnail_col, link_col}
+
+    for row_idx, row_data in enumerate(rows, start=2):
+        for col_idx, col_name in enumerate(CSV_COLUMNS, start=1):
+            value = row_data.get(col_name, "")
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            if col_idx in url_columns and value:
+                cell.hyperlink = value
+                cell.font = hyperlink_font
+
+    ws.freeze_panes = "A2"
+
+    last_col = get_column_letter(len(CSV_COLUMNS))
+    table_ref = f"A1:{last_col}{len(rows) + 1}"
+    table = Table(displayName="youtube_export", ref=table_ref)
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium9",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws.add_table(table)
+
+    # Top Comments sheet
+    cs = wb.create_sheet("Top Comments")
+    for col_idx, col_name in enumerate(COMMENTS_SHEET_COLUMNS, start=1):
+        cs.cell(row=1, column=col_idx, value=col_name)
+
+    comment_row = 2
+    for vid, video in seen_videos.items():
+        raw = comments_data.get(vid, "")
+        if not raw:
+            continue
+        title = video["snippet"]["title"]
+        for rank, entry in enumerate(raw.split("|"), start=1):
+            paren_idx = entry.rfind(" (")
+            if paren_idx != -1:
+                author_text = entry[:paren_idx]
+                likes_str = entry[paren_idx + 2:].rstrip(")")
+                colon_idx = author_text.find(": ")
+                if colon_idx != -1:
+                    author = author_text[:colon_idx]
+                    text = author_text[colon_idx + 2:]
+                else:
+                    author = ""
+                    text = author_text
+            else:
+                author = ""
+                text = entry
+                likes_str = "0"
+
+            cs.cell(row=comment_row, column=1, value=vid)
+            cs.cell(row=comment_row, column=2, value=title)
+            cs.cell(row=comment_row, column=3, value=rank)
+            cs.cell(row=comment_row, column=4, value=author)
+            cs.cell(row=comment_row, column=5, value=text)
+            cs.cell(row=comment_row, column=6, value=int(likes_str) if likes_str.isdigit() else 0)
+            comment_row += 1
+
+    cs.freeze_panes = "A2"
+
+    if comment_row > 2:
+        cs_last_col = get_column_letter(len(COMMENTS_SHEET_COLUMNS))
+        cs_ref = f"A1:{cs_last_col}{comment_row - 1}"
+        cs_table = Table(displayName="top_comments", ref=cs_ref)
+        cs_table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium9",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        cs.add_table(cs_table)
+
+    wb.save(output_path)
+
+
+def load_state() -> dict:
+    path = Path(STATE_FILE)
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_state(state: dict) -> None:
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def clear_state() -> None:
+    path = Path(STATE_FILE)
+    if path.exists():
+        path.unlink()
+
+
+def api_call_with_retry(call_fn, quota_counter: list[int], cost: int):
+    for attempt in range(2):
+        try:
+            result = call_fn()
+            quota_counter[0] += cost
+            return result
+        except HttpError as e:
+            reason = ""
+            if e.error_details:
+                reason = e.error_details[0].get("reason", "")
+
+            if reason == "keyInvalid" or e.resp.status == 400:
+                print(f"ERROR: Invalid API key. {e}", file=sys.stderr)
+                sys.exit(1)
+
+            if reason == "quotaExceeded":
+                print(f"ERROR: Quota exhausted after {quota_counter[0]} units. {e}", file=sys.stderr)
+                return None
+
+            if reason in ("commentsDisabled", "forbidden", "videoNotFound"):
+                return None
+
+            if e.resp.status == 429 and attempt == 0:
+                print("Rate limited, retrying in 5s...", file=sys.stderr)
+                time.sleep(5)
+                continue
+
+            print(f"ERROR: API error: {e}", file=sys.stderr)
+            return None
+        except (ConnectionError, TimeoutError) as e:
+            if attempt == 0:
+                print(f"Network error, retrying in 2s... ({e})", file=sys.stderr)
+                time.sleep(2)
+                continue
+            print(f"ERROR: Network failure: {e}", file=sys.stderr)
+            return None
+    return None
+
+
+def bucket_union(matched_queries: list[str], q_to_bucket: dict[str, str]) -> str:
+    """Return the '|'-joined sorted set of buckets a video qualifies for, based on
+    the queries it matched (e.g. 'habit', or 'habit|health' for a video that hit
+    both a habit and a health query)."""
+    buckets = {q_to_bucket[q] for q in matched_queries if q in q_to_bucket}
+    return "|".join(sorted(buckets))
+
+
+def build_video_record(video: dict, matched_queries: list[str], buckets: str,
+                       channel_info: dict, top_comments: str) -> dict:
+    """Map a YouTube videos.list item to the `videos` API-owned columns.
+
+    Defensive per the build plan: missing view/like/comment counts become None
+    (stored as-is, excluded from ratios), and all division is guarded so a video
+    published today (0 days) or a hidden subscriber count cannot raise."""
+    snippet = video.get("snippet", {})
+    stats = video.get("statistics", {})
+    content = video.get("contentDetails", {})
+    status = video.get("status", {})
+    topics = video.get("topicDetails", {})
+
+    duration_seconds = parse_duration(content.get("duration", ""))
+    raw_topics = topics.get("topicCategories", [])
+    topic_names = [url.rstrip("/").split("/")[-1].replace("_", " ") for url in raw_topics]
+
+    def _int_or_none(key: str):
+        value = stats.get(key)
+        return int(value) if value is not None else None
+
+    view_count = _int_or_none("viewCount")
+    like_count = _int_or_none("likeCount")
+    comment_count = _int_or_none("commentCount")
+
+    sub_count = int(channel_info.get("subscriber_count", 0) or 0)
+    views_to_subs_ratio = (
+        round(view_count / max(sub_count, 1), 2) if view_count is not None else None
+    )
+
+    views_per_day = None
+    if view_count is not None:
+        try:
+            published_dt = datetime.fromisoformat(
+                snippet.get("publishedAt", "").replace("Z", "+00:00")
+            )
+            days = max((datetime.now(timezone.utc) - published_dt).days, 1)
+            views_per_day = round(view_count / days, 2)
+        except (ValueError, TypeError):
+            views_per_day = None
+
+    return {
+        "video_id": video["id"],
+        "title": snippet.get("title", ""),
+        "channel_id": snippet.get("channelId", ""),
+        "channel_title": snippet.get("channelTitle", ""),
+        "published_at": snippet.get("publishedAt", ""),
+        "duration_seconds": duration_seconds,
+        "is_short": 1 if duration_seconds <= SHORT_MAX_SECONDS else 0,
+        "link": f"https://youtube.com/shorts/{video['id']}",
+        "thumbnail_url": best_thumbnail(snippet.get("thumbnails", {})),
+        "description": snippet.get("description", "")[:500],
+        "category_id": snippet.get("categoryId", ""),
+        "audio_language": snippet.get("defaultAudioLanguage", ""),
+        "definition": content.get("definition", ""),
+        "has_captions": 1 if content.get("caption", "false") == "true" else 0,
+        "made_for_kids": 1 if status.get("madeForKids", False) else 0,
+        "tags": "|".join(snippet.get("tags", [])),
+        "topic_categories": "|".join(topic_names),
+        "top_comments": top_comments,
+        "matched_queries": "|".join(matched_queries),
+        "buckets": buckets,
+        "view_count": view_count,
+        "like_count": like_count,
+        "comment_count": comment_count,
+        "views_to_subs_ratio": views_to_subs_ratio,
+        "views_per_day": views_per_day,
+    }
+
+
+def build_channel_record(channel_id: str, info: dict) -> dict:
+    """Map a fetch_channel_details entry to the `channels` columns."""
+    return {
+        "channel_id": channel_id,
+        "subscriber_count": int(info.get("subscriber_count", 0) or 0),
+        "channel_video_count": int(info.get("channel_video_count", 0) or 0),
+        "channel_total_views": int(info.get("channel_total_views", 0) or 0),
+        "channel_created_date": info.get("channel_created_date", ""),
+        "channel_country": info.get("channel_country", ""),
+        "channel_keywords": info.get("channel_keywords", ""),
+    }
+
+
+def persist_videos(conn, records: list[dict], now: str) -> None:
+    """Upsert all video records in one transaction (rolls back on error)."""
+    with db.transaction(conn):
+        for record in records:
+            db.upsert_video(conn, record, now)
+
+
+def persist_channels(conn, records: list[dict], now: str) -> None:
+    """Upsert all channel records in one transaction (rolls back on error)."""
+    with db.transaction(conn):
+        for record in records:
+            db.upsert_channel(conn, record, now)
+
+
+def persist_snapshots(conn, run_id: int, snapshot_args, captured_at: str) -> None:
+    """Append one stats snapshot per video for this run, in one transaction."""
+    with db.transaction(conn):
+        for video_id, view_count, like_count, comment_count in snapshot_args:
+            db.insert_snapshot(conn, run_id, video_id, captured_at,
+                               view_count, like_count, comment_count)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="YouTube Habits Swipe File Builder")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print planned queries and estimated quota cost without making API calls")
+    args = parser.parse_args()
+
+    total_queries = len(SEARCH_QUERIES)
+    estimated_search = total_queries * (SEARCH_QUOTA_COST + VIDEOS_QUOTA_COST)
+    estimated_channels = 2 * CHANNELS_QUOTA_COST
+    estimated_comments = 75 * COMMENTS_QUOTA_COST
+    estimated_quota = estimated_search + estimated_channels + estimated_comments
+
+    if args.dry_run:
+        print("DRY RUN — no API calls will be made\n", file=sys.stderr)
+        for i, entry in enumerate(SEARCH_QUERIES, 1):
+            print(f'  [{i}/{total_queries}] "{entry["q"]}" ({entry["bucket"]})', file=sys.stderr)
+        print(f"\nEstimated quota cost: ~{estimated_quota} units", file=sys.stderr)
+        print(f"  search.list: {total_queries} × {SEARCH_QUOTA_COST} = {total_queries * SEARCH_QUOTA_COST}", file=sys.stderr)
+        print(f"  videos.list: {total_queries} × {VIDEOS_QUOTA_COST} = {total_queries * VIDEOS_QUOTA_COST}", file=sys.stderr)
+        print(f"  channels.list: ~{estimated_channels}", file=sys.stderr)
+        print(f"  commentThreads.list: ~{estimated_comments}", file=sys.stderr)
+        print(f"Daily limit: 10,000 units → ~{10_000 // estimated_quota} runs/day", file=sys.stderr)
+        return
+
+    load_dotenv()
+    api_key = os.getenv("YOUTUBE_API_KEY")
+    if not api_key:
+        print("ERROR: YOUTUBE_API_KEY not found in .env", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        validate_config()
+    except ConfigError as e:
+        print(f"ERROR: invalid config: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    db.init_db(DB_PATH)
+    conn = db.get_connection(DB_PATH)
+    run_id = db.start_run(conn, "discover", now_local_iso())
+
+    youtube = build_youtube_client(api_key)
+    quota_used = [0]
+    all_results: list[tuple[str, dict]] = []
+    state = load_state()
+    quota_aborted = False
+    seen_videos: dict[str, dict] = {}
+    status = "failed"
+
+    if "queries" not in state:
+        if any(isinstance(v, list) for v in state.values()):
+            state = {"queries": state, "channels": {}, "comments": {}}
+        else:
+            state = {"queries": {}, "channels": {}, "comments": {}}
+
+    try:
+        # --- Phase A: Search + fetch + filter ---
+        for i, entry in enumerate(SEARCH_QUERIES, 1):
+            q = entry["q"]
+            if q in state["queries"]:
+                cached = state["queries"][q]
+                for video in cached:
+                    all_results.append((q, video))
+                print(f'[{i}/{total_queries}] "{q}": resumed {len(cached)} cached results', file=sys.stderr)
+                continue
+
+            video_ids = api_call_with_retry(
+                lambda qq=q: search_videos(youtube, qq),
+                quota_used,
+                SEARCH_QUOTA_COST,
+            )
+            if video_ids is None:
+                quota_aborted = True
+                break
+
+            details = api_call_with_retry(
+                lambda ids=video_ids: fetch_video_details(youtube, ids),
+                quota_used,
+                VIDEOS_QUOTA_COST,
+            )
+            if details is None:
+                quota_aborted = True
+                break
+
+            kept = filter_videos(details, MIN_VIEWS, SHORT_MAX_SECONDS)
+
+            for video in kept:
+                all_results.append((q, video))
+
+            state["queries"][q] = kept
+            save_state(state)
+
+            print(f'[{i}/{total_queries}] "{q}": fetched {len(video_ids)}, kept {len(kept)} after filters', file=sys.stderr)
+
+        # --- Dedupe ---
+        seen_videos, query_map = dedupe_videos(all_results)
+        print(f"\n{len(seen_videos)} unique videos after dedup", file=sys.stderr)
+
+        # --- Phase B: Channel data ---
+        if not state.get("channels"):
+            unique_channel_ids = list({v["snippet"]["channelId"] for v in seen_videos.values()})
+            print(f"Fetching channel data for {len(unique_channel_ids)} channels...", file=sys.stderr)
+            channel_map = fetch_channel_details(youtube, unique_channel_ids, quota_used)
+            state["channels"] = channel_map
+            save_state(state)
+        else:
+            channel_map = state["channels"]
+            print(f"Resumed {len(channel_map)} cached channels", file=sys.stderr)
+
+        # --- Phase C: Comments ---
+        if "comments" not in state:
+            state["comments"] = {}
+
+        videos_needing_comments = [vid for vid in seen_videos if vid not in state["comments"]]
+        if videos_needing_comments:
+            print(f"Fetching comments for {len(videos_needing_comments)} videos...", file=sys.stderr)
+        for idx, vid in enumerate(videos_needing_comments, 1):
+            comments_str = fetch_top_comments(youtube, vid, quota_used)
+            state["comments"][vid] = comments_str
+            if idx % 10 == 0:
+                save_state(state)
+                print(f"  Comments: {idx}/{len(videos_needing_comments)}", file=sys.stderr)
+        if videos_needing_comments:
+            save_state(state)
+
+        # --- Persist to SQLite (replaces per-run CSV/XLSX) ---
+        now = now_local_iso()
+        q_to_bucket = {e["q"]: e["bucket"] for e in SEARCH_QUERIES}
+
+        video_records = []
+        snapshot_args = []
+        for vid, video in seen_videos.items():
+            ch_id = video["snippet"]["channelId"]
+            ch_info = channel_map.get(ch_id, {})
+            comments = state["comments"].get(vid, "")
+            matched = query_map[vid]
+            buckets = bucket_union(matched, q_to_bucket)
+            record = build_video_record(video, matched, buckets, ch_info, comments)
+            video_records.append(record)
+            snapshot_args.append(
+                (vid, record["view_count"], record["like_count"], record["comment_count"])
+            )
+
+        channel_records = [build_channel_record(cid, info) for cid, info in channel_map.items()]
+
+        persist_partial = False
+
+        # Videos are the critical write: a failure here is fatal (rolls back, raises).
+        db.run_with_db_retry(lambda: persist_videos(conn, video_records, now))
+
+        # Channels and snapshots are non-fatal: persist what we have and continue.
+        try:
+            db.run_with_db_retry(lambda: persist_channels(conn, channel_records, now))
+        except Exception as e:
+            persist_partial = True
+            print(f"WARNING: channel persist failed, continuing: {e}", file=sys.stderr)
+
+        try:
+            db.run_with_db_retry(lambda: persist_snapshots(conn, run_id, snapshot_args, now))
+        except Exception as e:
+            persist_partial = True
+            print(f"WARNING: snapshot persist failed, continuing: {e}", file=sys.stderr)
+
+        if quota_aborted:
+            status = "quota_exceeded"
+        elif persist_partial:
+            status = "partial"
+        else:
+            status = "success"
+            clear_state()
+
+        print(f"\nPersisted {len(seen_videos)} videos to {DB_PATH} "
+              f"(run {run_id}, status: {status})", file=sys.stderr)
+        print(f"Quota consumed: {quota_used[0]} units", file=sys.stderr)
+    finally:
+        try:
+            db.finish_run(conn, run_id, now_local_iso(), quota_used[0],
+                          len(seen_videos), status)
+        finally:
+            conn.close()
+
+
+if __name__ == "__main__":
+    main()
