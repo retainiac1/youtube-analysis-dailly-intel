@@ -157,6 +157,28 @@ CHANNEL_COLUMNS = [
 ]
 
 
+def _build_upsert_sql(table: str, key_col: str, api_columns: list[str],
+                      now_columns: list[str], extra_set_clause: str) -> str:
+    """Build an INSERT ... ON CONFLICT DO UPDATE statement for upsert_video and
+    upsert_channel, which share the same shape.
+
+    `key_col` is the conflict target. `api_columns` are bound from the record and
+    refreshed on conflict. `now_columns` are bound to :now on insert only (never
+    in the SET). `extra_set_clause` is appended to the SET clause and carries the
+    table-specific timestamp logic (the video refresh CASE or the channel
+    last_updated_at assignment)."""
+    insert_cols = [key_col] + api_columns + now_columns
+    value_terms = [f":{c}" for c in ([key_col] + api_columns)] + [":now"] * len(now_columns)
+    set_clause = ",\n  ".join(f"{c} = excluded.{c}" for c in api_columns)
+    return f"""
+        INSERT INTO {table} ({", ".join(insert_cols)})
+        VALUES ({", ".join(value_terms)})
+        ON CONFLICT({key_col}) DO UPDATE SET
+          {set_clause},
+          {extra_set_clause}
+    """
+
+
 def upsert_video(conn: sqlite3.Connection, record: dict, now: str) -> None:
     """Insert or update one video, enforcing the user-column contract.
 
@@ -165,38 +187,29 @@ def upsert_video(conn: sqlite3.Connection, record: dict, now: str) -> None:
     API-owned columns are updated; first_seen_at is preserved (never in the SET)
     and last_api_refresh_at advances to `now` only when some API field actually
     changed. User columns are never named here, so they cannot be overwritten."""
-    insert_cols = ["video_id"] + VIDEO_API_COLUMNS + ["first_seen_at", "last_api_refresh_at"]
-    value_terms = [f":{c}" for c in (["video_id"] + VIDEO_API_COLUMNS)] + [":now", ":now"]
-    set_clause = ",\n  ".join(f"{c} = excluded.{c}" for c in VIDEO_API_COLUMNS)
     # Null-safe comparison: IS NOT handles NULL counts correctly (unlike <>).
     diff_clause = "\n     OR ".join(
         f"videos.{c} IS NOT excluded.{c}" for c in VIDEO_API_COLUMNS
     )
-    sql = f"""
-        INSERT INTO videos ({", ".join(insert_cols)})
-        VALUES ({", ".join(value_terms)})
-        ON CONFLICT(video_id) DO UPDATE SET
-          {set_clause},
-          last_api_refresh_at = CASE
-            WHEN {diff_clause}
-            THEN :now ELSE videos.last_api_refresh_at END
-    """
+    refresh_clause = (
+        "last_api_refresh_at = CASE\n"
+        f"            WHEN {diff_clause}\n"
+        "            THEN :now ELSE videos.last_api_refresh_at END"
+    )
+    sql = _build_upsert_sql(
+        "videos", "video_id", VIDEO_API_COLUMNS,
+        ["first_seen_at", "last_api_refresh_at"], refresh_clause,
+    )
     conn.execute(sql, {**record, "now": now})
 
 
 def upsert_channel(conn: sqlite3.Connection, record: dict, now: str) -> None:
     """Insert or update one channel (all fields API-owned). `record` must hold
     `channel_id` plus every key in CHANNEL_COLUMNS; last_updated_at is set to `now`."""
-    insert_cols = ["channel_id"] + CHANNEL_COLUMNS + ["last_updated_at"]
-    value_terms = [f":{c}" for c in (["channel_id"] + CHANNEL_COLUMNS)] + [":now"]
-    set_clause = ",\n  ".join(f"{c} = excluded.{c}" for c in CHANNEL_COLUMNS)
-    sql = f"""
-        INSERT INTO channels ({", ".join(insert_cols)})
-        VALUES ({", ".join(value_terms)})
-        ON CONFLICT(channel_id) DO UPDATE SET
-          {set_clause},
-          last_updated_at = :now
-    """
+    sql = _build_upsert_sql(
+        "channels", "channel_id", CHANNEL_COLUMNS,
+        ["last_updated_at"], "last_updated_at = :now",
+    )
     conn.execute(sql, {**record, "now": now})
 
 

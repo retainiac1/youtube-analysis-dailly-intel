@@ -1,3 +1,4 @@
+import sys
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -140,7 +141,6 @@ def validate_config(cfg: object | None = None) -> None:
     defaults to this module; pass any object exposing the keys as attributes
     (e.g. a SimpleNamespace) to validate an alternate configuration."""
     if cfg is None:
-        import sys
         cfg = sys.modules[__name__]
 
     for key, expected_type in REQUIRED_KEYS.items():

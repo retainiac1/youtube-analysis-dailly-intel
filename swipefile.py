@@ -507,28 +507,180 @@ def persist_snapshots(conn, run_id: int, snapshot_args, captured_at: str) -> Non
                                view_count, like_count, comment_count)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="YouTube Habits Swipe File Builder")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print planned queries and estimated quota cost without making API calls")
-    args = parser.parse_args()
-
+def _print_dry_run() -> None:
+    """Print the planned queries and estimated quota cost without making any API
+    calls (the --dry-run path). Output goes to stderr."""
     total_queries = len(SEARCH_QUERIES)
     estimated_search = total_queries * (SEARCH_QUOTA_COST + VIDEOS_QUOTA_COST)
     estimated_channels = 2 * CHANNELS_QUOTA_COST
     estimated_comments = 75 * COMMENTS_QUOTA_COST
     estimated_quota = estimated_search + estimated_channels + estimated_comments
 
+    print("DRY RUN — no API calls will be made\n", file=sys.stderr)
+    for i, entry in enumerate(SEARCH_QUERIES, 1):
+        print(f'  [{i}/{total_queries}] "{entry["q"]}" ({entry["bucket"]})', file=sys.stderr)
+    print(f"\nEstimated quota cost: ~{estimated_quota} units", file=sys.stderr)
+    print(f"  search.list: {total_queries} × {SEARCH_QUOTA_COST} = {total_queries * SEARCH_QUOTA_COST}", file=sys.stderr)
+    print(f"  videos.list: {total_queries} × {VIDEOS_QUOTA_COST} = {total_queries * VIDEOS_QUOTA_COST}", file=sys.stderr)
+    print(f"  channels.list: ~{estimated_channels}", file=sys.stderr)
+    print(f"  commentThreads.list: ~{estimated_comments}", file=sys.stderr)
+    print(f"Daily limit: 10,000 units → ~{10_000 // estimated_quota} runs/day", file=sys.stderr)
+
+
+def _normalize_state(state: dict) -> dict:
+    """Coerce a loaded state file into the current {queries, channels, comments}
+    shape, upgrading a legacy flat {query: [videos]} state in place."""
+    if "queries" in state:
+        return state
+    if any(isinstance(v, list) for v in state.values()):
+        return {"queries": state, "channels": {}, "comments": {}}
+    return {"queries": {}, "channels": {}, "comments": {}}
+
+
+def _run_search_phase(youtube, state: dict, quota_used: list[int]
+                      ) -> tuple[list[tuple[str, dict]], bool]:
+    """Phase A: search, fetch, and filter each query, resuming cached results.
+
+    Returns the (query, video) pairs collected and whether the run aborted early
+    because quota was exhausted. Newly fetched results are cached into `state`."""
+    total_queries = len(SEARCH_QUERIES)
+    all_results: list[tuple[str, dict]] = []
+    quota_aborted = False
+
+    for i, entry in enumerate(SEARCH_QUERIES, 1):
+        q = entry["q"]
+        if q in state["queries"]:
+            cached = state["queries"][q]
+            for video in cached:
+                all_results.append((q, video))
+            print(f'[{i}/{total_queries}] "{q}": resumed {len(cached)} cached results', file=sys.stderr)
+            continue
+
+        video_ids = api_call_with_retry(
+            lambda qq=q: search_videos(youtube, qq),
+            quota_used,
+            SEARCH_QUOTA_COST,
+        )
+        if video_ids is None:
+            quota_aborted = True
+            break
+
+        details = api_call_with_retry(
+            lambda ids=video_ids: fetch_video_details(youtube, ids),
+            quota_used,
+            VIDEOS_QUOTA_COST,
+        )
+        if details is None:
+            quota_aborted = True
+            break
+
+        kept = filter_videos(details, MIN_VIEWS, SHORT_MAX_SECONDS)
+
+        for video in kept:
+            all_results.append((q, video))
+
+        state["queries"][q] = kept
+        save_state(state)
+
+        print(f'[{i}/{total_queries}] "{q}": fetched {len(video_ids)}, kept {len(kept)} after filters', file=sys.stderr)
+
+    return all_results, quota_aborted
+
+
+def _run_channel_phase(youtube, state: dict, seen_videos: dict[str, dict],
+                       quota_used: list[int]) -> dict[str, dict]:
+    """Phase B: fetch channel data for every distinct channel, resuming a cached
+    channel map from `state` when present."""
+    if not state.get("channels"):
+        unique_channel_ids = list({v["snippet"]["channelId"] for v in seen_videos.values()})
+        print(f"Fetching channel data for {len(unique_channel_ids)} channels...", file=sys.stderr)
+        channel_map = fetch_channel_details(youtube, unique_channel_ids, quota_used)
+        state["channels"] = channel_map
+        save_state(state)
+    else:
+        channel_map = state["channels"]
+        print(f"Resumed {len(channel_map)} cached channels", file=sys.stderr)
+    return channel_map
+
+
+def _run_comment_phase(youtube, state: dict, seen_videos: dict[str, dict],
+                       quota_used: list[int]) -> None:
+    """Phase C: fetch top comments for every video missing them, caching each
+    result into `state` (and periodically persisting it)."""
+    if "comments" not in state:
+        state["comments"] = {}
+
+    videos_needing_comments = [vid for vid in seen_videos if vid not in state["comments"]]
+    if videos_needing_comments:
+        print(f"Fetching comments for {len(videos_needing_comments)} videos...", file=sys.stderr)
+    for idx, vid in enumerate(videos_needing_comments, 1):
+        comments_str = fetch_top_comments(youtube, vid, quota_used)
+        state["comments"][vid] = comments_str
+        if idx % 10 == 0:
+            save_state(state)
+            print(f"  Comments: {idx}/{len(videos_needing_comments)}", file=sys.stderr)
+    if videos_needing_comments:
+        save_state(state)
+
+
+def _build_records(state: dict, seen_videos: dict[str, dict],
+                   query_map: dict[str, list[str]], channel_map: dict[str, dict]
+                   ) -> tuple[list[dict], list[tuple], list[dict]]:
+    """Assemble the video records, per-video snapshot args, and channel records
+    to persist from the deduped videos and fetched channel/comment data."""
+    q_to_bucket = {e["q"]: e["bucket"] for e in SEARCH_QUERIES}
+
+    video_records = []
+    snapshot_args = []
+    for vid, video in seen_videos.items():
+        ch_id = video["snippet"]["channelId"]
+        ch_info = channel_map.get(ch_id, {})
+        comments = state["comments"].get(vid, "")
+        matched = query_map[vid]
+        buckets = bucket_union(matched, q_to_bucket)
+        record = build_video_record(video, matched, buckets, ch_info, comments)
+        video_records.append(record)
+        snapshot_args.append(
+            (vid, record["view_count"], record["like_count"], record["comment_count"])
+        )
+
+    channel_records = [build_channel_record(cid, info) for cid, info in channel_map.items()]
+    return video_records, snapshot_args, channel_records
+
+
+def _persist_all(conn, run_id: int, video_records: list[dict],
+                 channel_records: list[dict], snapshot_args, now: str) -> bool:
+    """Persist videos (fatal on failure), then channels and snapshots (non-fatal:
+    a failure is warned and skipped). Returns whether any non-fatal write failed."""
+    persist_partial = False
+
+    # Videos are the critical write: a failure here is fatal (rolls back, raises).
+    db.run_with_db_retry(lambda: persist_videos(conn, video_records, now))
+
+    # Channels and snapshots are non-fatal: persist what we have and continue.
+    try:
+        db.run_with_db_retry(lambda: persist_channels(conn, channel_records, now))
+    except Exception as e:
+        persist_partial = True
+        print(f"WARNING: channel persist failed, continuing: {e}", file=sys.stderr)
+
+    try:
+        db.run_with_db_retry(lambda: persist_snapshots(conn, run_id, snapshot_args, now))
+    except Exception as e:
+        persist_partial = True
+        print(f"WARNING: snapshot persist failed, continuing: {e}", file=sys.stderr)
+
+    return persist_partial
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="YouTube Habits Swipe File Builder")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print planned queries and estimated quota cost without making API calls")
+    args = parser.parse_args()
+
     if args.dry_run:
-        print("DRY RUN — no API calls will be made\n", file=sys.stderr)
-        for i, entry in enumerate(SEARCH_QUERIES, 1):
-            print(f'  [{i}/{total_queries}] "{entry["q"]}" ({entry["bucket"]})', file=sys.stderr)
-        print(f"\nEstimated quota cost: ~{estimated_quota} units", file=sys.stderr)
-        print(f"  search.list: {total_queries} × {SEARCH_QUOTA_COST} = {total_queries * SEARCH_QUOTA_COST}", file=sys.stderr)
-        print(f"  videos.list: {total_queries} × {VIDEOS_QUOTA_COST} = {total_queries * VIDEOS_QUOTA_COST}", file=sys.stderr)
-        print(f"  channels.list: ~{estimated_channels}", file=sys.stderr)
-        print(f"  commentThreads.list: ~{estimated_comments}", file=sys.stderr)
-        print(f"Daily limit: 10,000 units → ~{10_000 // estimated_quota} runs/day", file=sys.stderr)
+        _print_dry_run()
         return
 
     load_dotenv()
@@ -549,125 +701,27 @@ def main() -> None:
 
     youtube = build_youtube_client(api_key)
     quota_used = [0]
-    all_results: list[tuple[str, dict]] = []
-    state = load_state()
-    quota_aborted = False
     seen_videos: dict[str, dict] = {}
     status = "failed"
-
-    if "queries" not in state:
-        if any(isinstance(v, list) for v in state.values()):
-            state = {"queries": state, "channels": {}, "comments": {}}
-        else:
-            state = {"queries": {}, "channels": {}, "comments": {}}
+    state = _normalize_state(load_state())
 
     try:
-        # --- Phase A: Search + fetch + filter ---
-        for i, entry in enumerate(SEARCH_QUERIES, 1):
-            q = entry["q"]
-            if q in state["queries"]:
-                cached = state["queries"][q]
-                for video in cached:
-                    all_results.append((q, video))
-                print(f'[{i}/{total_queries}] "{q}": resumed {len(cached)} cached results', file=sys.stderr)
-                continue
+        all_results, quota_aborted = _run_search_phase(youtube, state, quota_used)
 
-            video_ids = api_call_with_retry(
-                lambda qq=q: search_videos(youtube, qq),
-                quota_used,
-                SEARCH_QUOTA_COST,
-            )
-            if video_ids is None:
-                quota_aborted = True
-                break
-
-            details = api_call_with_retry(
-                lambda ids=video_ids: fetch_video_details(youtube, ids),
-                quota_used,
-                VIDEOS_QUOTA_COST,
-            )
-            if details is None:
-                quota_aborted = True
-                break
-
-            kept = filter_videos(details, MIN_VIEWS, SHORT_MAX_SECONDS)
-
-            for video in kept:
-                all_results.append((q, video))
-
-            state["queries"][q] = kept
-            save_state(state)
-
-            print(f'[{i}/{total_queries}] "{q}": fetched {len(video_ids)}, kept {len(kept)} after filters', file=sys.stderr)
-
-        # --- Dedupe ---
         seen_videos, query_map = dedupe_videos(all_results)
         print(f"\n{len(seen_videos)} unique videos after dedup", file=sys.stderr)
 
-        # --- Phase B: Channel data ---
-        if not state.get("channels"):
-            unique_channel_ids = list({v["snippet"]["channelId"] for v in seen_videos.values()})
-            print(f"Fetching channel data for {len(unique_channel_ids)} channels...", file=sys.stderr)
-            channel_map = fetch_channel_details(youtube, unique_channel_ids, quota_used)
-            state["channels"] = channel_map
-            save_state(state)
-        else:
-            channel_map = state["channels"]
-            print(f"Resumed {len(channel_map)} cached channels", file=sys.stderr)
+        channel_map = _run_channel_phase(youtube, state, seen_videos, quota_used)
+        _run_comment_phase(youtube, state, seen_videos, quota_used)
 
-        # --- Phase C: Comments ---
-        if "comments" not in state:
-            state["comments"] = {}
-
-        videos_needing_comments = [vid for vid in seen_videos if vid not in state["comments"]]
-        if videos_needing_comments:
-            print(f"Fetching comments for {len(videos_needing_comments)} videos...", file=sys.stderr)
-        for idx, vid in enumerate(videos_needing_comments, 1):
-            comments_str = fetch_top_comments(youtube, vid, quota_used)
-            state["comments"][vid] = comments_str
-            if idx % 10 == 0:
-                save_state(state)
-                print(f"  Comments: {idx}/{len(videos_needing_comments)}", file=sys.stderr)
-        if videos_needing_comments:
-            save_state(state)
-
-        # --- Persist to SQLite (replaces per-run CSV/XLSX) ---
         now = now_local_iso()
-        q_to_bucket = {e["q"]: e["bucket"] for e in SEARCH_QUERIES}
+        video_records, snapshot_args, channel_records = _build_records(
+            state, seen_videos, query_map, channel_map
+        )
 
-        video_records = []
-        snapshot_args = []
-        for vid, video in seen_videos.items():
-            ch_id = video["snippet"]["channelId"]
-            ch_info = channel_map.get(ch_id, {})
-            comments = state["comments"].get(vid, "")
-            matched = query_map[vid]
-            buckets = bucket_union(matched, q_to_bucket)
-            record = build_video_record(video, matched, buckets, ch_info, comments)
-            video_records.append(record)
-            snapshot_args.append(
-                (vid, record["view_count"], record["like_count"], record["comment_count"])
-            )
-
-        channel_records = [build_channel_record(cid, info) for cid, info in channel_map.items()]
-
-        persist_partial = False
-
-        # Videos are the critical write: a failure here is fatal (rolls back, raises).
-        db.run_with_db_retry(lambda: persist_videos(conn, video_records, now))
-
-        # Channels and snapshots are non-fatal: persist what we have and continue.
-        try:
-            db.run_with_db_retry(lambda: persist_channels(conn, channel_records, now))
-        except Exception as e:
-            persist_partial = True
-            print(f"WARNING: channel persist failed, continuing: {e}", file=sys.stderr)
-
-        try:
-            db.run_with_db_retry(lambda: persist_snapshots(conn, run_id, snapshot_args, now))
-        except Exception as e:
-            persist_partial = True
-            print(f"WARNING: snapshot persist failed, continuing: {e}", file=sys.stderr)
+        persist_partial = _persist_all(
+            conn, run_id, video_records, channel_records, snapshot_args, now
+        )
 
         if quota_aborted:
             status = "quota_exceeded"
