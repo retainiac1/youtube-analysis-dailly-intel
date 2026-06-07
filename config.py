@@ -9,6 +9,12 @@ SEARCH_QUERIES = [
     {"q": "atomic habits", "bucket": "habit"},
     {"q": "habit stacking", "bucket": "habit"},
     {"q": "morning routine habits", "bucket": "habit"},
+    {"q": "zone 2 cardio", "bucket": "health"},
+    {"q": "VO2 max", "bucket": "health"},
+    {"q": "strength training over 50", "bucket": "health"},
+    {"q": "high protein", "bucket": "health"},
+    {"q": "longevity habits", "bucket": "health"},
+    {"q": "sleep routine", "bucket": "health"},
 ]
 
 PUBLISHED_AFTER = "2025-09-01T00:00:00Z"
@@ -131,6 +137,21 @@ def now_local_iso() -> str:
     every timestamp written to the DB — Eastern, offset-bearing (DST-correct via
     zoneinfo), never UTC, never naive."""
     return datetime.now(ZoneInfo(LOCAL_TZ)).isoformat(timespec="seconds")
+
+
+def pacific_date(eastern_iso: str | None = None) -> str:
+    """Derive the Pacific (QUOTA_RESET_TZ) calendar date 'YYYY-MM-DD' from an
+    Eastern, offset-bearing timestamp (defaults to now_local_iso()).
+
+    This is the project's ONE Eastern->Pacific conversion. It exists only because
+    Google's API quota resets at midnight Pacific, so quota_ledger is keyed by the
+    Pacific date. The date is always derived by code from a stored Eastern
+    timestamp, never hand-set. The input must carry an offset (it does, coming
+    from now_local_iso() or a DB timestamp), so the conversion is unambiguous;
+    we parse to an aware datetime and astimezone — never compare strings."""
+    src = eastern_iso or now_local_iso()
+    dt = datetime.fromisoformat(src)
+    return dt.astimezone(ZoneInfo(QUOTA_RESET_TZ)).date().isoformat()
 
 
 def validate_config(cfg: object | None = None) -> None:

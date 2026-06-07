@@ -25,13 +25,14 @@ from config import (
     COMMENTS_QUOTA_COST,
     COMMENTS_SHEET_COLUMNS,
     CSV_COLUMNS,
+    DAILY_QUOTA_LIMIT,
     DB_PATH,
     MIN_VIEWS,
     OUTPUT_CSV,
     OUTPUT_XLSX_BASE,
-    PUBLISHED_AFTER,
     PUBLISHED_BEFORE,
     RESULTS_PER_QUERY,
+    SAFETY_BUFFER,
     SEARCH_QUERIES,
     SEARCH_QUOTA_COST,
     SEARCH_RELEVANCE_LANGUAGE,
@@ -43,8 +44,16 @@ from config import (
     ConfigError,
     get_published_after,
     now_local_iso,
+    pacific_date,
     validate_config,
 )
+
+# Rough per-call-count heuristics for the discover quota estimate. They are
+# intentionally approximate (real channel/comment counts are unknown until the
+# pool is fetched); the per-call guard is the real protection. The only hard
+# requirement is that --dry-run and the pre-flight share this one estimate.
+ESTIMATED_CHANNEL_CALLS = 2
+ESTIMATED_COMMENT_CALLS = 75
 
 THUMBNAIL_PRIORITY = ["maxres", "standard", "high", "medium", "default"]
 
@@ -58,7 +67,8 @@ def search_videos(youtube, query: str) -> list[str]:
         "q": query,
         "type": "video",
         "videoDuration": "short",
-        "publishedAfter": PUBLISHED_AFTER,
+        # Rolling window (now - WINDOW_DAYS), the same horizon rankings filter on.
+        "publishedAfter": get_published_after(),
         "order": "viewCount",
         "maxResults": RESULTS_PER_QUERY,
         "part": "snippet",
@@ -120,7 +130,7 @@ def best_thumbnail(thumbnails: dict) -> str:
     return ""
 
 
-def fetch_channel_details(youtube, channel_ids: list[str], quota_counter: list[int]) -> dict[str, dict]:
+def fetch_channel_details(youtube, channel_ids: list[str], budget: "QuotaBudget") -> dict[str, dict]:
     channel_map: dict[str, dict] = {}
     for i in range(0, len(channel_ids), CHANNEL_BATCH_SIZE):
         batch = channel_ids[i:i + CHANNEL_BATCH_SIZE]
@@ -129,7 +139,7 @@ def fetch_channel_details(youtube, channel_ids: list[str], quota_counter: list[i
                 id=",".join(b),
                 part="snippet,statistics,brandingSettings",
             ).execute(),
-            quota_counter,
+            budget,
             CHANNELS_QUOTA_COST,
         )
         if response is None:
@@ -149,7 +159,7 @@ def fetch_channel_details(youtube, channel_ids: list[str], quota_counter: list[i
     return channel_map
 
 
-def fetch_top_comments(youtube, video_id: str, quota_counter: list[int]) -> str:
+def fetch_top_comments(youtube, video_id: str, budget: "QuotaBudget") -> str:
     response = api_call_with_retry(
         lambda: youtube.commentThreads().list(
             part="snippet",
@@ -158,7 +168,7 @@ def fetch_top_comments(youtube, video_id: str, quota_counter: list[int]) -> str:
             order="relevance",
             textFormat="plainText",
         ).execute(),
-        quota_counter,
+        budget,
         COMMENTS_QUOTA_COST,
     )
     if response is None:
@@ -358,11 +368,50 @@ def clear_state() -> None:
         path.unlink()
 
 
-def api_call_with_retry(call_fn, quota_counter: list[int], cost: int):
+class QuotaBudget:
+    """Tracks quota across one run for proactive rate limiting.
+
+    `baseline` is units already used today (Pacific) at run start, so the per-call
+    guard sees total day spend, not just this run's. `run_units` is this run's
+    spend; `flushed_units` is the slice of it already written to quota_ledger
+    (search.list is flushed eagerly for crash durability), so the end-of-run write
+    adds only the remainder. `guard_stopped` records that a call was refused
+    pre-emptively to keep under the cap."""
+
+    def __init__(self, baseline: int, cap: int):
+        self.baseline = baseline
+        self.cap = cap
+        self.run_units = 0
+        self.flushed_units = 0
+        self.guard_stopped = False
+
+    def can_afford(self, cost: int) -> bool:
+        return self.baseline + self.run_units + cost <= self.cap
+
+    def charge(self, cost: int) -> None:
+        self.run_units += cost
+
+    def remaining(self) -> int:
+        return self.cap - self.baseline - self.run_units
+
+    def unflushed(self) -> int:
+        return self.run_units - self.flushed_units
+
+
+def api_call_with_retry(call_fn, budget: QuotaBudget, cost: int):
+    # Per-call guard: refuse proactively if charging this call would exceed the
+    # effective cap. Returns None like the reactive quotaExceeded path, so the
+    # search phase's existing None-handling aborts and persists work gathered.
+    if not budget.can_afford(cost):
+        budget.guard_stopped = True
+        print(f"Quota guard: stopping before a {cost}-unit call "
+              f"(would exceed cap of {budget.cap} units).", file=sys.stderr)
+        return None
+
     for attempt in range(2):
         try:
             result = call_fn()
-            quota_counter[0] += cost
+            budget.charge(cost)
             return result
         except HttpError as e:
             reason = ""
@@ -374,7 +423,7 @@ def api_call_with_retry(call_fn, quota_counter: list[int], cost: int):
                 sys.exit(1)
 
             if reason == "quotaExceeded":
-                print(f"ERROR: Quota exhausted after {quota_counter[0]} units. {e}", file=sys.stderr)
+                print(f"ERROR: Quota exhausted after {budget.run_units} units. {e}", file=sys.stderr)
                 return None
 
             if reason in ("commentsDisabled", "forbidden", "videoNotFound"):
@@ -587,24 +636,125 @@ def eligible_pool(rows: list[dict], cutoff_dt: datetime) -> list[dict]:
     return kept
 
 
-def _print_dry_run() -> None:
+def _recompute_rankings(conn, now: str) -> None:
+    """Recompute and write all three lanes from the persisted pool. Shared by
+    discover and refresh so both rank the same way. `now` is the Eastern timestamp;
+    run_date is its date part (the offset never shifts the calendar date)."""
+    cutoff_dt = datetime.fromisoformat(get_published_after().replace("Z", "+00:00"))
+    pool = eligible_pool(db.fetch_ranking_pool(conn), cutoff_dt)
+    rankings = compute_rankings(pool, VALID_BUCKETS, TOP_N)
+    run_date = now[:10]  # Eastern calendar date
+    db.run_with_db_retry(lambda: _rank_phase(conn, rankings, run_date, now))
+
+
+def _run_refresh(youtube, conn, run_id: int, budget: "QuotaBudget",
+                 now: str) -> tuple[int, bool]:
+    """Refresh mode (cheap, no searches): re-pull videos.list stats for tracked
+    videos in batches of 50, preserving each video's matched_queries / buckets /
+    top_comments from the DB, upsert, write one snapshot per video, and recompute
+    rankings from the refreshed numbers. Returns (videos_refreshed, persist_partial).
+
+    Every videos.list call goes through the budget guard, so a near-cap refresh
+    aborts gracefully rather than nicking the ceiling. videos.list is 1 unit and is
+    flushed to the ledger at run end (no eager flush — refresh has no search.list)."""
+    tracked = db.fetch_videos_for_refresh(conn)
+    if not tracked:
+        print("Refresh: no tracked videos yet — run --discover first.", file=sys.stderr)
+        return 0, False
+
+    by_id = {row["video_id"]: row for row in tracked}
+    subs = db.fetch_channel_subs(conn)
+    ids = list(by_id)
+    print(f"Refresh: re-pulling stats for {len(ids)} videos...", file=sys.stderr)
+
+    video_records: list[dict] = []
+    snapshot_args: list[tuple] = []
+    for i in range(0, len(ids), CHANNEL_BATCH_SIZE):
+        batch = ids[i:i + CHANNEL_BATCH_SIZE]
+        items = api_call_with_retry(
+            lambda b=batch: fetch_video_details(youtube, b),
+            budget,
+            VIDEOS_QUOTA_COST,
+        )
+        if items is None:  # guard or quota stop — persist what we have
+            break
+        for item in items:
+            preserved = by_id.get(item.get("id"))
+            if preserved is None:
+                continue
+            matched = (preserved["matched_queries"] or "").split("|")
+            ch_id = item.get("snippet", {}).get("channelId", "")
+            ch_info = {"subscriber_count": subs.get(ch_id, 0)}
+            record = build_video_record(
+                item, matched, preserved["buckets"] or "", ch_info,
+                preserved["top_comments"] or "",
+            )
+            video_records.append(record)
+            snapshot_args.append(
+                (record["video_id"], record["view_count"],
+                 record["like_count"], record["comment_count"])
+            )
+
+    # Videos are the critical write (fatal); snapshots are non-fatal, mirroring
+    # discover. Channels are NOT re-fetched or written in refresh.
+    db.run_with_db_retry(lambda: persist_videos(conn, video_records, now))
+    persist_partial = False
+    try:
+        db.run_with_db_retry(lambda: persist_snapshots(conn, run_id, snapshot_args, now))
+    except Exception as e:
+        persist_partial = True
+        print(f"WARNING: snapshot persist failed, continuing: {e}", file=sys.stderr)
+
+    try:
+        _recompute_rankings(conn, now)
+    except Exception as e:
+        persist_partial = True
+        print(f"WARNING: ranking phase failed, continuing: {e}", file=sys.stderr)
+
+    return len(video_records), persist_partial
+
+
+def estimate_discover_units() -> dict:
+    """Estimate the quota a --discover run will cost, as a breakdown plus total.
+
+    This is the SINGLE source of the estimate: both --dry-run and the pre-flight
+    guard call it, so they can never disagree. Channel and comment call counts are
+    rough heuristics (the true counts are unknown until the pool is fetched); the
+    per-call guard is the real protection against overruns."""
+    n = len(SEARCH_QUERIES)
+    search = n * SEARCH_QUOTA_COST
+    videos = n * VIDEOS_QUOTA_COST
+    channels = ESTIMATED_CHANNEL_CALLS * CHANNELS_QUOTA_COST
+    comments = ESTIMATED_COMMENT_CALLS * COMMENTS_QUOTA_COST
+    return {
+        "search": search, "videos": videos, "channels": channels,
+        "comments": comments, "total": search + videos + channels + comments,
+    }
+
+
+def _print_dry_run(units_today: int, cap: int) -> None:
     """Print the planned queries and estimated quota cost without making any API
-    calls (the --dry-run path). Output goes to stderr."""
+    calls (the --dry-run path). Output goes to stderr. `units_today`/`cap` are the
+    current Pacific-day quota state so the user sees headroom, not just the raw
+    estimate."""
     total_queries = len(SEARCH_QUERIES)
-    estimated_search = total_queries * (SEARCH_QUOTA_COST + VIDEOS_QUOTA_COST)
-    estimated_channels = 2 * CHANNELS_QUOTA_COST
-    estimated_comments = 75 * COMMENTS_QUOTA_COST
-    estimated_quota = estimated_search + estimated_channels + estimated_comments
+    est = estimate_discover_units()
+    estimated_quota = est["total"]
 
     print("DRY RUN — no API calls will be made\n", file=sys.stderr)
     for i, entry in enumerate(SEARCH_QUERIES, 1):
         print(f'  [{i}/{total_queries}] "{entry["q"]}" ({entry["bucket"]})', file=sys.stderr)
     print(f"\nEstimated quota cost: ~{estimated_quota} units", file=sys.stderr)
-    print(f"  search.list: {total_queries} × {SEARCH_QUOTA_COST} = {total_queries * SEARCH_QUOTA_COST}", file=sys.stderr)
-    print(f"  videos.list: {total_queries} × {VIDEOS_QUOTA_COST} = {total_queries * VIDEOS_QUOTA_COST}", file=sys.stderr)
-    print(f"  channels.list: ~{estimated_channels}", file=sys.stderr)
-    print(f"  commentThreads.list: ~{estimated_comments}", file=sys.stderr)
-    print(f"Daily limit: 10,000 units → ~{10_000 // estimated_quota} runs/day", file=sys.stderr)
+    print(f"  search.list: {total_queries} × {SEARCH_QUOTA_COST} = {est['search']}", file=sys.stderr)
+    print(f"  videos.list: {total_queries} × {VIDEOS_QUOTA_COST} = {est['videos']}", file=sys.stderr)
+    print(f"  channels.list: ~{est['channels']}", file=sys.stderr)
+    print(f"  commentThreads.list: ~{est['comments']}", file=sys.stderr)
+    print(f"\nToday (Pacific): {units_today} units used, cap {cap} "
+          f"(limit {DAILY_QUOTA_LIMIT} − buffer {SAFETY_BUFFER}), "
+          f"{max(cap - units_today, 0)} remaining", file=sys.stderr)
+    fits = "yes" if units_today + estimated_quota <= cap else "NO — would pre-flight stop"
+    print(f"Discover fits under cap today? {fits}", file=sys.stderr)
+    print(f"Daily limit: {DAILY_QUOTA_LIMIT:,} units → ~{DAILY_QUOTA_LIMIT // estimated_quota} runs/day", file=sys.stderr)
 
 
 def _normalize_state(state: dict) -> dict:
@@ -617,12 +767,18 @@ def _normalize_state(state: dict) -> dict:
     return {"queries": {}, "channels": {}, "comments": {}}
 
 
-def _run_search_phase(youtube, state: dict, quota_used: list[int]
+def _run_search_phase(youtube, state: dict, budget: "QuotaBudget",
+                      conn, today_pac: str
                       ) -> tuple[list[tuple[str, dict]], bool]:
     """Phase A: search, fetch, and filter each query, resuming cached results.
 
     Returns the (query, video) pairs collected and whether the run aborted early
-    because quota was exhausted. Newly fetched results are cached into `state`."""
+    because quota was exhausted. Newly fetched results are cached into `state`.
+
+    Each 100-unit search.list charge is flushed to the quota_ledger immediately
+    (its own committed transaction, separate from any phase write) so a hard kill
+    cannot lose record of units Google already charged. `conn`/`today_pac` are
+    threaded in only for that eager flush."""
     total_queries = len(SEARCH_QUERIES)
     all_results: list[tuple[str, dict]] = []
     quota_aborted = False
@@ -638,16 +794,21 @@ def _run_search_phase(youtube, state: dict, quota_used: list[int]
 
         video_ids = api_call_with_retry(
             lambda qq=q: search_videos(youtube, qq),
-            quota_used,
+            budget,
             SEARCH_QUOTA_COST,
         )
         if video_ids is None:
             quota_aborted = True
             break
+        # Eager ledger flush: the expensive search.list charge is now spent and
+        # recorded, durable against a later phase rollback or a hard kill.
+        db.run_with_db_retry(
+            lambda: db.add_quota_units(conn, today_pac, SEARCH_QUOTA_COST, now_local_iso()))
+        budget.flushed_units += SEARCH_QUOTA_COST
 
         details = api_call_with_retry(
             lambda ids=video_ids: fetch_video_details(youtube, ids),
-            quota_used,
+            budget,
             VIDEOS_QUOTA_COST,
         )
         if details is None:
@@ -668,13 +829,13 @@ def _run_search_phase(youtube, state: dict, quota_used: list[int]
 
 
 def _run_channel_phase(youtube, state: dict, seen_videos: dict[str, dict],
-                       quota_used: list[int]) -> dict[str, dict]:
+                       budget: "QuotaBudget") -> dict[str, dict]:
     """Phase B: fetch channel data for every distinct channel, resuming a cached
     channel map from `state` when present."""
     if not state.get("channels"):
         unique_channel_ids = list({v["snippet"]["channelId"] for v in seen_videos.values()})
         print(f"Fetching channel data for {len(unique_channel_ids)} channels...", file=sys.stderr)
-        channel_map = fetch_channel_details(youtube, unique_channel_ids, quota_used)
+        channel_map = fetch_channel_details(youtube, unique_channel_ids, budget)
         state["channels"] = channel_map
         save_state(state)
     else:
@@ -684,7 +845,7 @@ def _run_channel_phase(youtube, state: dict, seen_videos: dict[str, dict],
 
 
 def _run_comment_phase(youtube, state: dict, seen_videos: dict[str, dict],
-                       quota_used: list[int]) -> None:
+                       budget: "QuotaBudget") -> None:
     """Phase C: fetch top comments for every video missing them, caching each
     result into `state` (and periodically persisting it)."""
     if "comments" not in state:
@@ -694,7 +855,7 @@ def _run_comment_phase(youtube, state: dict, seen_videos: dict[str, dict],
     if videos_needing_comments:
         print(f"Fetching comments for {len(videos_needing_comments)} videos...", file=sys.stderr)
     for idx, vid in enumerate(videos_needing_comments, 1):
-        comments_str = fetch_top_comments(youtube, vid, quota_used)
+        comments_str = fetch_top_comments(youtube, vid, budget)
         state["comments"][vid] = comments_str
         if idx % 10 == 0:
             save_state(state)
@@ -753,14 +914,88 @@ def _persist_all(conn, run_id: int, video_records: list[dict],
     return persist_partial
 
 
+def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict,
+                  today_pac: str) -> tuple[int, bool, bool]:
+    """Discover mode (expensive): run the search/channel/comment phases, persist
+    everything, and recompute rankings. Returns
+    (videos_seen, quota_aborted, persist_partial)."""
+    all_results, quota_aborted = _run_search_phase(youtube, state, budget, conn, today_pac)
+
+    seen_videos, query_map = dedupe_videos(all_results)
+    print(f"\n{len(seen_videos)} unique videos after dedup", file=sys.stderr)
+
+    channel_map = _run_channel_phase(youtube, state, seen_videos, budget)
+    _run_comment_phase(youtube, state, seen_videos, budget)
+
+    now = now_local_iso()
+    video_records, snapshot_args, channel_records = _build_records(
+        state, seen_videos, query_map, channel_map
+    )
+    persist_partial = _persist_all(
+        conn, run_id, video_records, channel_records, snapshot_args, now
+    )
+
+    # Recompute all three rankings from the persisted pool. A failure here is
+    # non-fatal: persisted videos are kept and the run is marked partial.
+    try:
+        _recompute_rankings(conn, now)
+    except Exception as e:
+        persist_partial = True
+        print(f"WARNING: ranking phase failed, continuing: {e}", file=sys.stderr)
+
+    return len(seen_videos), quota_aborted, persist_partial
+
+
+def _discover_done_today(conn, today_pac: str) -> bool:
+    """True when a discover run with status 'success' or 'partial' exists for
+    today's Pacific date — its expensive searches already ran, so the no-flag
+    default should refresh rather than re-discover. The Pacific date is derived
+    from each run's stored Eastern started_at."""
+    for row in db.fetch_runs_by_mode(conn, "discover"):
+        if (row["status"] in ("success", "partial")
+                and pacific_date(row["started_at"]) == today_pac):
+            return True
+    return False
+
+
+def _pick_status(budget: "QuotaBudget", quota_aborted: bool,
+                 persist_partial: bool, downgraded: bool) -> str:
+    """Resolve the terminal run_log status. Order matters: a proactive guard stop
+    and a reactive quota stop are the most urgent signals; a downgrade is recorded
+    distinctly (never as a plain success) only on an otherwise-clean run."""
+    if budget.guard_stopped:
+        return "quota_guard_stop"
+    if quota_aborted:
+        return "quota_exceeded"
+    if persist_partial:
+        return "partial"
+    if downgraded:
+        return "discover_downgraded_to_refresh"
+    return "success"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="YouTube Habits Swipe File Builder")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print planned queries and estimated quota cost without making API calls")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--dry-run", action="store_true",
+                            help="Print planned queries and estimated quota cost without making API calls")
+    mode_group.add_argument("--discover", action="store_true",
+                            help="Force a discovery run (expensive: searches + enrichment)")
+    mode_group.add_argument("--refresh", action="store_true",
+                            help="Force a cheap stats refresh of tracked videos (no searches)")
     args = parser.parse_args()
 
+    cap = DAILY_QUOTA_LIMIT - SAFETY_BUFFER
+
     if args.dry_run:
-        _print_dry_run()
+        # No API calls; read today's quota state so the estimate shows headroom.
+        db.init_db(DB_PATH)
+        conn = db.get_connection(DB_PATH)
+        try:
+            units_today = db.get_units_used(conn, pacific_date())
+        finally:
+            conn.close()
+        _print_dry_run(units_today, cap)
         return
 
     load_dotenv()
@@ -777,64 +1012,77 @@ def main() -> None:
 
     db.init_db(DB_PATH)
     conn = db.get_connection(DB_PATH)
-    run_id = db.start_run(conn, "discover", now_local_iso())
 
+    today_pac = pacific_date()
+    units_today = db.get_units_used(conn, today_pac)
+
+    # Choose the run mode.
+    if args.refresh:
+        mode = "refresh"
+    elif args.discover:
+        mode = "discover"
+    else:
+        mode = "refresh" if _discover_done_today(conn, today_pac) else "discover"
+
+    # Pre-flight guard (discover only): refuse if the estimate won't fit the cap.
+    downgraded = False
+    if mode == "discover":
+        estimate = estimate_discover_units()["total"]
+        if units_today + estimate > cap:
+            remaining = max(cap - units_today, 0)
+            if args.discover:  # explicit discover -> hard stop, no work done
+                run_id = db.start_run(conn, "discover", now_local_iso())
+                db.finish_run(conn, run_id, now_local_iso(), 0, 0, "quota_preflight_stop")
+                print(f"PRE-FLIGHT STOP: discover needs ~{estimate} units but only "
+                      f"{remaining} remain under the cap ({cap}). No API calls made.",
+                      file=sys.stderr)
+                conn.close()
+                return
+            # no-flag default -> loud downgrade to a cheap refresh
+            print(f"DOWNGRADE: discover needs ~{estimate} units but only {remaining} "
+                  f"remain under the cap ({cap}); running a refresh instead.",
+                  file=sys.stderr)
+            mode, downgraded = "refresh", True
+
+    run_id = db.start_run(conn, mode, now_local_iso())
     youtube = build_youtube_client(api_key)
-    quota_used = [0]
-    seen_videos: dict[str, dict] = {}
+    budget = QuotaBudget(units_today, cap)
+    # state.json is the discover resume cache; refresh neither reads nor clears it.
+    state = _normalize_state(load_state()) if mode == "discover" else {}
+    videos_seen = 0
+    quota_aborted = False
+    persist_partial = False
     status = "failed"
-    state = _normalize_state(load_state())
 
     try:
-        all_results, quota_aborted = _run_search_phase(youtube, state, quota_used)
-
-        seen_videos, query_map = dedupe_videos(all_results)
-        print(f"\n{len(seen_videos)} unique videos after dedup", file=sys.stderr)
-
-        channel_map = _run_channel_phase(youtube, state, seen_videos, quota_used)
-        _run_comment_phase(youtube, state, seen_videos, quota_used)
-
-        now = now_local_iso()
-        video_records, snapshot_args, channel_records = _build_records(
-            state, seen_videos, query_map, channel_map
-        )
-
-        persist_partial = _persist_all(
-            conn, run_id, video_records, channel_records, snapshot_args, now
-        )
-
-        # Recompute all three rankings from the persisted pool (DB-first so a
-        # later --refresh can reuse this same path). A failure here is non-fatal:
-        # persisted videos are kept and the run is marked partial.
-        try:
-            cutoff_dt = datetime.fromisoformat(
-                get_published_after().replace("Z", "+00:00")
+        if mode == "discover":
+            videos_seen, quota_aborted, persist_partial = _run_discover(
+                youtube, conn, run_id, budget, state, today_pac
             )
-            pool = eligible_pool(db.fetch_ranking_pool(conn), cutoff_dt)
-            rankings = compute_rankings(pool, VALID_BUCKETS, TOP_N)
-            run_date = now[:10]  # Eastern calendar date (offset never shifts it)
-            db.run_with_db_retry(
-                lambda: _rank_phase(conn, rankings, run_date, now)
-            )
-        except Exception as e:
-            persist_partial = True
-            print(f"WARNING: ranking phase failed, continuing: {e}", file=sys.stderr)
-
-        if quota_aborted:
-            status = "quota_exceeded"
-        elif persist_partial:
-            status = "partial"
         else:
-            status = "success"
+            videos_seen, persist_partial = _run_refresh(
+                youtube, conn, run_id, budget, now_local_iso()
+            )
+
+        status = _pick_status(budget, quota_aborted, persist_partial, downgraded)
+        # Only a clean discover clears the resume cache; an aborted/partial discover
+        # keeps it, and refresh never touches it.
+        if mode == "discover" and status == "success":
             clear_state()
 
-        print(f"\nPersisted {len(seen_videos)} videos to {DB_PATH} "
+        print(f"\n[{mode}] processed {videos_seen} videos to {DB_PATH} "
               f"(run {run_id}, status: {status})", file=sys.stderr)
-        print(f"Quota consumed: {quota_used[0]} units", file=sys.stderr)
+        print(f"Quota consumed this run: {budget.run_units} units "
+              f"({units_today + budget.run_units}/{cap} used today)", file=sys.stderr)
     finally:
         try:
-            db.finish_run(conn, run_id, now_local_iso(), quota_used[0],
-                          len(seen_videos), status)
+            # Flush only the un-flushed remainder (cheap calls); search.list was
+            # already flushed eagerly. Its own committed transaction.
+            if budget.unflushed() > 0:
+                db.run_with_db_retry(lambda: db.add_quota_units(
+                    conn, today_pac, budget.unflushed(), now_local_iso()))
+            db.finish_run(conn, run_id, now_local_iso(), budget.run_units,
+                          videos_seen, status)
         finally:
             conn.close()
 

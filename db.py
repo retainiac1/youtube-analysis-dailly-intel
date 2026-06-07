@@ -316,3 +316,64 @@ def run_with_db_retry(fn, *, attempts: int = 3, delay: float = 0.5, sleep=time.s
                 sleep(delay)
                 continue
             raise
+
+
+# --- Quota ledger (Pacific-date keyed) --------------------------------------
+
+def get_units_used(conn: sqlite3.Connection, pacific_date: str) -> int:
+    """Return units consumed so far for `pacific_date` (Pacific calendar date,
+    the quota_ledger key). Returns 0 when no row exists yet for that date."""
+    row = conn.execute(
+        "SELECT units_used FROM quota_ledger WHERE pacific_date = ?",
+        (pacific_date,),
+    ).fetchone()
+    return row["units_used"] if row else 0
+
+
+def add_quota_units(conn: sqlite3.Connection, pacific_date: str, units: int,
+                    now: str) -> None:
+    """Increment quota_ledger.units_used for `pacific_date` by `units`, starting a
+    fresh row on a new Pacific date. Commits its OWN transaction so an eager flush
+    survives a later phase rollback (the ledger records units Google already
+    charged, independent of whether the phase succeeds). `now` is the Eastern
+    timestamp for updated_at."""
+    with transaction(conn):
+        conn.execute(
+            """
+            INSERT INTO quota_ledger (pacific_date, units_used, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(pacific_date) DO UPDATE SET
+              units_used = units_used + excluded.units_used,
+              updated_at = excluded.updated_at
+            """,
+            (pacific_date, units, now),
+        )
+
+
+def fetch_runs_by_mode(conn: sqlite3.Connection, mode: str) -> list[sqlite3.Row]:
+    """Return run_log rows for a given mode (run_id, started_at, status). The
+    caller derives the Pacific date from started_at (db stays Pacific-agnostic)."""
+    return conn.execute(
+        "SELECT run_id, started_at, status FROM run_log WHERE mode = ?",
+        (mode,),
+    ).fetchall()
+
+
+# --- Refresh support --------------------------------------------------------
+
+def fetch_videos_for_refresh(conn: sqlite3.Connection) -> list[dict]:
+    """Return, for every tracked video, the fields a --refresh must PRESERVE
+    (videos.list will not re-supply them): video_id, channel_id, matched_queries,
+    buckets, top_comments. Stats are re-fetched from the API, not read here."""
+    cur = conn.execute(
+        "SELECT video_id, channel_id, matched_queries, buckets, top_comments "
+        "FROM videos"
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def fetch_channel_subs(conn: sqlite3.Connection) -> dict[str, int]:
+    """Return {channel_id: subscriber_count} for the views_to_subs_ratio recompute
+    during --refresh (which does not re-fetch channels)."""
+    cur = conn.execute("SELECT channel_id, subscriber_count FROM channels")
+    return {row["channel_id"]: row["subscriber_count"] for row in cur.fetchall()}
