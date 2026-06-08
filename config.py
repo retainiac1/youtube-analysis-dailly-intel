@@ -37,7 +37,10 @@ LOCAL_TZ = "America/New_York"
 
 VALID_BUCKETS = {"health", "habit"}
 
-MIN_VIEWS = 100_000
+# Tuned from the live qualifying-view distribution (2026-06-08): only ~4 videos
+# clear 100k in a 3-day window, ~51 clear 10k. 10k fills the lanes (~15-20 each
+# after dedup/split) while still filtering the sub-1k noise.
+MIN_VIEWS = 10_000
 # Single source of truth for the Shorts duration threshold: both filter_videos
 # and the is_short derivation read this, so they can never disagree.
 SHORT_MAX_SECONDS = 180

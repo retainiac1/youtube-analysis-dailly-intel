@@ -136,7 +136,7 @@ def test_views_below_min_is_independent_of_other_gates():
         fake_video("c", view_count=None),                         # hidden
         fake_video("d", view_count="500000"),                     # above (not counted)
     ]
-    below, hidden = swipefile.views_below_min(batch, 100_000)
+    below, hidden = swipefile.views_below_min(batch, 10_000)  # production MIN_VIEWS
     assert below == 2     # counts the out-of-window one too — independent of window gate
     assert hidden == 1
 
