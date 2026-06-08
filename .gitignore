@@ -3,9 +3,12 @@
 .env.*
 
 # SQLite database + WAL/SHM sidecars
-swipefile.db
-swipefile.db-wal
-swipefile.db-shm
+data/database/swipefile.db
+data/database/swipefile.db-wal
+data/database/swipefile.db-shm
+
+# Database backups
+data/database/backups/
 
 # Pipeline resume state
 state.json

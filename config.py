@@ -93,7 +93,7 @@ PUBLISHED_BEFORE = None
 # Persistent SQLite pipeline (Phase 1). PUBLISHED_AFTER is retained for the
 # existing pipeline; get_published_after() is the forward-looking helper and is
 # intentionally not wired into swipefile.py yet.
-DB_PATH = "swipefile.db"
+DB_PATH = "data/database/swipefile.db"
 QUOTA_RESET_TZ = "America/Los_Angeles"
 
 # All stored DB timestamps are Eastern, ISO-8601 with offset (never UTC, never

@@ -1,6 +1,7 @@
 import sqlite3
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 # Schema version stamped into PRAGMA user_version. Bump this and branch in
 # init_db when a future, non-destructive migration is needed.
@@ -117,6 +118,8 @@ def init_db(db_path: str) -> None:
     Safe to run repeatedly: every statement uses CREATE TABLE IF NOT EXISTS and
     PRAGMA user_version is set idempotently. The user_version read is the hook
     for future, non-destructive migrations."""
+    # SQLite will not create missing parent directories; ensure they exist.
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(db_path)
     try:
         current_version = conn.execute("PRAGMA user_version").fetchone()[0]
