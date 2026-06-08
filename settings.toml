@@ -1,0 +1,61 @@
+# User-tunable knobs for the daily-intel pipeline. Hand-editable and validated at
+# startup (see config.py). The values here are a behavior-preserving extraction of
+# the former config.py constants — changing one RETUNES the pipeline, so edit with
+# intent. A missing file or missing key falls back to the in-code defaults.
+
+MIN_VIEWS = 10000                  # qualifying-view floor; positive int. ~10k fills the lanes (~15-20 each), 100k leaves them near-empty.
+WINDOW_DAYS = 3                    # discovery lookback in days; positive int (1-7 is the sane range).
+TOP_N = 20                         # ranked rows kept per lane; positive int.
+SHORT_MAX_SECONDS = 180            # Shorts duration cutoff in seconds; positive int. Videos <= this are treated as Shorts.
+SEARCH_RELEVANCE_LANGUAGE = "en"   # YouTube relevanceLanguage hint; ISO-639-1 string (e.g. "en", "es").
+DAILY_QUOTA_LIMIT = 10000          # YouTube Data API daily quota units; positive int (Google grants 10000 by default).
+SAFETY_BUFFER = 500                # units held back below the limit; positive int, MUST be < DAILY_QUOTA_LIMIT.
+
+# Search queries, each tagged with a bucket. bucket must be "health" or "habit".
+[[SEARCH_QUERIES]]
+q = "build habits"
+bucket = "habit"
+
+[[SEARCH_QUERIES]]
+q = "break bad habits"
+bucket = "habit"
+
+[[SEARCH_QUERIES]]
+q = "habit tracker"
+bucket = "habit"
+
+[[SEARCH_QUERIES]]
+q = "atomic habits"
+bucket = "habit"
+
+[[SEARCH_QUERIES]]
+q = "habit stacking"
+bucket = "habit"
+
+[[SEARCH_QUERIES]]
+q = "morning routine habits"
+bucket = "habit"
+
+[[SEARCH_QUERIES]]
+q = "zone 2 cardio"
+bucket = "health"
+
+[[SEARCH_QUERIES]]
+q = "VO2 max"
+bucket = "health"
+
+[[SEARCH_QUERIES]]
+q = "strength training over 50"
+bucket = "health"
+
+[[SEARCH_QUERIES]]
+q = "high protein"
+bucket = "health"
+
+[[SEARCH_QUERIES]]
+q = "longevity habits"
+bucket = "health"
+
+[[SEARCH_QUERIES]]
+q = "sleep routine"
+bucket = "health"

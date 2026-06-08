@@ -1,8 +1,28 @@
 import sys
+import tomllib
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-SEARCH_QUERIES = [
+# ---------------------------------------------------------------------------
+# User-tunable settings (externalized to settings.toml)
+#
+# These knobs live in a hand-editable TOML file at the repo root, NOT in the DB,
+# so a future DB reset/wipe can't destroy them and they stay git-diffable. They
+# are loaded at import below and exposed under the same names this module always
+# used, so nothing downstream changes its imports. Each tunable has a DEFAULT_*
+# fallback here, so a missing file or a missing key degrades safely instead of
+# crashing. Validation (validate_config) runs over the loaded values at import —
+# an external file means external typos, so it is load-bearing.
+# ---------------------------------------------------------------------------
+DEFAULT_MIN_VIEWS = 10_000
+DEFAULT_WINDOW_DAYS = 3
+DEFAULT_TOP_N = 20
+DEFAULT_SHORT_MAX_SECONDS = 180
+DEFAULT_SEARCH_RELEVANCE_LANGUAGE = "en"
+DEFAULT_DAILY_QUOTA_LIMIT = 10000
+DEFAULT_SAFETY_BUFFER = 500
+DEFAULT_SEARCH_QUERIES = [
     {"q": "build habits", "bucket": "habit"},
     {"q": "break bad habits", "bucket": "habit"},
     {"q": "habit tracker", "bucket": "habit"},
@@ -17,6 +37,56 @@ SEARCH_QUERIES = [
     {"q": "sleep routine", "bucket": "health"},
 ]
 
+# name -> default, for every externalized tunable. load_settings() merges the
+# parsed TOML over these, so a missing key always resolves to its default.
+SETTINGS_DEFAULTS: dict[str, object] = {
+    "MIN_VIEWS": DEFAULT_MIN_VIEWS,
+    "WINDOW_DAYS": DEFAULT_WINDOW_DAYS,
+    "TOP_N": DEFAULT_TOP_N,
+    "SHORT_MAX_SECONDS": DEFAULT_SHORT_MAX_SECONDS,
+    "SEARCH_RELEVANCE_LANGUAGE": DEFAULT_SEARCH_RELEVANCE_LANGUAGE,
+    "DAILY_QUOTA_LIMIT": DEFAULT_DAILY_QUOTA_LIMIT,
+    "SAFETY_BUFFER": DEFAULT_SAFETY_BUFFER,
+    "SEARCH_QUERIES": DEFAULT_SEARCH_QUERIES,
+}
+
+# Resolve relative to THIS file, not CWD, so it works regardless of where the
+# script is launched from.
+_SETTINGS_PATH = Path(__file__).resolve().with_name("settings.toml")
+
+
+def load_settings(path: Path | str = _SETTINGS_PATH) -> dict:
+    """Load the user-tunable settings from a TOML file, merged over the in-code
+    defaults so the result always has every key.
+
+    A missing file is non-fatal: it prints one stderr warning and falls back to
+    all defaults (a fresh checkout still runs). A missing individual key falls
+    back to its DEFAULT_*. The merge happens unconditionally after the read, so
+    every return value carries the full key set — callers can index any tunable
+    without a KeyError. The values are NOT validated here; run validate_config
+    over the loaded module to reject external typos."""
+    try:
+        with open(path, "rb") as f:
+            parsed = tomllib.load(f)
+    except FileNotFoundError:
+        print(
+            f"warning: settings file not found at {path}; using built-in defaults",
+            file=sys.stderr,
+        )
+        parsed = {}
+    return {name: parsed.get(name, default) for name, default in SETTINGS_DEFAULTS.items()}
+
+
+_settings = load_settings()
+MIN_VIEWS = _settings["MIN_VIEWS"]
+WINDOW_DAYS = _settings["WINDOW_DAYS"]
+TOP_N = _settings["TOP_N"]
+SHORT_MAX_SECONDS = _settings["SHORT_MAX_SECONDS"]
+SEARCH_RELEVANCE_LANGUAGE = _settings["SEARCH_RELEVANCE_LANGUAGE"]
+DAILY_QUOTA_LIMIT = _settings["DAILY_QUOTA_LIMIT"]
+SAFETY_BUFFER = _settings["SAFETY_BUFFER"]
+SEARCH_QUERIES = _settings["SEARCH_QUERIES"]
+
 PUBLISHED_AFTER = "2025-09-01T00:00:00Z"
 PUBLISHED_BEFORE = None
 
@@ -24,10 +94,6 @@ PUBLISHED_BEFORE = None
 # existing pipeline; get_published_after() is the forward-looking helper and is
 # intentionally not wired into swipefile.py yet.
 DB_PATH = "swipefile.db"
-WINDOW_DAYS = 3
-TOP_N = 20
-DAILY_QUOTA_LIMIT = 10000
-SAFETY_BUFFER = 500
 QUOTA_RESET_TZ = "America/Los_Angeles"
 
 # All stored DB timestamps are Eastern, ISO-8601 with offset (never UTC, never
@@ -37,13 +103,11 @@ LOCAL_TZ = "America/New_York"
 
 VALID_BUCKETS = {"health", "habit"}
 
-# Tuned from the live qualifying-view distribution (2026-06-08): only ~4 videos
-# clear 100k in a 3-day window, ~51 clear 10k. 10k fills the lanes (~15-20 each
-# after dedup/split) while still filtering the sub-1k noise.
-MIN_VIEWS = 10_000
-# Single source of truth for the Shorts duration threshold: both filter_videos
-# and the is_short derivation read this, so they can never disagree.
-SHORT_MAX_SECONDS = 180
+# NOTE: MIN_VIEWS, SHORT_MAX_SECONDS and SEARCH_RELEVANCE_LANGUAGE are
+# user-tunable and now loaded from settings.toml above (see SETTINGS_DEFAULTS).
+# MIN_VIEWS is the live-tuned qualifying-view floor; SHORT_MAX_SECONDS remains
+# the single source of truth for the Shorts threshold (both filter_videos and
+# the is_short derivation read it, so they can never disagree).
 RESULTS_PER_QUERY = 50
 OUTPUT_CSV = "youtube_habits_swipefile.csv"
 OUTPUT_XLSX_BASE = "youtube_habits_swipefile"
@@ -56,7 +120,6 @@ COMMENTS_QUOTA_COST = 1
 CHANNEL_BATCH_SIZE = 50
 COMMENTS_PER_VIDEO = 10
 BLOCKED_CATEGORY_IDS = {"1", "10", "24"}
-SEARCH_RELEVANCE_LANGUAGE = "en"
 
 CSV_COLUMNS = [
     "social_media",
@@ -113,8 +176,15 @@ REQUIRED_KEYS: dict[str, type] = {
     "LOCAL_TZ": str,
     "MIN_VIEWS": int,
     "SHORT_MAX_SECONDS": int,
+    "SEARCH_RELEVANCE_LANGUAGE": str,
     "SEARCH_QUERIES": list,
 }
+
+# Keys that must be strictly positive ints (type is checked via REQUIRED_KEYS).
+POSITIVE_INT_KEYS: frozenset[str] = frozenset(
+    {"MIN_VIEWS", "WINDOW_DAYS", "TOP_N", "SHORT_MAX_SECONDS",
+     "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER"}
+)
 
 
 class ConfigError(ValueError):
@@ -158,8 +228,13 @@ def pacific_date(eastern_iso: str | None = None) -> str:
 
 
 def validate_config(cfg: object | None = None) -> None:
-    """Validate that required config keys are present and correctly typed and
-    that every SEARCH_QUERIES entry has a non-empty `q` and a valid `bucket`.
+    """Validate that required config keys are present, correctly typed, and
+    in-range, and that every SEARCH_QUERIES entry has a non-empty `q` and a valid
+    `bucket`.
+
+    Now that the tunables come from an external settings.toml, this is load-bearing
+    against hand-edit typos: it checks positivity for the int knobs, that
+    SAFETY_BUFFER < DAILY_QUOTA_LIMIT, and that SEARCH_QUERIES is non-empty.
 
     Raises ConfigError naming the offending key on the first failure. `cfg`
     defaults to this module; pass any object exposing the keys as attributes
@@ -172,6 +247,8 @@ def validate_config(cfg: object | None = None) -> None:
             raise ConfigError(f"Missing required config key: {key}")
         value = getattr(cfg, key)
         # bool is a subclass of int; reject it where a plain int is required.
+        # (A hand-edited `TOP_N = true` in TOML parses to a Python bool — this
+        # is exactly the typo the externalized-file validation must catch.)
         if not isinstance(value, expected_type) or (
             expected_type is int and isinstance(value, bool)
         ):
@@ -180,7 +257,18 @@ def validate_config(cfg: object | None = None) -> None:
                 f"got {type(value).__name__}"
             )
 
-    for i, entry in enumerate(getattr(cfg, "SEARCH_QUERIES")):
+    for key in POSITIVE_INT_KEYS:
+        if getattr(cfg, key) <= 0:
+            raise ConfigError(f"Config key {key} must be a positive int")
+
+    if getattr(cfg, "SAFETY_BUFFER") >= getattr(cfg, "DAILY_QUOTA_LIMIT"):
+        raise ConfigError("Config key SAFETY_BUFFER must be < DAILY_QUOTA_LIMIT")
+
+    queries = getattr(cfg, "SEARCH_QUERIES")
+    if not queries:
+        raise ConfigError("Config key SEARCH_QUERIES must be a non-empty list")
+
+    for i, entry in enumerate(queries):
         where = f"SEARCH_QUERIES[{i}]"
         if not isinstance(entry, dict):
             raise ConfigError(f"{where} must be a dict, got {type(entry).__name__}")
@@ -193,3 +281,9 @@ def validate_config(cfg: object | None = None) -> None:
             raise ConfigError(
                 f"{where} has invalid bucket {bucket!r}; must be one of {allowed}"
             )
+
+
+# Validate the loaded settings at import. An external settings.toml means
+# external typos, so this is load-bearing: a malformed file fails loudly and
+# immediately with a named ConfigError rather than corrupting a run downstream.
+validate_config()

@@ -16,6 +16,7 @@ def make_good_config() -> SimpleNamespace:
         LOCAL_TZ="America/New_York",
         MIN_VIEWS=100_000,
         SHORT_MAX_SECONDS=180,
+        SEARCH_RELEVANCE_LANGUAGE="en",
         SEARCH_QUERIES=[
             {"q": "build habits", "bucket": "habit"},
             {"q": "zone 2 cardio", "bucket": "health"},
@@ -64,6 +65,43 @@ def test_invalid_bucket_raises_named_error():
 def test_empty_query_string_raises():
     cfg = make_good_config()
     cfg.SEARCH_QUERIES = [{"q": "  ", "bucket": "habit"}]
+    with pytest.raises(config.ConfigError, match="SEARCH_QUERIES"):
+        config.validate_config(cfg)
+
+
+def test_bad_min_views_type_raises_named_error():
+    cfg = make_good_config()
+    cfg.MIN_VIEWS = "lots"
+    with pytest.raises(config.ConfigError, match="MIN_VIEWS"):
+        config.validate_config(cfg)
+
+
+def test_non_positive_min_views_raises_named_error():
+    cfg = make_good_config()
+    cfg.MIN_VIEWS = 0
+    with pytest.raises(config.ConfigError, match="MIN_VIEWS"):
+        config.validate_config(cfg)
+
+
+def test_toml_boolean_for_int_key_is_rejected():
+    # A hand-edited `TOP_N = true` in settings.toml parses to a Python bool, and
+    # isinstance(True, int) is True — the bool-rejection must still fire.
+    cfg = make_good_config()
+    cfg.TOP_N = True
+    with pytest.raises(config.ConfigError, match="TOP_N"):
+        config.validate_config(cfg)
+
+
+def test_safety_buffer_not_below_limit_raises_named_error():
+    cfg = make_good_config()
+    cfg.SAFETY_BUFFER = cfg.DAILY_QUOTA_LIMIT
+    with pytest.raises(config.ConfigError, match="SAFETY_BUFFER"):
+        config.validate_config(cfg)
+
+
+def test_empty_search_queries_raises_named_error():
+    cfg = make_good_config()
+    cfg.SEARCH_QUERIES = []
     with pytest.raises(config.ConfigError, match="SEARCH_QUERIES"):
         config.validate_config(cfg)
 
