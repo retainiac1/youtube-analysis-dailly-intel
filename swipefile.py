@@ -101,62 +101,147 @@ def parse_duration(iso_duration: str) -> int:
     return hours * 3600 + minutes * 60 + seconds
 
 
-def filter_videos(videos: list[dict], min_views: int, max_duration: int,
-                  cutoff_dt: datetime) -> tuple[list[dict], dict[str, int]]:
-    """Keep English, non-kids, non-blocked, in-window Shorts at/under max_duration
-    with at least min_views. Returns (kept, drops); each excluded video is counted
-    under the FIRST gate that rejects it, so
-    sum(drops.values()) == len(videos) - len(kept).
+def _classify_video(video: dict, min_views: int, max_duration: int,
+                    cutoff_dt: datetime) -> str:
+    """Return the name of the FIRST gate that rejects `video`, or 'kept' if it
+    passes all of them. The single source of the gate sequence — filter_videos and
+    every tuning diagnostic derive from this, so they can never disagree.
 
     Defensive per the plan-doc: every API field is read with .get(), and a video
     is failed CLOSED when a field needed to confirm it qualifies is missing — a
     missing contentDetails.duration (is_short cannot be derived; do NOT assume
     Short) or a hidden/absent statistics.viewCount (cannot confirm min_views) is
-    excluded and counted, never crashes the run, never passes unchecked. The
-    window gate reuses within_window with the same cutoff ranking uses."""
+    excluded, never crashes, never passes unchecked. The window gate reuses
+    within_window with the same cutoff ranking uses."""
+    snippet = video.get("snippet", {})
+    content = video.get("contentDetails", {})
+    stats = video.get("statistics", {})
+    status = video.get("status", {})
+
+    if not within_window(snippet.get("publishedAt", ""), cutoff_dt):
+        return "window"
+    if status.get("madeForKids", False):
+        return "made_for_kids"
+    if snippet.get("categoryId", "") in BLOCKED_CATEGORY_IDS:
+        return "category"
+    lang = snippet.get("defaultAudioLanguage", "")
+    if lang and not lang.startswith("en"):
+        return "language"
+    duration_str = content.get("duration")
+    if not duration_str:                         # cannot derive is_short
+        return "missing_duration"
+    view_raw = stats.get("viewCount")
+    if view_raw is None:                         # hidden/absent -> cannot confirm
+        return "missing_views"
+    if parse_duration(duration_str) > max_duration:
+        return "duration"
+    if int(view_raw) < min_views:
+        return "views"
+    return "kept"
+
+
+def filter_videos(videos: list[dict], min_views: int, max_duration: int,
+                  cutoff_dt: datetime) -> tuple[list[dict], dict[str, int]]:
+    """Keep English, non-kids, non-blocked, in-window Shorts at/under max_duration
+    with at least min_views. Returns (kept, drops); each excluded video is counted
+    under the FIRST gate that rejects it (via _classify_video), so
+    sum(drops.values()) == len(videos) - len(kept). All gate logic lives in
+    _classify_video — this is a thin loop over it."""
     drops = {k: 0 for k in (
         "window", "views", "duration", "category", "language",
         "made_for_kids", "missing_duration", "missing_views",
     )}
     kept = []
     for video in videos:
-        snippet = video.get("snippet", {})
-        content = video.get("contentDetails", {})
-        stats = video.get("statistics", {})
-        status = video.get("status", {})
-
-        if not within_window(snippet.get("publishedAt", ""), cutoff_dt):
-            drops["window"] += 1
-            continue
-        if status.get("madeForKids", False):
-            drops["made_for_kids"] += 1
-            continue
-        if snippet.get("categoryId", "") in BLOCKED_CATEGORY_IDS:
-            drops["category"] += 1
-            continue
-        lang = snippet.get("defaultAudioLanguage", "")
-        if lang and not lang.startswith("en"):
-            drops["language"] += 1
-            continue
-
-        duration_str = content.get("duration")
-        if not duration_str:                     # cannot derive is_short -> exclude
-            drops["missing_duration"] += 1
-            continue
-        view_raw = stats.get("viewCount")
-        if view_raw is None:                     # hidden/absent -> cannot confirm
-            drops["missing_views"] += 1
-            continue
-
-        if parse_duration(duration_str) > max_duration:
-            drops["duration"] += 1
-            continue
-        if int(view_raw) < min_views:
-            drops["views"] += 1
-            continue
-
-        kept.append(video)
+        gate = _classify_video(video, min_views, max_duration, cutoff_dt)
+        if gate == "kept":
+            kept.append(video)
+        else:
+            drops[gate] += 1
     return kept, drops
+
+
+# --- Tuning diagnostics (read-only; never perturb the drop counts) -----------
+
+DISTRIBUTION_BUCKETS = (">=100k", "50-100k", "20-50k", "10-20k", "5-10k", "1-5k", "<1k")
+
+
+def qualifying_view_counts(videos: list[dict], min_views: int, max_duration: int,
+                           cutoff_dt: datetime) -> list[int]:
+    """View counts (descending) of every video that passes every gate EXCEPT the
+    views threshold — i.e. _classify_video is 'kept' or 'views' (viewCount is
+    guaranteed present for both, the missing_views gate precedes them). The
+    per-query near-miss line is the < min_views slice; the aggregate
+    qualifying-view distribution buckets the whole list (incl. kept), so the
+    >=100k bucket is a true count."""
+    counts = []
+    for video in videos:
+        gate = _classify_video(video, min_views, max_duration, cutoff_dt)
+        if gate in ("kept", "views"):
+            counts.append(int(video.get("statistics", {}).get("viewCount")))
+    counts.sort(reverse=True)
+    return counts
+
+
+def distribution_buckets(counts: list[int]) -> dict[str, int]:
+    """Bucket raw view counts into DISTRIBUTION_BUCKETS. Comparisons use raw
+    integer thresholds — any k-notation is display-only and never reaches here, so
+    99,999 lands in '50-100k'."""
+    out = {k: 0 for k in DISTRIBUTION_BUCKETS}
+    for c in counts:
+        if c >= 100_000:
+            out[">=100k"] += 1
+        elif c >= 50_000:
+            out["50-100k"] += 1
+        elif c >= 20_000:
+            out["20-50k"] += 1
+        elif c >= 10_000:
+            out["10-20k"] += 1
+        elif c >= 5_000:
+            out["5-10k"] += 1
+        elif c >= 1_000:
+            out["1-5k"] += 1
+        else:
+            out["<1k"] += 1
+    return out
+
+
+def language_drop_values(videos: list[dict], min_views: int, max_duration: int,
+                         cutoff_dt: datetime) -> dict[str, int]:
+    """Tally of the present defaultAudioLanguage values that triggered the language
+    gate (_classify_video == 'language'), e.g. {'es': 5, 'hi': 3}. Reveals whether
+    the gate is wrongly dropping English regional variants (en-US/en-GB -> gate
+    bug) or genuinely dropping foreign content (gate correct -> tune search params).
+    Blank never appears here (the gate only fires on a present, non-'en' value)."""
+    tally: dict[str, int] = {}
+    for video in videos:
+        if _classify_video(video, min_views, max_duration, cutoff_dt) == "language":
+            lang = video.get("snippet", {}).get("defaultAudioLanguage", "")
+            tally[lang] = tally.get(lang, 0) + 1
+    return tally
+
+
+def untagged_audio_language_count(videos: list[dict]) -> int:
+    """Batch-wide count of videos with a blank/missing defaultAudioLanguage. These
+    PASS the language gate (it only fires on a present non-'en' value), so this is
+    the blind-spot signal: untagged (possibly foreign) videos slipping through."""
+    return sum(1 for v in videos
+               if not v.get("snippet", {}).get("defaultAudioLanguage", ""))
+
+
+def _fmt_counts(counts: list[int]) -> str:
+    """Render view counts for the diagnostic line in k-notation (>=1000 -> '92k'),
+    raw below. Display-only; never used for bucketing."""
+    if not counts:
+        return "(none)"
+    return ", ".join(f"{c // 1000}k" if c >= 1000 else str(c) for c in counts)
+
+
+def _fmt_tally(tally: dict[str, int]) -> str:
+    """Render a value->count tally sorted by count desc, '(none)' when empty."""
+    if not tally:
+        return "(none)"
+    return ", ".join(f"{k}: {v}" for k, v in sorted(tally.items(), key=lambda kv: -kv[1]))
 
 
 def views_below_min(videos: list[dict], min_views: int) -> tuple[int, int]:
@@ -837,6 +922,11 @@ def _run_search_phase(youtube, state: dict, budget: "QuotaBudget",
     quota_aborted = False
     # Same window cutoff the ranking phase uses (single source).
     cutoff_dt = datetime.fromisoformat(get_published_after().replace("Z", "+00:00"))
+    # Run-level tuning accumulators (only fresh-fetched queries contribute).
+    agg_qualifying: list[int] = []
+    agg_lang: dict[str, int] = {}
+    agg_untagged = 0
+    agg_details = 0
 
     for i, entry in enumerate(SEARCH_QUERIES, 1):
         q = entry["q"]
@@ -895,6 +985,32 @@ def _run_search_phase(youtube, state: dict, budget: "QuotaBudget",
               f'missing_views {drops["missing_views"]}', file=sys.stderr)
         print(f'       (views-only check: {below}/{len(details)} below '
               f'MIN_VIEWS={MIN_VIEWS}; {hidden} hidden/absent)', file=sys.stderr)
+
+        # Tuning diagnostics (read-only): where qualifying view counts land, and
+        # what the language gate is actually dropping. Accumulate for the run-level
+        # summary printed after the loop.
+        qualifying = qualifying_view_counts(details, MIN_VIEWS, SHORT_MAX_SECONDS, cutoff_dt)
+        near_miss = [c for c in qualifying if c < MIN_VIEWS]
+        lang_tally = language_drop_values(details, MIN_VIEWS, SHORT_MAX_SECONDS, cutoff_dt)
+        untagged = untagged_audio_language_count(details)
+        agg_qualifying.extend(qualifying)
+        for k, v in lang_tally.items():
+            agg_lang[k] = agg_lang.get(k, 0) + v
+        agg_untagged += untagged
+        agg_details += len(details)
+
+        print(f'       near-miss view counts: {_fmt_counts(near_miss)}', file=sys.stderr)
+        print(f'       lang-drop values -> {_fmt_tally(lang_tally)}', file=sys.stderr)
+        print(f'       untagged (blank, passed gate): {untagged} of {len(details)}',
+              file=sys.stderr)
+
+    if agg_details:
+        dist = distribution_buckets(agg_qualifying)
+        print("\nqualifying-view distribution (all queries): "
+              + " | ".join(f"{k}: {dist[k]}" for k in DISTRIBUTION_BUCKETS),
+              file=sys.stderr)
+        print(f"lang-drop values (all queries): {_fmt_tally(agg_lang)}; "
+              f"untagged: {agg_untagged} of {agg_details}", file=sys.stderr)
 
     return all_results, quota_aborted
 

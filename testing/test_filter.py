@@ -139,3 +139,54 @@ def test_views_below_min_is_independent_of_other_gates():
     below, hidden = swipefile.views_below_min(batch, 100_000)
     assert below == 2     # counts the out-of-window one too — independent of window gate
     assert hidden == 1
+
+
+# --- tuning diagnostics -----------------------------------------------------
+
+RECENT_CUTOFF = datetime.fromisoformat("2026-06-06T00:00:00+00:00")
+
+
+def test_qualifying_view_counts_only_pass_all_but_views():
+    batch = [
+        fake_video("kept", view_count="200000"),                       # kept
+        fake_video("nm", view_count="50000"),                          # views (near-miss)
+        fake_video("cat", view_count="80000", category_id="10"),       # category
+        fake_video("win", view_count="90000", published_at="2026-05-01T00:00:00Z"),  # window
+        fake_video("mv", view_count=None),                             # missing_views
+        fake_video("dur", view_count="70000", duration="PT4M"),        # duration
+    ]
+    qual = swipefile.qualifying_view_counts(batch, 100_000, 180, RECENT_CUTOFF)
+    assert qual == [200000, 50000]                 # sorted desc, only kept + near-miss
+    near_miss = [c for c in qual if c < 100_000]
+    assert near_miss == [50000]                    # the per-query line subset
+
+
+def test_distribution_buckets_boundaries():
+    dist = swipefile.distribution_buckets([100000, 99999, 50000, 9999, 1000, 999, 25000])
+    assert dist == {
+        ">=100k": 1, "50-100k": 2, "20-50k": 1,
+        "10-20k": 0, "5-10k": 1, "1-5k": 1, "<1k": 1,
+    }
+
+
+def test_language_drop_values_only_present_non_english():
+    batch = [
+        fake_video("es", audio="es"),                       # language
+        fake_video("hi", audio="hi"),                       # language
+        fake_video("pt", audio="pt"),                       # language
+        fake_video("enus", audio="en-US"),                  # passes (startswith en)
+        fake_video("blank", audio=None),                    # passes (no tag)
+        fake_video("frkids", audio="fr", made_for_kids=True),  # made_for_kids, NOT language
+    ]
+    tally = swipefile.language_drop_values(batch, 100_000, 180, PAST_CUTOFF)
+    assert tally == {"es": 1, "hi": 1, "pt": 1}
+
+
+def test_untagged_audio_language_count():
+    batch = [
+        fake_video("none", audio=None),     # missing key -> untagged
+        fake_video("empty", audio=""),      # blank value -> untagged
+        fake_video("en", audio="en"),       # tagged
+        fake_video("es", audio="es"),       # tagged
+    ]
+    assert swipefile.untagged_audio_language_count(batch) == 2
