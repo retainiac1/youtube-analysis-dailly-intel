@@ -101,26 +101,79 @@ def parse_duration(iso_duration: str) -> int:
     return hours * 3600 + minutes * 60 + seconds
 
 
-def filter_videos(videos: list[dict], min_views: int, max_duration: int) -> list[dict]:
+def filter_videos(videos: list[dict], min_views: int, max_duration: int,
+                  cutoff_dt: datetime) -> tuple[list[dict], dict[str, int]]:
+    """Keep English, non-kids, non-blocked, in-window Shorts at/under max_duration
+    with at least min_views. Returns (kept, drops); each excluded video is counted
+    under the FIRST gate that rejects it, so
+    sum(drops.values()) == len(videos) - len(kept).
+
+    Defensive per the plan-doc: every API field is read with .get(), and a video
+    is failed CLOSED when a field needed to confirm it qualifies is missing — a
+    missing contentDetails.duration (is_short cannot be derived; do NOT assume
+    Short) or a hidden/absent statistics.viewCount (cannot confirm min_views) is
+    excluded and counted, never crashes the run, never passes unchecked. The
+    window gate reuses within_window with the same cutoff ranking uses."""
+    drops = {k: 0 for k in (
+        "window", "views", "duration", "category", "language",
+        "made_for_kids", "missing_duration", "missing_views",
+    )}
     kept = []
     for video in videos:
+        snippet = video.get("snippet", {})
+        content = video.get("contentDetails", {})
+        stats = video.get("statistics", {})
         status = video.get("status", {})
+
+        if not within_window(snippet.get("publishedAt", ""), cutoff_dt):
+            drops["window"] += 1
+            continue
         if status.get("madeForKids", False):
+            drops["made_for_kids"] += 1
             continue
-
-        category_id = video["snippet"].get("categoryId", "")
-        if category_id in BLOCKED_CATEGORY_IDS:
+        if snippet.get("categoryId", "") in BLOCKED_CATEGORY_IDS:
+            drops["category"] += 1
             continue
-
-        lang = video["snippet"].get("defaultAudioLanguage", "")
+        lang = snippet.get("defaultAudioLanguage", "")
         if lang and not lang.startswith("en"):
+            drops["language"] += 1
             continue
 
-        duration = parse_duration(video["contentDetails"]["duration"])
-        views = int(video["statistics"].get("viewCount", 0))
-        if duration <= max_duration and views >= min_views:
-            kept.append(video)
-    return kept
+        duration_str = content.get("duration")
+        if not duration_str:                     # cannot derive is_short -> exclude
+            drops["missing_duration"] += 1
+            continue
+        view_raw = stats.get("viewCount")
+        if view_raw is None:                     # hidden/absent -> cannot confirm
+            drops["missing_views"] += 1
+            continue
+
+        if parse_duration(duration_str) > max_duration:
+            drops["duration"] += 1
+            continue
+        if int(view_raw) < min_views:
+            drops["views"] += 1
+            continue
+
+        kept.append(video)
+    return kept, drops
+
+
+def views_below_min(videos: list[dict], min_views: int) -> tuple[int, int]:
+    """Independent, non-exclusive diagnostic over the FULL batch (ignoring every
+    other gate): how many videos have a KNOWN viewCount below min_views, and how
+    many have a hidden/absent viewCount. Disentangles the views floor from the
+    window gate, which first-match attribution in filter_videos would otherwise
+    mask. Pure (no side effects), so the count never perturbs the drop buckets."""
+    below = 0
+    hidden = 0
+    for video in videos:
+        view_raw = video.get("statistics", {}).get("viewCount")
+        if view_raw is None:
+            hidden += 1
+        elif int(view_raw) < min_views:
+            below += 1
+    return below, hidden
 
 
 def best_thumbnail(thumbnails: dict) -> str:
@@ -782,6 +835,8 @@ def _run_search_phase(youtube, state: dict, budget: "QuotaBudget",
     total_queries = len(SEARCH_QUERIES)
     all_results: list[tuple[str, dict]] = []
     quota_aborted = False
+    # Same window cutoff the ranking phase uses (single source).
+    cutoff_dt = datetime.fromisoformat(get_published_after().replace("Z", "+00:00"))
 
     for i, entry in enumerate(SEARCH_QUERIES, 1):
         q = entry["q"]
@@ -815,7 +870,7 @@ def _run_search_phase(youtube, state: dict, budget: "QuotaBudget",
             quota_aborted = True
             break
 
-        kept = filter_videos(details, MIN_VIEWS, SHORT_MAX_SECONDS)
+        kept, drops = filter_videos(details, MIN_VIEWS, SHORT_MAX_SECONDS, cutoff_dt)
 
         for video in kept:
             all_results.append((q, video))
@@ -823,7 +878,23 @@ def _run_search_phase(youtube, state: dict, budget: "QuotaBudget",
         state["queries"][q] = kept
         save_state(state)
 
-        print(f'[{i}/{total_queries}] "{q}": fetched {len(video_ids)}, kept {len(kept)} after filters', file=sys.stderr)
+        # Per-query drop diagnostics. The summed buckets equal len(details) - kept
+        # (each video counted under the first gate that rejects it); the views-only
+        # line is an independent, non-exclusive count so window-vs-views strictness
+        # can be disentangled before any threshold is tuned.
+        note = ""
+        if len(details) != len(video_ids):
+            note = f" ({len(video_ids) - len(details)} ids returned no details)"
+        below, hidden = views_below_min(details, MIN_VIEWS)
+        print(f'[{i}/{total_queries}] "{q}": fetched {len(details)}, kept {len(kept)}{note}',
+              file=sys.stderr)
+        print(f'       dropped: window {drops["window"]}, views {drops["views"]}, '
+              f'duration {drops["duration"]}, category {drops["category"]}, '
+              f'language {drops["language"]}, made_for_kids {drops["made_for_kids"]}, '
+              f'missing_duration {drops["missing_duration"]}, '
+              f'missing_views {drops["missing_views"]}', file=sys.stderr)
+        print(f'       (views-only check: {below}/{len(details)} below '
+              f'MIN_VIEWS={MIN_VIEWS}; {hidden} hidden/absent)', file=sys.stderr)
 
     return all_results, quota_aborted
 
