@@ -1,5 +1,62 @@
 # YouTube Swipe File: SQLite Refactor Build Plan (v4, CC-ready)
 
+
+## READ ME FIRST — Current Status (updated 2026-06-08)
+
+### Where we are
+Phases 1-3 complete and tested. Phase 4 (run modes + rate limiting) complete and
+tested, plus a crash fix and a filter-tuning pass. Suite is green at 83 tests.
+The DB (swipefile.db) holds clean, tuned discovery data and is being PRESERVED
+as seed data for the dashboard — do not wipe it.
+
+### Open threads (in order)
+1. Settings extraction — move user-tunable constants from config.py into a
+   human-editable settings.toml (TOML, stdlib tomllib, validated at load).
+   Behavior-preserving; data untouched. (Prompt drafted, not yet run.)
+2. Change B — untagged-title language detector (fail-closed on low confidence),
+   a new language gate for videos with no defaultAudioLanguage tag. NOT built.
+3. Phase 4 STOP-gate sign-off.
+4. Phase 5 — --export-xlsx (reuses the dormant write_xlsx/format_video_row helpers).
+5. Dashboard — separate coding agent, reads the DB (incl. quota_ledger for the
+   units-today widget).
+
+### Invariants — violating these causes silent corruption
+- Eastern-only DB timestamps via now_local_iso(), offset-bearing ISO-8601,
+  NEVER UTC, NEVER naive. Exempt: get_published_after() returns RFC3339-Z because
+  it's a YouTube API request param, not stored data.
+- rankings.run_date (Eastern) and quota_ledger.pacific_date (Pacific) are
+  different keys for different purposes. NEVER join or equate them.
+- User-column contract: user_notes / starred / starred_at (and hook /
+  first_10_sec / saves) are NEVER named in any upsert SET list. API refreshes
+  cannot touch them.
+- Parse timestamps to aware datetimes and compare instants. NEVER lexical
+  string compare.
+- Quota ledger durability: search.list (100-unit) charges flush to quota_ledger
+  eagerly in their own committed transaction; cheap calls flush once at run end
+  (flushed_units prevents double-count). Protects the under-10k requirement
+  across hard kills.
+
+### Tuning rationale (so it isn't re-litigated)
+- MIN_VIEWS = 10,000: derived from the live qualifying-view distribution (only 4
+  of 549 videos cleared 100k in a 3-day window). It's the floor that fills the
+  WEAKER habit lane; health self-caps at TOP_N=20. Do NOT raise it for health's
+  sake — that starves habit.
+- The habit lane is naturally thinner than health (its Shorts accrue views
+  slower). ~10 rows is healthy for habit, not a bug.
+- relevanceLanguage='en' was already active during the foreign-language flood,
+  so it's a WEAK soft bias that does NOT contain foreign content. The language
+  GATE is the real wall; the untagged-title detector (Change B) is load-bearing,
+  not cleanup.
+- Trending lane was considered and dropped. Three lanes only: health, habit, overall.
+
+### Workflow rules
+- Plan-before-execute, one phase at a time, explicit STOP gate after each — wait
+  for review before the next.
+- No em dashes in any written output.
+- When the plan doc self-contradicts, error-handling/test intent wins over
+  literal schema.
+
+
 ## Objective
 
 Refactor `swipefile.py` into a persistent, idempotent Shorts pipeline that
