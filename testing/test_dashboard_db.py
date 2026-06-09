@@ -10,9 +10,9 @@ def _table_names(conn) -> set[str]:
     return {row["name"] for row in rows}
 
 
-# --- Schema bump (v2 -> v3) -------------------------------------------------
+# --- Schema bump (interpretations present, current stamp) -------------------
 
-def test_fresh_db_creates_interpretations_and_stamps_v3(tmp_path):
+def test_fresh_db_creates_interpretations_and_stamps_current(tmp_path):
     db_path = str(tmp_path / "fresh.db")
     db.init_db(db_path)
 
@@ -20,15 +20,16 @@ def test_fresh_db_creates_interpretations_and_stamps_v3(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 3
+        assert version == db.SCHEMA_VERSION == 4
     finally:
         conn.close()
 
 
 def test_seeded_v2_db_migrates_without_harming_seed(tmp_path):
     """Load-bearing migration proof: a pre-existing v2 DB with a seed videos row
-    gains the interpretations table and the v3 stamp, and the seed row is left
-    byte-for-byte unchanged."""
+    gains the interpretations table and the current stamp, and the seed row is
+    left byte-for-byte unchanged. The IF NOT EXISTS + user_version path carries a
+    v2 DB forward to the current version in one init_db."""
     db_path = str(tmp_path / "seeded.db")
 
     # Build a v2-era DB by hand: the videos table (subset of columns is fine for
@@ -65,7 +66,7 @@ def test_seeded_v2_db_migrates_without_harming_seed(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == db.SCHEMA_VERSION == 4
         after = dict(
             conn.execute("SELECT * FROM videos WHERE video_id = 'seed'").fetchone()
         )

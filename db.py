@@ -9,7 +9,9 @@ from pathlib import Path
 # this non-destructive — an existing v1 DB gains the empty table on next init).
 # v3: added the `interpretations` table for the dashboard (same non-destructive
 # IF NOT EXISTS path; the seed gains the empty table on next init).
-SCHEMA_VERSION = 3
+# v4: added the `llm_invocations` table for the interpretation generator (same
+# non-destructive IF NOT EXISTS path; the seed gains the empty table on next init).
+SCHEMA_VERSION = 4
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -118,6 +120,20 @@ SCHEMA_STATEMENTS: list[str] = [
         model TEXT,
         generated_at TEXT,
         PRIMARY KEY (run_date, scope)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS llm_invocations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_date TEXT,
+        scope TEXT,
+        model TEXT,            -- canonical "provider:model"
+        temperature REAL,
+        seed INTEGER,          -- NULL when unset OR provider does not apply a seed
+        filter TEXT,           -- v2 forward-compat; ALWAYS NULL in v1
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        generated_at TEXT
     )
     """,
 ]
@@ -251,6 +267,51 @@ def upsert_category(conn: sqlite3.Connection, record: dict, now: str) -> None:
         ["last_updated_at"], "last_updated_at = :now",
     )
     conn.execute(sql, {**record, "now": now})
+
+
+def upsert_interpretation(conn: sqlite3.Connection, run_date: str, scope: str,
+                          text: str, model: str, now: str) -> None:
+    """Insert or overwrite the single interpretation for (run_date, scope). On
+    conflict the text, model, and generated_at are replaced (re-running a lane
+    overwrites its summary). `model` is the canonical "provider:model" string.
+    Composite-PK shape, so the SQL is written inline rather than via
+    _build_upsert_sql (that helper is shaped for single-key tables). Does not
+    commit — the caller wraps it in `transaction`."""
+    conn.execute(
+        """
+        INSERT INTO interpretations (run_date, scope, text, model, generated_at)
+        VALUES (:run_date, :scope, :text, :model, :now)
+        ON CONFLICT(run_date, scope) DO UPDATE SET
+            text = excluded.text,
+            model = excluded.model,
+            generated_at = excluded.generated_at
+        """,
+        {"run_date": run_date, "scope": scope, "text": text,
+         "model": model, "now": now},
+    )
+
+
+def log_invocation(conn: sqlite3.Connection, run_date: str, scope: str,
+                   model: str, temperature: float, seed, filter,
+                   input_tokens: int, output_tokens: int, now: str) -> None:
+    """Append one row to the llm_invocations log recording the full parameter set
+    that produced a generation. Append-only (autoincrement id), so re-running a
+    lane adds a new row rather than overwriting. `model` is canonical
+    "provider:model"; `seed` is NULL when the provider did not apply one; `filter`
+    is NULL in v1. Does not commit — the caller wraps it in `transaction`."""
+    conn.execute(
+        """
+        INSERT INTO llm_invocations
+            (run_date, scope, model, temperature, seed, filter,
+             input_tokens, output_tokens, generated_at)
+        VALUES (:run_date, :scope, :model, :temperature, :seed, :filter,
+                :input_tokens, :output_tokens, :now)
+        """,
+        {"run_date": run_date, "scope": scope, "model": model,
+         "temperature": temperature, "seed": seed, "filter": filter,
+         "input_tokens": input_tokens, "output_tokens": output_tokens,
+         "now": now},
+    )
 
 
 def insert_snapshot(conn: sqlite3.Connection, run_id: int, video_id: str,

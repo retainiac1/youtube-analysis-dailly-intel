@@ -40,6 +40,17 @@ DEFAULT_SEARCH_QUERIES = [
     {"q": "sleep routine", "bucket": "health"},
 ]
 
+# Display-time cost map for the interpretation generator, keyed by the canonical
+# "provider:model" string. Each value is USD per 1M tokens. Estimates only (no
+# provider returns dollar cost, and stored figures rot when prices change); used
+# at display time to label spend an estimate. Verified 2026-06-09; will drift.
+DEFAULT_PRICES = {
+    "anthropic:claude-haiku-4-5": {"input": 1.00, "output": 5.00},
+    "openai:gpt-5.4-nano": {"input": 0.20, "output": 1.25},
+    "xai:grok-4-fast": {"input": 0.20, "output": 0.50},
+    "google:gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
+}
+
 # name -> default, for every externalized tunable. load_settings() merges the
 # parsed TOML over these, so a missing key always resolves to its default.
 SETTINGS_DEFAULTS: dict[str, object] = {
@@ -52,6 +63,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "SAFETY_BUFFER": DEFAULT_SAFETY_BUFFER,
     "CATEGORY_REGION": DEFAULT_CATEGORY_REGION,
     "SEARCH_QUERIES": DEFAULT_SEARCH_QUERIES,
+    "PRICES": DEFAULT_PRICES,
 }
 
 # Resolve relative to THIS file, not CWD, so it works regardless of where the
@@ -91,6 +103,7 @@ DAILY_QUOTA_LIMIT = _settings["DAILY_QUOTA_LIMIT"]
 SAFETY_BUFFER = _settings["SAFETY_BUFFER"]
 CATEGORY_REGION = _settings["CATEGORY_REGION"]
 SEARCH_QUERIES = _settings["SEARCH_QUERIES"]
+PRICES = _settings["PRICES"]
 
 PUBLISHED_AFTER = "2025-09-01T00:00:00Z"
 PUBLISHED_BEFORE = None
@@ -185,6 +198,7 @@ REQUIRED_KEYS: dict[str, type] = {
     "SEARCH_RELEVANCE_LANGUAGE": str,
     "CATEGORY_REGION": str,
     "SEARCH_QUERIES": list,
+    "PRICES": dict,
 }
 
 # Keys that must be strictly positive ints (type is checked via REQUIRED_KEYS).
@@ -293,6 +307,24 @@ def validate_config(cfg: object | None = None) -> None:
             raise ConfigError(
                 f"{where} has invalid bucket {bucket!r}; must be one of {allowed}"
             )
+
+    # PRICES: a display-time cost map keyed by the canonical "provider:model".
+    # Each entry must carry numeric, non-negative input and output rates. A
+    # malformed hand-edit fails loud here, naming the offending model key.
+    prices = getattr(cfg, "PRICES")
+    for key, entry in prices.items():
+        where = f"PRICES[{key!r}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a dict, got {type(entry).__name__}")
+        for field in ("input", "output"):
+            value = entry.get(field)
+            # bool is an int subclass; reject it where a number is required.
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ConfigError(
+                    f"{where} '{field}' must be a number, got {value!r}"
+                )
+            if value < 0:
+                raise ConfigError(f"{where} '{field}' must be non-negative, got {value}")
 
 
 # Validate the loaded settings at import. An external settings.toml means

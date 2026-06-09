@@ -22,6 +22,10 @@ def make_good_config() -> SimpleNamespace:
             {"q": "build habits", "bucket": "habit"},
             {"q": "zone 2 cardio", "bucket": "health"},
         ],
+        PRICES={
+            "anthropic:claude-haiku-4-5": {"input": 1.00, "output": 5.00},
+            "openai:gpt-5.4-nano": {"input": 0.20, "output": 1.25},
+        },
     )
 
 
@@ -119,6 +123,55 @@ def test_empty_category_region_raises_named_error():
     cfg.CATEGORY_REGION = "  "  # whitespace-only would silently break the fetch
     with pytest.raises(config.ConfigError, match="CATEGORY_REGION"):
         config.validate_config(cfg)
+
+
+def test_prices_well_formed_passes():
+    # Positive control: a good [prices] map validates cleanly, so the negatives
+    # below are not passing for an unrelated reason.
+    config.validate_config(make_good_config())
+
+
+def test_prices_non_dict_entry_raises_named_error():
+    # Otherwise-valid config; only PRICES is malformed, so the failure must come
+    # from the price loop (which runs last), not an earlier required-key check.
+    cfg = make_good_config()
+    cfg.PRICES = {"openai:gpt-5.4-nano": 1.25}  # value should be a dict
+    with pytest.raises(config.ConfigError, match=r"openai:gpt-5\.4-nano"):
+        config.validate_config(cfg)
+
+
+def test_prices_missing_output_raises_named_error():
+    cfg = make_good_config()
+    cfg.PRICES = {"openai:gpt-5.4-nano": {"input": 0.20}}
+    with pytest.raises(config.ConfigError, match=r"openai:gpt-5\.4-nano"):
+        config.validate_config(cfg)
+
+
+def test_prices_negative_price_raises_named_error():
+    cfg = make_good_config()
+    cfg.PRICES = {"openai:gpt-5.4-nano": {"input": -0.20, "output": 1.25}}
+    with pytest.raises(config.ConfigError, match=r"openai:gpt-5\.4-nano"):
+        config.validate_config(cfg)
+
+
+def test_prices_string_price_raises_named_error():
+    cfg = make_good_config()
+    cfg.PRICES = {"openai:gpt-5.4-nano": {"input": "cheap", "output": 1.25}}
+    with pytest.raises(config.ConfigError, match=r"openai:gpt-5\.4-nano"):
+        config.validate_config(cfg)
+
+
+def test_settings_toml_has_quoted_price_keys():
+    # Guards against an accidental unquoted [prices] key regressing settings.toml:
+    # the four seeded canonical model keys must round-trip through load_settings.
+    prices = config.load_settings()["PRICES"]
+    for key in (
+        "anthropic:claude-haiku-4-5",
+        "openai:gpt-5.4-nano",
+        "xai:grok-4-fast",
+        "google:gemini-2.5-flash-lite",
+    ):
+        assert key in prices, key
 
 
 def test_config_error_is_value_error():
