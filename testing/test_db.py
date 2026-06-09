@@ -7,6 +7,8 @@ EXPECTED_TABLES = {
     "rankings",
     "run_log",
     "quota_ledger",
+    "categories",
+    "interpretations",
 }
 
 EXPECTED_COLUMNS = {
@@ -37,6 +39,8 @@ EXPECTED_COLUMNS = {
         "videos_seen", "status",
     },
     "quota_ledger": {"pacific_date", "units_used", "updated_at"},
+    "categories": {"category_id", "title", "region_code", "last_updated_at"},
+    "interpretations": {"run_date", "scope", "text", "model", "generated_at"},
 }
 
 
@@ -96,7 +100,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 1
+        assert version == db.SCHEMA_VERSION == 3
     finally:
         conn.close()
 

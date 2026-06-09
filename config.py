@@ -22,6 +22,9 @@ DEFAULT_SHORT_MAX_SECONDS = 180
 DEFAULT_SEARCH_RELEVANCE_LANGUAGE = "en"
 DEFAULT_DAILY_QUOTA_LIMIT = 10000
 DEFAULT_SAFETY_BUFFER = 500
+# ISO-3166 region whose category titles seed the `categories` table. Category IDs
+# are effectively global, so any English region yields the same titles.
+DEFAULT_CATEGORY_REGION = "US"
 DEFAULT_SEARCH_QUERIES = [
     {"q": "build habits", "bucket": "habit"},
     {"q": "break bad habits", "bucket": "habit"},
@@ -47,6 +50,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "SEARCH_RELEVANCE_LANGUAGE": DEFAULT_SEARCH_RELEVANCE_LANGUAGE,
     "DAILY_QUOTA_LIMIT": DEFAULT_DAILY_QUOTA_LIMIT,
     "SAFETY_BUFFER": DEFAULT_SAFETY_BUFFER,
+    "CATEGORY_REGION": DEFAULT_CATEGORY_REGION,
     "SEARCH_QUERIES": DEFAULT_SEARCH_QUERIES,
 }
 
@@ -85,6 +89,7 @@ SHORT_MAX_SECONDS = _settings["SHORT_MAX_SECONDS"]
 SEARCH_RELEVANCE_LANGUAGE = _settings["SEARCH_RELEVANCE_LANGUAGE"]
 DAILY_QUOTA_LIMIT = _settings["DAILY_QUOTA_LIMIT"]
 SAFETY_BUFFER = _settings["SAFETY_BUFFER"]
+CATEGORY_REGION = _settings["CATEGORY_REGION"]
 SEARCH_QUERIES = _settings["SEARCH_QUERIES"]
 
 PUBLISHED_AFTER = "2025-09-01T00:00:00Z"
@@ -116,6 +121,7 @@ STATE_FILE = "state.json"
 SEARCH_QUOTA_COST = 100
 VIDEOS_QUOTA_COST = 1
 CHANNELS_QUOTA_COST = 1
+CATEGORIES_QUOTA_COST = 1
 COMMENTS_QUOTA_COST = 1
 CHANNEL_BATCH_SIZE = 50
 COMMENTS_PER_VIDEO = 10
@@ -177,6 +183,7 @@ REQUIRED_KEYS: dict[str, type] = {
     "MIN_VIEWS": int,
     "SHORT_MAX_SECONDS": int,
     "SEARCH_RELEVANCE_LANGUAGE": str,
+    "CATEGORY_REGION": str,
     "SEARCH_QUERIES": list,
 }
 
@@ -263,6 +270,11 @@ def validate_config(cfg: object | None = None) -> None:
 
     if getattr(cfg, "SAFETY_BUFFER") >= getattr(cfg, "DAILY_QUOTA_LIMIT"):
         raise ConfigError("Config key SAFETY_BUFFER must be < DAILY_QUOTA_LIMIT")
+
+    # CATEGORY_REGION feeds the videoCategories.list regionCode; an empty string
+    # would silently break the fetch, so reject it even though it types as str.
+    if not getattr(cfg, "CATEGORY_REGION").strip():
+        raise ConfigError("Config key CATEGORY_REGION must be a non-empty string")
 
     queries = getattr(cfg, "SEARCH_QUERIES")
     if not queries:

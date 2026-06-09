@@ -19,6 +19,8 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 import db
 from config import (
     BLOCKED_CATEGORY_IDS,
+    CATEGORIES_QUOTA_COST,
+    CATEGORY_REGION,
     CHANNEL_BATCH_SIZE,
     CHANNELS_QUOTA_COST,
     COMMENTS_PER_VIDEO,
@@ -295,6 +297,32 @@ def fetch_channel_details(youtube, channel_ids: list[str], budget: "QuotaBudget"
                 "channel_keywords": ch_branding.get("keywords", ""),
             }
     return channel_map
+
+
+def fetch_video_categories(youtube, region: str, budget: "QuotaBudget") -> list[dict]:
+    """Fetch the full YouTube category list for `region` and map it to `categories`
+    records. One quota unit, one call. Each record carries the numeric category_id
+    (the same value stored in videos.category_id), its human-readable title, and
+    the sourcing region. Returns [] on a quota abort (None response), matching the
+    channel/comment fetches so the caller skips persistence rather than crashing."""
+    response = api_call_with_retry(
+        lambda: youtube.videoCategories().list(
+            part="snippet",
+            regionCode=region,
+        ).execute(),
+        budget,
+        CATEGORIES_QUOTA_COST,
+    )
+    if response is None:
+        return []
+    return [
+        {
+            "category_id": item["id"],
+            "title": item.get("snippet", {}).get("title", ""),
+            "region_code": region,
+        }
+        for item in response.get("items", [])
+    ]
 
 
 def fetch_top_comments(youtube, video_id: str, budget: "QuotaBudget") -> str:
@@ -689,6 +717,13 @@ def persist_channels(conn, records: list[dict], now: str) -> None:
             db.upsert_channel(conn, record, now)
 
 
+def persist_categories(conn, records: list[dict], now: str) -> None:
+    """Upsert all category records in one transaction (rolls back on error)."""
+    with db.transaction(conn):
+        for record in records:
+            db.upsert_category(conn, record, now)
+
+
 def persist_snapshots(conn, run_id: int, snapshot_args, captured_at: str) -> None:
     """Append one stats snapshot per video for this run, in one transaction."""
     with db.transaction(conn):
@@ -1015,6 +1050,29 @@ def _run_search_phase(youtube, state: dict, budget: "QuotaBudget",
     return all_results, quota_aborted
 
 
+def _run_category_phase(youtube, conn, budget: "QuotaBudget", region: str,
+                        now: str) -> None:
+    """Sync the `categories` reference table from videoCategories.list for `region`.
+    Runs once per invocation in every mode (1 quota unit). Non-fatal: categories
+    are reference data, so a fetch/persist failure is warned and the run
+    continues, consistent with the channel/snapshot writes in _persist_all.
+
+    Pre-checks headroom and skips quietly when the cap is reached: this optional
+    refresh must NOT trip budget.guard_stopped (which signals that *core* work was
+    cut short and drives the run's terminal status)."""
+    if not budget.can_afford(CATEGORIES_QUOTA_COST):
+        print("Skipping category sync: no quota headroom under the cap.", file=sys.stderr)
+        return
+    try:
+        records = fetch_video_categories(youtube, region, budget)
+        if not records:  # quota abort or empty response — nothing to persist
+            return
+        db.run_with_db_retry(lambda: persist_categories(conn, records, now))
+        print(f"Synced {len(records)} video categories (region {region})", file=sys.stderr)
+    except Exception as e:
+        print(f"WARNING: category sync failed, continuing: {e}", file=sys.stderr)
+
+
 def _run_channel_phase(youtube, state: dict, seen_videos: dict[str, dict],
                        budget: "QuotaBudget") -> dict[str, dict]:
     """Phase B: fetch channel data for every distinct channel, resuming a cached
@@ -1242,6 +1300,11 @@ def main() -> None:
     status = "failed"
 
     try:
+        # Reference-data sync runs once per invocation, before either mode, so the
+        # categories table stays current and its 1-unit charge is flushed by the
+        # finally block below like every other call.
+        _run_category_phase(youtube, conn, budget, CATEGORY_REGION, now_local_iso())
+
         if mode == "discover":
             videos_seen, quota_aborted, persist_partial = _run_discover(
                 youtube, conn, run_id, budget, state, today_pac

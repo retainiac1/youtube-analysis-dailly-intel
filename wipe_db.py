@@ -1,6 +1,6 @@
 """Delete every row from swipefile.db while keeping the schema intact.
 
-This empties all six tables (keeping table definitions) and resets the
+This empties all seven tables (keeping table definitions) and resets the
 AUTOINCREMENT counters so ids restart at 1. The database stays valid and ready
 to use immediately — no re-init needed.
 
@@ -33,6 +33,7 @@ TABLES = [
     "quota_ledger",
     "videos",
     "channels",
+    "categories",
 ]
 
 # Tables with INTEGER PRIMARY KEY AUTOINCREMENT, whose counters live in

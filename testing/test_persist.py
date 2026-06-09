@@ -170,6 +170,41 @@ def test_run_log_start_and_finish(tmp_path):
         conn.close()
 
 
+# --- categories ---------------------------------------------------------------
+
+def test_persist_categories_upserts_and_refreshes(tmp_path):
+    """persist_categories inserts one row per category and re-running refreshes the
+    title/region in place (no duplicates) while advancing last_updated_at."""
+    conn = fresh_db(tmp_path)
+    try:
+        swipefile.persist_categories(conn, [
+            {"category_id": "26", "title": "Howto & Style", "region_code": "US"},
+            {"category_id": "24", "title": "Entertainment", "region_code": "US"},
+        ], NOW1)
+
+        rows = conn.execute(
+            "SELECT category_id, title, region_code, last_updated_at "
+            "FROM categories ORDER BY category_id"
+        ).fetchall()
+        assert [r["category_id"] for r in rows] == ["24", "26"]
+        assert {r["title"] for r in rows} == {"Entertainment", "Howto & Style"}
+        assert all(r["region_code"] == "US" and r["last_updated_at"] == NOW1 for r in rows)
+
+        # Re-run with a changed title + region: upsert in place, advance timestamp.
+        swipefile.persist_categories(conn, [
+            {"category_id": "26", "title": "How-to & Style", "region_code": "GB"},
+        ], NOW2)
+
+        assert conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 2
+        row = conn.execute(
+            "SELECT * FROM categories WHERE category_id='26'").fetchone()
+        assert row["title"] == "How-to & Style"
+        assert row["region_code"] == "GB"
+        assert row["last_updated_at"] == NOW2
+    finally:
+        conn.close()
+
+
 # --- DB-locked retry ----------------------------------------------------------
 
 def test_db_locked_retries_then_succeeds():

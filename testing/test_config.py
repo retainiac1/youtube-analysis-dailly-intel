@@ -17,6 +17,7 @@ def make_good_config() -> SimpleNamespace:
         MIN_VIEWS=100_000,
         SHORT_MAX_SECONDS=180,
         SEARCH_RELEVANCE_LANGUAGE="en",
+        CATEGORY_REGION="US",
         SEARCH_QUERIES=[
             {"q": "build habits", "bucket": "habit"},
             {"q": "zone 2 cardio", "bucket": "health"},
@@ -103,6 +104,20 @@ def test_empty_search_queries_raises_named_error():
     cfg = make_good_config()
     cfg.SEARCH_QUERIES = []
     with pytest.raises(config.ConfigError, match="SEARCH_QUERIES"):
+        config.validate_config(cfg)
+
+
+def test_missing_category_region_raises_named_error():
+    cfg = make_good_config()
+    del cfg.CATEGORY_REGION
+    with pytest.raises(config.ConfigError, match="CATEGORY_REGION"):
+        config.validate_config(cfg)
+
+
+def test_empty_category_region_raises_named_error():
+    cfg = make_good_config()
+    cfg.CATEGORY_REGION = "  "  # whitespace-only would silently break the fetch
+    with pytest.raises(config.ConfigError, match="CATEGORY_REGION"):
         config.validate_config(cfg)
 
 

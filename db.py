@@ -5,7 +5,11 @@ from pathlib import Path
 
 # Schema version stamped into PRAGMA user_version. Bump this and branch in
 # init_db when a future, non-destructive migration is needed.
-SCHEMA_VERSION = 1
+# v2: added the `categories` reference table (CREATE TABLE IF NOT EXISTS makes
+# this non-destructive — an existing v1 DB gains the empty table on next init).
+# v3: added the `interpretations` table for the dashboard (same non-destructive
+# IF NOT EXISTS path; the seed gains the empty table on next init).
+SCHEMA_VERSION = 3
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -98,6 +102,24 @@ SCHEMA_STATEMENTS: list[str] = [
         updated_at TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS categories (
+        category_id TEXT PRIMARY KEY,
+        title TEXT,
+        region_code TEXT,
+        last_updated_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS interpretations (
+        run_date TEXT,
+        scope TEXT,
+        text TEXT,
+        model TEXT,
+        generated_at TEXT,
+        PRIMARY KEY (run_date, scope)
+    )
+    """,
 ]
 
 
@@ -159,6 +181,9 @@ CHANNEL_COLUMNS = [
     "channel_created_date", "channel_country", "channel_keywords",
 ]
 
+# All category fields are API-owned (region_code reflects the configured source).
+CATEGORY_COLUMNS = ["title", "region_code"]
+
 
 def _build_upsert_sql(table: str, key_col: str, api_columns: list[str],
                       now_columns: list[str], extra_set_clause: str) -> str:
@@ -211,6 +236,18 @@ def upsert_channel(conn: sqlite3.Connection, record: dict, now: str) -> None:
     `channel_id` plus every key in CHANNEL_COLUMNS; last_updated_at is set to `now`."""
     sql = _build_upsert_sql(
         "channels", "channel_id", CHANNEL_COLUMNS,
+        ["last_updated_at"], "last_updated_at = :now",
+    )
+    conn.execute(sql, {**record, "now": now})
+
+
+def upsert_category(conn: sqlite3.Connection, record: dict, now: str) -> None:
+    """Insert or update one video category (all fields API-owned). `record` must
+    hold `category_id` plus every key in CATEGORY_COLUMNS; last_updated_at is set
+    to `now`. Mirrors upsert_channel — categories are reference data refreshed on
+    every run."""
+    sql = _build_upsert_sql(
+        "categories", "category_id", CATEGORY_COLUMNS,
         ["last_updated_at"], "last_updated_at = :now",
     )
     conn.execute(sql, {**record, "now": now})
@@ -360,6 +397,56 @@ def fetch_runs_by_mode(conn: sqlite3.Connection, mode: str) -> list[sqlite3.Row]
         "SELECT run_id, started_at, status FROM run_log WHERE mode = ?",
         (mode,),
     ).fetchall()
+
+
+# --- Dashboard read helpers (Phase 0) ---------------------------------------
+
+def fetch_run_dates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return the distinct rankings run_dates, most recent first. run_date is the
+    Eastern rankings key; it drives the dashboard run picker."""
+    return conn.execute(
+        "SELECT DISTINCT run_date FROM rankings ORDER BY run_date DESC"
+    ).fetchall()
+
+
+def fetch_lane(
+    conn: sqlite3.Connection, run_date: str, bucket: str
+) -> list[sqlite3.Row]:
+    """Return one lane's leaderboard for (run_date, bucket), ranked ascending.
+    LEFT JOIN videos on video_id: the schema declares no FK, so a ranking whose
+    video row is missing still returns its rank/metric_value with NULL video
+    fields rather than vanishing. bucket is a single value (not delimited TEXT),
+    so a plain equality match is correct here."""
+    return conn.execute(
+        """
+        SELECT r.rank,
+               r.metric_value,
+               v.title,
+               v.channel_title,
+               v.link,
+               v.thumbnail_url,
+               v.view_count,
+               v.views_to_subs_ratio
+        FROM rankings r
+        LEFT JOIN videos v ON v.video_id = r.video_id
+        WHERE r.run_date = ? AND r.bucket = ?
+        ORDER BY r.rank ASC
+        """,
+        (run_date, bucket),
+    ).fetchall()
+
+
+def fetch_interpretation(
+    conn: sqlite3.Connection, run_date: str, scope: str
+) -> sqlite3.Row | None:
+    """Return the interpretations row for (run_date, scope) or None when absent.
+    scope holds a bucket value (health / habit / overall). Read-only; the row is
+    written by an external generator (upsert_interpretation lands in Phase 4)."""
+    return conn.execute(
+        "SELECT run_date, scope, text, model, generated_at "
+        "FROM interpretations WHERE run_date = ? AND scope = ?",
+        (run_date, scope),
+    ).fetchone()
 
 
 # --- Refresh support --------------------------------------------------------

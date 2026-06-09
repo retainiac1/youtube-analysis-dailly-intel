@@ -1,0 +1,182 @@
+/* Glass Theme — design tokens & core components */
+/* Copied verbatim from design-files/design-system.md (the source of truth).
+   Do not edit values here; change design-system.md and re-copy. */
+:root {
+  /* Backgrounds */
+  --bg-base: #0a0f1a;
+  --bg-elevated: #0d1220;
+  --bg-card: rgba(255, 255, 255, 0.06);
+  --bg-card-hover: rgba(255, 255, 255, 0.10);
+  --bg-panel-hover: rgba(13, 18, 32, 0.8);
+
+  /* Borders */
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-glass: rgba(255, 255, 255, 0.12);
+  --border-card-hover: rgba(0, 242, 169, 0.2);
+
+  /* Text */
+  --text-primary: #ffffff;
+  --text-secondary: #b4bcd0;
+  --text-muted: #b4bcd0;
+
+  /* Accents */
+  --accent-cyan: #00F2A9;
+  --accent-blue: #2D7CFF;
+  --accent-purple: #a855f7;
+  --accent-red: #ef4444;
+  --accent-gradient: linear-gradient(135deg, #00F2A9 0%, #2D7CFF 100%);
+  --accent-glow: rgba(0, 242, 169, 0.4);
+
+  /* Primary button gradient */
+  --cta-gradient: linear-gradient(135deg, #2D7CFF 0%, #00F2A9 100%);
+  --cta-glow: rgba(0, 191, 255, 0.3);
+
+  /* Glass */
+  --glass-blur: 16px;
+  --glass-bg: rgba(13, 18, 32, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.1);
+
+  /* Radii */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+
+  /* Type */
+  --font-display: 'Outfit', sans-serif;
+  --font-body: 'Satoshi', sans-serif;
+
+  /* Motion */
+  --transition-fast: 0.15s ease;
+  --transition-base: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Misc */
+  --heading-xl-gradient: linear-gradient(135deg, #ffffff 0%, #b4bcd0 100%);
+}
+
+[data-theme="light"] {
+  --bg-base: #f4f6fb;
+  --bg-elevated: #ffffff;
+  --bg-card: rgba(255, 255, 255, 0.2);
+  --bg-card-hover: rgba(255, 255, 255, 0.35);
+  --border-subtle: rgba(0, 0, 0, 0.06);
+  --border-glass: rgba(0, 0, 0, 0.08);
+  --text-primary: #1a1f36;
+  --text-secondary: #4a5568;
+  --text-muted: #718096;
+  --accent-cyan: #00c98d;
+  --accent-blue: #2563eb;
+  --accent-purple: #7c3aed;
+  --accent-red: #dc2626;
+  --accent-gradient: linear-gradient(135deg, #00c98d 0%, #2563eb 100%);
+  --glass-blur: 18px;
+  --glass-bg: rgba(255, 255, 255, 0.5);
+  --glass-border: rgba(0, 0, 0, 0.07);
+  --heading-xl-gradient: linear-gradient(135deg, #1a1f36 0%, #4a5568 100%);
+}
+
+body {
+  font-family: var(--font-body);
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4 { font-family: var(--font-display); }
+
+.heading-xl {
+  font-size: clamp(2.5rem, 6vw, 4rem);
+  font-weight: 800;
+  background: var(--heading-xl-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.heading-lg { font-size: clamp(2rem, 4vw, 3rem); font-weight: 700; }
+.heading-md { font-size: clamp(1.25rem, 2vw, 1.5rem); font-weight: 600; }
+.heading-sm { font-size: clamp(1rem, 1.5vw, 1.25rem); font-weight: 600; }
+
+.section { position: relative; z-index: 1; padding: 6rem 2rem; }
+
+.glass-card {
+  background: var(--bg-card);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-lg);
+  transition: all var(--transition-base);
+  position: relative;
+  overflow: hidden;
+}
+.glass-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+}
+@media (hover: hover) {
+  .glass-card:hover {
+    transform: translateY(-4px) scale(1.01);
+    background: var(--bg-card-hover);
+    border-color: var(--border-card-hover);
+    box-shadow: 0 20px 40px rgba(0,0,0,0.4), 0 0 60px rgba(0,242,169,0.08);
+  }
+}
+
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  transition: var(--transition-base);
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 2rem;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1rem;
+  color: #fff;
+  background: var(--cta-gradient);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-decoration: none;
+  transition: all var(--transition-base);
+  position: relative;
+  overflow: hidden;
+}
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 40px var(--cta-glow), 0 0 0 1px rgba(0,191,255,0.3);
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.875rem 1.75rem;
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-decoration: none;
+  transition: all var(--transition-base);
+}
+.btn-secondary:hover {
+  background: var(--bg-card);
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}

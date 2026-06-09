@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>daily-intel dashboard</title>
+
+  <!-- Apply the persisted theme before paint so there is no flash. Defaults to
+       dark (the design baseline). The real toggle UI arrives in Phase 1. -->
+  <script>
+    (function () {
+      var saved = localStorage.getItem('site-theme');
+      document.documentElement.setAttribute('data-theme', saved || 'dark');
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="/static/css/tokens.css">
+  <style>
+    /* Phase 0 placeholder only. The real UI lands in Phase 1. */
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+    .placeholder { max-width: 32rem; margin: 2rem; padding: 2rem; text-align: center; }
+    .placeholder p { color: var(--text-secondary); }
+  </style>
+</head>
+<body>
+  <main class="placeholder glass-panel">
+    <h1 class="heading-md">daily-intel dashboard</h1>
+    <p>The read API is live. The dashboard interface arrives in Phase 1.</p>
+  </main>
+</body>
+</html>
