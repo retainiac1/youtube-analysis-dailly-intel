@@ -1,6 +1,8 @@
 # Secrets — never commit
 .env
 .env.*
+# ...but the non-secret template IS tracked, so the required keys are discoverable.
+!.env.example
 
 # SQLite database + WAL/SHM sidecars
 data/database/swipefile.db
