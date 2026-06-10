@@ -25,4 +25,27 @@ if [[ ! -x .venv/bin/python ]]; then
   exit 1
 fi
 
+# Back up the irreplaceable seed before any run that mutates it. backup_database.py
+# opens the live DB read-only and writes a verified, WAL-safe snapshot; if it fails
+# we abort WITHOUT running the pipeline (no run without a restore point). A --dry-run
+# makes no API calls and no DB writes, so it skips the backup; a not-yet-created DB
+# (fresh first run) has nothing to back up.
+skip_backup=false
+for arg in "$@"; do
+  [[ "$arg" == "--dry-run" ]] && skip_backup=true
+done
+
+DB_FILE="$(.venv/bin/python -c 'import config; print(config.DB_PATH)')"
+if [[ "$skip_backup" == true ]]; then
+  echo "Dry run: skipping pre-run backup (no DB writes)."
+elif [[ ! -f "$DB_FILE" ]]; then
+  echo "No database at $DB_FILE yet; skipping backup (nothing to back up)."
+else
+  echo "Backing up the seed before the run..."
+  if ! .venv/bin/python backup_database.py --dest data/database/backups; then
+    echo "ERROR: pre-run backup failed; aborting without running the pipeline." >&2
+    exit 1
+  fi
+fi
+
 exec .venv/bin/python swipefile.py "$@"

@@ -41,6 +41,25 @@ esac
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 
+# Stop any dashboard already running so a stale process serving old code can't
+# linger (a frozen process keeps the new routes but an old db/config in memory).
+# Match the app target, not the port, so unrelated listeners are never killed.
+# This matches both the --reload parent and its worker (both carry the target in
+# their command line); pkill never signals the running script itself.
+if pgrep -f "uvicorn dashboard.app:app" >/dev/null 2>&1; then
+  echo "Stopping running dashboard..."
+  pkill -f "uvicorn dashboard.app:app" || true
+  # Wait for the port to free up before rebinding (avoid "address already in use").
+  if command -v lsof >/dev/null 2>&1; then
+    for _ in $(seq 1 20); do
+      lsof -ti "tcp:$PORT" >/dev/null 2>&1 || break
+      sleep 0.25
+    done
+  else
+    sleep 1
+  fi
+fi
+
 reload_args=()
 if [[ "$MODE" == "dev" ]]; then
   reload_args+=(--reload)
