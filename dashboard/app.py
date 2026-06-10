@@ -21,6 +21,7 @@ if str(_REPO_ROOT) not in sys.path:
 from fastapi import Depends, FastAPI, HTTPException, Query  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 import config  # noqa: E402
 import db  # noqa: E402
@@ -304,6 +305,58 @@ def api_distribution(
         ],
         "total": total,
     }
+
+
+# --- Write routes (Phase 3) ---------------------------------------------------
+# The ONLY mutations the dashboard performs: videos.user_notes and videos.starred
+# (with starred_at). Both name user-owned columns only (db.set_user_notes /
+# db.set_starred). Wrapping: run_with_db_retry OUTER, db.transaction INNER, so a
+# pipeline write-lock rolls the write back and the retry re-runs the whole
+# transaction. An UPDATE that matches no row (unknown id, e.g. a ghost ranking
+# whose video row is missing) is a 404, never a silent no-op.
+
+class NotesUpdate(BaseModel):
+    user_notes: str
+
+
+class StarUpdate(BaseModel):
+    starred: bool
+
+
+@app.put("/api/videos/{video_id}/notes")
+def api_set_notes(
+    video_id: str,
+    body: NotesUpdate,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Overwrite one video's user_notes (full replace, last-write-wins). An empty
+    string clears the note (matches the has_notes_only filter's '' contract)."""
+    def write():
+        with db.transaction(conn):
+            return db.set_user_notes(conn, video_id, body.user_notes)
+
+    if db.run_with_db_retry(write) == 0:
+        raise HTTPException(status_code=404, detail=f"no video with id {video_id}")
+    return {"video_id": video_id, "user_notes": body.user_notes}
+
+
+@app.put("/api/videos/{video_id}/star")
+def api_set_star(
+    video_id: str,
+    body: StarUpdate,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Set one video's starred flag. starred_at (Eastern ISO via config) is set on
+    star and cleared on unstar."""
+    starred_at = config.now_local_iso() if body.starred else None
+
+    def write():
+        with db.transaction(conn):
+            return db.set_starred(conn, video_id, body.starred, starred_at)
+
+    if db.run_with_db_retry(write) == 0:
+        raise HTTPException(status_code=404, detail=f"no video with id {video_id}")
+    return {"video_id": video_id, "starred": body.starred, "starred_at": starred_at}
 
 
 # Static assets + SPA shell. Registered AFTER every /api route above.

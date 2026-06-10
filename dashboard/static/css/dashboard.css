@@ -300,7 +300,105 @@ html { scroll-padding-top: var(--header-h, 0px); }
 }
 .track-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* --- Row actions: star (DB write) + track (ephemeral) -------------------- */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Star toggle: muted outline when off, filled cyan when on. Cyan is the write/
+   keep signal, kept distinct from the lane color so it reads the same in every
+   lane. */
+.star-btn {
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+.star-btn:hover:not(:disabled) {
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+}
+.star-btn[aria-pressed="true"] {
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+}
+.star-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* --- Inline note editor (DB write) --------------------------------------- */
+.note-editor {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: 0.5rem;
+}
+.note-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 2rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.5rem;
+}
+.note-input::placeholder { color: var(--text-muted); }
+.note-input:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 0;
+  border-color: var(--accent-cyan);
+}
+/* Save/cancel reveal only while the note is dirty, so a clean row stays calm. */
+.note-actions {
+  display: flex;
+  gap: 0.3rem;
+  visibility: hidden;
+}
+.note-editor.dirty .note-actions { visibility: visible; }
+.note-btn {
+  font-size: 0.85rem;
+  line-height: 1;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+  background: transparent;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.note-save { color: var(--accent-cyan); }
+.note-save:hover:not(:disabled) { border-color: var(--accent-cyan); }
+.note-cancel { color: var(--text-secondary); }
+.note-cancel:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+.note-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.note-error {
+  grid-column: 1 / -1;
+  color: var(--accent-red);
+  font-size: 0.75rem;
+  min-height: 0;
+}
+.note-error:empty { display: none; }
+
 /* --- Trends view: chart cards (glass) ------------------------------------ */
+/* Routed regions: the active page toggles [hidden] in main.js. An author
+   display rule (.trends) outranks the UA [hidden] rule, so assert it here or a
+   hidden region stays visible. */
+.board[hidden],
+.trends[hidden],
+.interpretation[hidden] {
+  display: none;
+}
+
 .trends {
   grid-column: 1 / -1; /* span full width when the rail/board are hidden */
   display: flex;
@@ -318,6 +416,33 @@ html { scroll-padding-top: var(--header-h, 0px); }
   text-align: center;
   color: var(--text-secondary);
   font-size: 0.95rem;
+}
+
+/* --- Interpretation page (read-only prose) ------------------------------- */
+.interpretation {
+  grid-column: 1 / -1; /* span full width when the rail/board are hidden */
+  min-height: 12rem;
+}
+/* Glass card carrying a subtle lane accent (left border) so the lane reads the
+   same here as on the other pages; --lane-color is set on #app[data-lane]. */
+.interpretation-card {
+  padding: 1.5rem;
+  border-left: 3px solid var(--lane-color);
+}
+.interpretation-card h2 { margin: 0 0 0.5rem; }
+/* Understated, AI-generated-and-when line; not a headline. */
+.interpretation-meta {
+  margin: 0 0 1rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+/* Read-only prose: preserve the model's paragraph/line breaks, never truncate. */
+.interpretation-text {
+  white-space: pre-wrap;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  max-width: 70ch;
 }
 
 /* --- Empty / error states ------------------------------------------------ */
@@ -345,12 +470,12 @@ html { scroll-padding-top: var(--header-h, 0px); }
   .filter-rail.open { display: block; }
   .row {
     grid-template-columns: 2.5rem 1fr auto;
-    grid-template-areas: "rank thumb track" "main main main";
+    grid-template-areas: "rank thumb actions" "main main main";
   }
   .rank { grid-area: rank; }
   .thumb { grid-area: thumb; max-width: 8rem; }
   .row-main { grid-area: main; }
-  .track-btn { grid-area: track; align-self: start; }
+  .row-actions { grid-area: actions; align-self: start; }
 }
 
 /* --- Reduced motion ------------------------------------------------------ */

@@ -8,6 +8,18 @@ async function getJSON(url) {
   return resp.json();
 }
 
+async function putJSON(url, body) {
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    throw new Error(`${resp.status} ${resp.statusText} for ${url}`);
+  }
+  return resp.json();
+}
+
 // Serialize {run_date, lane} plus a filters object into a query string.
 // Arrays append one param per value (the repeatable-param contract the backend
 // expects); booleans append only when true; null / "" are omitted.
@@ -59,4 +71,30 @@ export function getRankHistory(lane, videoIds) {
 export function getDistribution(runDate, lane) {
   const qs = buildQuery({ run_date: runDate, lane }, null);
   return getJSON(`/api/distribution?${qs}`);
+}
+
+// --- Phase B: read-only interpretation --------------------------------------
+
+// scope IS the lane bucket (health / habit / overall), an identity mapping. The
+// endpoint returns 200 with empty text when no row exists; callers treat that as
+// the empty state, not an error.
+export function getInterpretation(runDate, lane) {
+  const qs = buildQuery({ run_date: runDate, scope: lane }, null);
+  return getJSON(`/api/interpretation?${qs}`);
+}
+
+// --- Phase 3: the only writes (user_notes + starred) ------------------------
+
+export function setNotes(videoId, userNotes) {
+  return putJSON(
+    `/api/videos/${encodeURIComponent(videoId)}/notes`,
+    { user_notes: userNotes },
+  );
+}
+
+export function setStarred(videoId, starred) {
+  return putJSON(
+    `/api/videos/${encodeURIComponent(videoId)}/star`,
+    { starred },
+  );
 }

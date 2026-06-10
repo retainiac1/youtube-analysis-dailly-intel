@@ -305,6 +305,44 @@ def upsert_interpretation(conn: sqlite3.Connection, run_date: str, scope: str,
     )
 
 
+# --- Dashboard writes (user-owned columns ONLY) -------------------------------
+# The dashboard is the SOLE writer of the VIDEO_USER_COLUMNS. These helpers name
+# only user-owned columns, the mirror image of upsert_video's API-owned contract,
+# so a dashboard write can never clobber a pipeline-refreshed field. Both return
+# cursor.rowcount (0 when no such video) and do NOT commit — the caller wraps them
+# in `transaction`, with `run_with_db_retry` on the outside.
+
+def set_user_notes(conn: sqlite3.Connection, video_id: str, notes: str) -> int:
+    """Overwrite videos.user_notes for one video (full replace, last-write-wins).
+    "No note" is the empty string '', never NULL, to match the column default and
+    the has_notes_only read filter. Returns the rows affected (0 if video_id is
+    unknown). Does not commit."""
+    cur = conn.execute(
+        "UPDATE videos SET user_notes = :notes WHERE video_id = :video_id",
+        {"notes": notes, "video_id": video_id},
+    )
+    return cur.rowcount
+
+
+def set_starred(conn: sqlite3.Connection, video_id: str, starred: bool,
+                now: str) -> int:
+    """Set videos.starred (and starred_at) for one video. starred_at is `now` on
+    star, NULL on unstar, so it tracks the star. The bool is coerced to an explicit
+    int (1/0) so the stored value matches the starred_only filter (v.starred = 1),
+    never a raw Python bool. Returns rows affected (0 if video_id is unknown). Does
+    not commit."""
+    cur = conn.execute(
+        "UPDATE videos SET starred = :starred, starred_at = :starred_at "
+        "WHERE video_id = :video_id",
+        {
+            "starred": 1 if starred else 0,
+            "starred_at": now if starred else None,
+            "video_id": video_id,
+        },
+    )
+    return cur.rowcount
+
+
 def log_invocation(conn: sqlite3.Connection, run_date: str, scope: str,
                    model: str, temperature: float, seed, filter,
                    input_tokens: int, output_tokens: int, now: str) -> None:

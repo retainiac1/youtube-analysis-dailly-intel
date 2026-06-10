@@ -106,6 +106,43 @@ def test_interpretation_absent_is_empty_text(client):
     assert body["model"] is None
 
 
+def test_interpretation_full_shape(client):
+    """Populated row returns every field the Interpretation page renders."""
+    resp = client.get(
+        "/api/interpretation", params={"run_date": "2026-06-08", "scope": "health"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_date"] == "2026-06-08"
+    assert body["scope"] == "health"
+    assert body["text"] == "Looks strong."
+    assert body["model"] == "model-x"
+    assert body["generated_at"] == "2026-06-08T10:05:00-04:00"
+
+
+def test_interpretation_absent_scope_is_clean_empty(client):
+    """A scope with no row (overall) returns the clean empty contract, not an
+    error: 200 with empty text and null metadata."""
+    resp = client.get(
+        "/api/interpretation", params={"run_date": "2026-06-08", "scope": "overall"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["text"] == ""
+    assert body["model"] is None
+    assert body["generated_at"] is None
+
+
+def test_interpretation_scope_keys_the_lookup(client):
+    """Same run, different scope: health has a row, habit does not. The page sends
+    scope=<active lane>, so the populated panel only appears for the lane with a
+    row; this guards that scope (not just run_date) selects the interpretation."""
+    health = client.get(
+        "/api/interpretation", params={"run_date": "2026-06-08", "scope": "health"}).json()
+    habit = client.get(
+        "/api/interpretation", params={"run_date": "2026-06-08", "scope": "habit"}).json()
+    assert health["text"] == "Looks strong."
+    assert habit["text"] == ""
+
+
 def test_placeholder_page_served(client):
     resp = client.get("/")
     assert resp.status_code == 200

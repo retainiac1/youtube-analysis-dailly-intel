@@ -1,12 +1,14 @@
 // Bootstrap: load runs + lane options, render the board, and wire the run
 // picker, page nav (router), lane tabs, filter rail (debounced), theme toggle,
-// and mobile drawer. Board and Trends are URL-routed pages (/board, /trends); the
-// router swaps which page is shown, while the run and lane persist across both.
+// and mobile drawer. Board, Trends, and Interpretation are URL-routed pages
+// (/board, /trends, /interpretation); the router swaps which page is shown, while
+// the run and lane persist across all of them.
 
 import * as api from "./api.js";
 import * as filters from "./filters.js";
 import * as board from "./board.js";
 import * as trends from "./trends.js";
+import * as interpretation from "./interpretation.js";
 import * as router from "./router.js";
 import "./sticky-header.js"; // side-effect: publishes --header-h for the pinned strip
 
@@ -14,6 +16,7 @@ const app = document.getElementById("app");
 const runSelect = document.getElementById("run-select");
 const boardEl = document.getElementById("board");
 const trendsEl = document.getElementById("trends");
+const interpretationEl = document.getElementById("interpretation");
 const railGroups = document.getElementById("filter-groups");
 const rail = document.getElementById("filter-rail");
 const drawerToggle = document.getElementById("filter-drawer-toggle");
@@ -22,6 +25,7 @@ const pageNav = [...document.querySelectorAll(".page-nav-link")];
 
 const MAX_TRACKED = 5;
 const TRENDS_ROUTE = "/trends";
+const INTERPRETATION_ROUTE = "/interpretation";
 
 // The active page is owned by the router (router.current()); run/lane/tracked are
 // shared state that persists across pages. tracked is EPHEMERAL in-memory view
@@ -79,17 +83,19 @@ function selectLane(lane) {
   board.setActiveTab(app, tabs, lane);
   onRunOrLaneChange();
   if (router.current() === TRENDS_ROUTE) onLaneChangeTrends();
+  if (router.current() === INTERPRETATION_ROUTE) interpretation.refresh(state);
 }
 
 // Route handlers: show the page's content region and hide the others. These only
 // toggle visibility (they do not re-render the board), so Board's rows and filter
-// state survive navigating away to Trends and back. The board's data is loaded by
-// run/lane changes and the initial load, independent of which page is shown.
+// state survive navigating away to another page and back. The board's data is
+// loaded by run/lane changes and the initial load, independent of which page shows.
 function enterBoard() {
   boardEl.hidden = false;
   rail.hidden = false;
   drawerToggle.hidden = false;
   trendsEl.hidden = true;
+  interpretationEl.hidden = true;
 }
 
 function enterTrends() {
@@ -97,9 +103,20 @@ function enterTrends() {
   rail.hidden = true;
   drawerToggle.hidden = true;
   trendsEl.hidden = false;
+  interpretationEl.hidden = true;
   // Render the charts on entry: an ECharts instance on a hidden element cannot
   // size itself, so charts are only rendered while Trends is visible.
   trends.refreshAll(state);
+}
+
+function enterInterpretation() {
+  boardEl.hidden = true;
+  rail.hidden = true;
+  drawerToggle.hidden = true;
+  trendsEl.hidden = true;
+  interpretationEl.hidden = false;
+  // Fetch + render the interpretation for the current run + lane on entry.
+  interpretation.refresh(state);
 }
 
 // Arrow-key roving focus for a segmented tablist.
@@ -148,6 +165,85 @@ function setupTracking() {
   });
 }
 
+// --- Phase 3 writes: star toggle + inline notes -----------------------------
+// Delegated on boardEl (survives row re-renders). A star change requeries the
+// board (keeps starred_only consistent); a note save updates in place with NO
+// requery, so an in-progress edit elsewhere is never wiped.
+
+function noteWrap(node) {
+  return node.closest(".note-editor");
+}
+
+function setNoteError(wrap, message) {
+  const span = wrap.querySelector(".note-error");
+  if (span) span.textContent = message || "";
+}
+
+async function onStarClick(btn) {
+  const id = btn.dataset.star;
+  const next = btn.getAttribute("aria-pressed") !== "true";
+  btn.disabled = true;
+  try {
+    await api.setStarred(id, next);
+    await reloadBoard(); // the one requery case
+  } catch (err) {
+    btn.disabled = false;
+    btn.title = `Could not save: ${err.message || err}`;
+  }
+}
+
+async function onNoteSave(btn) {
+  const wrap = noteWrap(btn);
+  const ta = wrap.querySelector("[data-note]");
+  const value = ta.value;
+  btn.disabled = true;
+  setNoteError(wrap, "");
+  try {
+    await api.setNotes(ta.dataset.note, value);
+    ta.dataset.saved = value;
+    wrap.classList.remove("dirty");
+  } catch (err) {
+    setNoteError(wrap, `Could not save: ${err.message || err}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function onNoteCancel(wrap) {
+  const ta = wrap.querySelector("[data-note]");
+  ta.value = ta.dataset.saved || "";
+  wrap.classList.remove("dirty");
+  setNoteError(wrap, "");
+}
+
+function setupWrites() {
+  boardEl.addEventListener("click", (e) => {
+    const star = e.target.closest("[data-star]");
+    if (star && !star.disabled) return void onStarClick(star);
+    const save = e.target.closest("[data-note-save]");
+    if (save && !save.disabled) return void onNoteSave(save);
+    const cancel = e.target.closest("[data-note-cancel]");
+    if (cancel) return void onNoteCancel(noteWrap(cancel));
+  });
+  boardEl.addEventListener("input", (e) => {
+    const ta = e.target.closest("[data-note]");
+    if (!ta) return;
+    const dirty = ta.value !== (ta.dataset.saved || "");
+    noteWrap(ta).classList.toggle("dirty", dirty);
+  });
+  boardEl.addEventListener("keydown", (e) => {
+    const ta = e.target.closest("[data-note]");
+    if (!ta) return;
+    if (e.key === "Escape") {
+      onNoteCancel(noteWrap(ta));
+    } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      const save = noteWrap(ta).querySelector("[data-note-save]");
+      if (save) onNoteSave(save);
+    }
+  });
+}
+
 function setupDrawer() {
   drawerToggle.addEventListener("click", () => {
     const open = rail.classList.toggle("open");
@@ -176,16 +272,22 @@ async function init() {
   setupDrawer();
   setupFilters();
   setupTracking();
+  setupWrites();
   trends.init({
     bump: document.getElementById("chart-bump"),
     distribution: document.getElementById("chart-distribution"),
     trajectory: document.getElementById("chart-trajectory"),
   });
+  interpretation.init(interpretationEl);
   board.setActiveTab(app, tabs, state.lane);
 
   // Register routes (wires page-nav clicks/keys); do not dispatch until data loads.
   router.initRouter({
-    routes: { "/board": enterBoard, "/trends": enterTrends },
+    routes: {
+      "/board": enterBoard,
+      "/trends": enterTrends,
+      "/interpretation": enterInterpretation,
+    },
     links: pageNav,
     fallback: "/board",
   });
@@ -194,6 +296,7 @@ async function init() {
     state.runDate = runSelect.value;
     onRunOrLaneChange();
     if (router.current() === TRENDS_ROUTE) onRunChangeTrends();
+    if (router.current() === INTERPRETATION_ROUTE) interpretation.refresh(state);
   });
 
   let runs;

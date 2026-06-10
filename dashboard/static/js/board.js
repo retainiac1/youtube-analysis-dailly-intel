@@ -80,6 +80,58 @@ function trackButton(row, trackState) {
   return btn;
 }
 
+// Star toggle — a Phase 3 DB write (videos.starred). Filled when starred, muted
+// outline when not. Only for rows backed by a real videos row: a ghost ranking
+// (rank present, video row missing) has nothing to star, so a write would 404.
+function starButton(row, hasVideo) {
+  if (!hasVideo || !row.video_id) return null;
+  const starred = row.starred === 1 || row.starred === true;
+  return el("button", {
+    class: "star-btn",
+    type: "button",
+    "data-star": row.video_id,
+    "aria-pressed": starred ? "true" : "false",
+    "aria-label": starred ? "Starred. Activate to unstar." : "Not starred. Activate to star.",
+    title: starred ? "Starred" : "Star this video",
+    text: starred ? "★" : "☆",
+  });
+}
+
+// Inline note editor — a Phase 3 DB write (videos.user_notes). The textarea holds
+// the working value; data-saved holds the committed value. Explicit save (✓) /
+// cancel (✕) icons; the action row reveals only while the text is dirty (see CSS).
+// A note save updates in place and does NOT requery the board.
+function noteEditor(row, hasVideo) {
+  if (!hasVideo || !row.video_id) return null;
+  const saved = row.user_notes || "";
+  const ta = el("textarea", {
+    class: "note-input",
+    "data-note": row.video_id,
+    "data-saved": saved,
+    rows: "1",
+    placeholder: "Add a note",
+    "aria-label": "Note for this video",
+  });
+  ta.value = saved;
+  const actions = el("div", { class: "note-actions" }, [
+    el("button", {
+      class: "note-btn note-save", type: "button",
+      "data-note-save": row.video_id, "aria-label": "Save note", title: "Save note",
+      text: "✓",
+    }),
+    el("button", {
+      class: "note-btn note-cancel", type: "button",
+      "data-note-cancel": row.video_id, "aria-label": "Discard note changes",
+      title: "Discard changes", text: "✕",
+    }),
+  ]);
+  return el("div", { class: "note-editor glass-panel" }, [
+    ta,
+    actions,
+    el("span", { class: "note-error", role: "alert" }),
+  ]);
+}
+
 function rowNode(row, trackState) {
   const hasVideo = row.title != null || row.link != null;
   const link = row.link || null;
@@ -112,13 +164,19 @@ function rowNode(row, trackState) {
     title,
     el("div", { class: "row-channel", text: row.channel_title || "—" }),
     stats,
+    noteEditor(row, hasVideo),
   ]);
 
-  return el("article", { class: "row" }, [
+  const actions = el("div", { class: "row-actions" }, [
+    starButton(row, hasVideo),
+    trackButton(row, trackState),
+  ]);
+
+  return el("article", { class: "row", "data-video-id": row.video_id || null }, [
     rankBadge(row.rank),
     thumb,
     main,
-    trackButton(row, trackState),
+    actions,
   ]);
 }
 

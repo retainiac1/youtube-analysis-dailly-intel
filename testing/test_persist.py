@@ -133,6 +133,129 @@ def test_idempotent_single_row(tmp_path):
         conn.close()
 
 
+# --- dashboard writes (Phase 3: user_notes + starred) -------------------------
+
+def test_set_user_notes_preserves_api_columns(tmp_path):
+    """A dashboard note write touches only user_notes and leaves every API-owned
+    column unchanged — the mirror image of the pipeline's user-column contract."""
+    conn = fresh_db(tmp_path)
+    try:
+        rec = make_video_record(view_count=1000)
+        upsert(conn, rec, NOW1)
+
+        with db.transaction(conn):
+            n = db.set_user_notes(conn, "vid1", "my note")
+        assert n == 1
+
+        row = fetch(conn)
+        assert row["user_notes"] == "my note"
+        for col in db.VIDEO_API_COLUMNS:
+            assert row[col] == rec[col], col
+        assert row["first_seen_at"] == NOW1
+        assert row["last_api_refresh_at"] == NOW1
+    finally:
+        conn.close()
+
+
+def test_set_user_notes_empty_clears(tmp_path):
+    """Clearing a note stores '' (never NULL), matching the has_notes_only filter."""
+    conn = fresh_db(tmp_path)
+    try:
+        upsert(conn, make_video_record(), NOW1)
+        with db.transaction(conn):
+            db.set_user_notes(conn, "vid1", "something")
+        with db.transaction(conn):
+            db.set_user_notes(conn, "vid1", "")
+        assert fetch(conn)["user_notes"] == ""
+    finally:
+        conn.close()
+
+
+def test_set_user_notes_unknown_video_returns_zero(tmp_path):
+    conn = fresh_db(tmp_path)
+    try:
+        with db.transaction(conn):
+            assert db.set_user_notes(conn, "nope", "x") == 0
+    finally:
+        conn.close()
+
+
+def test_set_starred_sets_and_clears(tmp_path):
+    """Star sets starred=1 + starred_at; unstar sets starred=0 + starred_at=NULL.
+    The stored flag is an int 1/0 so the starred_only filter (v.starred = 1) matches."""
+    conn = fresh_db(tmp_path)
+    try:
+        upsert(conn, make_video_record(), NOW1)
+
+        with db.transaction(conn):
+            assert db.set_starred(conn, "vid1", True, NOW2) == 1
+        row = fetch(conn)
+        assert row["starred"] == 1
+        assert type(row["starred"]) is int
+        assert row["starred_at"] == NOW2
+
+        with db.transaction(conn):
+            db.set_starred(conn, "vid1", False, NOW3)
+        row = fetch(conn)
+        assert row["starred"] == 0
+        assert row["starred_at"] is None
+    finally:
+        conn.close()
+
+
+def test_set_starred_unknown_video_returns_zero(tmp_path):
+    conn = fresh_db(tmp_path)
+    try:
+        with db.transaction(conn):
+            assert db.set_starred(conn, "nope", True, NOW1) == 0
+    finally:
+        conn.close()
+
+
+def test_note_write_survives_db_locked(tmp_path):
+    """The dashboard's write wrapping — run_with_db_retry OUTER, transaction INNER —
+    degrades a transient lock to a retry that re-runs the whole transaction."""
+    conn = fresh_db(tmp_path)
+    try:
+        upsert(conn, make_video_record(), NOW1)
+        calls = {"n": 0}
+
+        def write():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            with db.transaction(conn):
+                return db.set_user_notes(conn, "vid1", "note")
+
+        assert db.run_with_db_retry(write, sleep=lambda *_: None) == 1
+        assert calls["n"] == 2
+        assert fetch(conn)["user_notes"] == "note"
+    finally:
+        conn.close()
+
+
+def test_dashboard_writes_and_pipeline_upsert_are_disjoint(tmp_path):
+    """A note/star write and a later pipeline stats upsert touch disjoint columns:
+    the upsert refreshes stats without clobbering the note/star, and the write
+    never touched stats."""
+    conn = fresh_db(tmp_path)
+    try:
+        upsert(conn, make_video_record(view_count=1000), NOW1)
+        with db.transaction(conn):
+            db.set_user_notes(conn, "vid1", "keep me")
+            db.set_starred(conn, "vid1", True, NOW1)
+
+        upsert(conn, make_video_record(view_count=9999), NOW2)  # pipeline refresh
+
+        row = fetch(conn)
+        assert row["view_count"] == 9999      # stats refreshed
+        assert row["user_notes"] == "keep me"  # note untouched
+        assert row["starred"] == 1            # star untouched
+        assert row["starred_at"] == NOW1
+    finally:
+        conn.close()
+
+
 # --- snapshots ----------------------------------------------------------------
 
 def test_snapshots_one_per_run(tmp_path):
