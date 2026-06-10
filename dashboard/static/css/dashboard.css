@@ -1,0 +1,355 @@
+/* Phase 1 dashboard layout. Tokens come from tokens.css (the verbatim design
+   system); this file only composes them. Glass is reserved for containers (the
+   filter rail); leaderboard rows are flat elevated surfaces. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body { margin: 0; min-height: 100vh; }
+
+/* Keep keyboard scroll-into-view (focused rows/links) clear of the pinned header.
+   --header-h is measured at runtime in js/sticky-header.js; 0px until then. */
+html { scroll-padding-top: var(--header-h, 0px); }
+
+#app {
+  /* Lane color map, set per active lane on #app[data-lane]. Used identically by
+     tabs and rank badges so a lane reads the same everywhere. */
+  --lane-color: var(--accent-cyan);
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 1.5rem 1.5rem 4rem;
+}
+#app[data-lane="health"]  { --lane-color: var(--accent-cyan); }
+#app[data-lane="habit"]   { --lane-color: var(--accent-blue); }
+#app[data-lane="overall"] { --lane-color: var(--accent-purple); }
+
+/* --- Pinned header strip -------------------------------------------------- */
+/* Wraps the topbar, tab-row, and (mobile) filter toggle so the whole strip pins
+   as one unit. Frosted via the same Glass tokens as .glass-panel so scrolling
+   content blurs behind it with no bleed-through in either theme. The strip's
+   content stays within #app's horizontal padding, so it aligns with the board
+   below; no horizontal padding is added here (that would double-inset it). */
+.sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding: 1.25rem 0 1rem;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-bottom: 1px solid var(--glass-border);
+}
+/* The drawer toggle is content-width and left-aligned (it stretches by default as
+   a flex child); the topbar/tab-row keep their full-width flex layouts. */
+.sticky-header .filter-drawer-toggle { align-self: flex-start; }
+
+/* --- Top bar -------------------------------------------------------------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.app-title { font-size: clamp(1.75rem, 3vw, 2.5rem); margin: 0; }
+.topbar-controls { display: flex; align-items: center; gap: 0.75rem; }
+
+.run-picker { display: inline-flex; align-items: center; gap: 0.5rem; }
+.control-label {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+#run-select {
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+}
+.icon-btn { padding: 0.5rem 0.75rem; font-size: 1.1rem; }
+
+/* --- View + lane tabs (segmented controls) ------------------------------- */
+.tab-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.view-tabs, .lane-tabs {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.view-tab {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 1.25rem;
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.view-tab:hover { color: var(--text-primary); }
+/* Board/Trends is navigation (which page), so its active option is a NEUTRAL
+   filled pill, never a lane colour. The lane tabs below keep their lane colours
+   for scope, so the two control groups read as different kinds of control. */
+.view-tab[aria-selected="true"] {
+  color: var(--bg-base);
+  background: var(--text-primary);
+}
+
+/* Divider in the gap between the navigation group (view) and the scope group
+   (lane): a neutral hairline so the separation is structural, not colour alone. */
+.lane-tabs { position: relative; }
+.lane-tabs::before {
+  content: "";
+  position: absolute;
+  left: -0.625rem;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 1.5rem;
+  background: var(--border-glass);
+}
+.lane-tab {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 1.25rem;
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.lane-tab[data-lane="health"]  { --tab-color: var(--accent-cyan); }
+.lane-tab[data-lane="habit"]   { --tab-color: var(--accent-blue); }
+.lane-tab[data-lane="overall"] { --tab-color: var(--accent-purple); }
+.lane-tab:hover { color: var(--text-primary); }
+.lane-tab[aria-selected="true"] {
+  color: #06121f;
+  background: var(--tab-color);
+}
+
+/* --- Layout: filter rail + board ----------------------------------------- */
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+.filter-drawer-toggle { display: none; }
+
+/* Sit the sticky rail just below the pinned header. --header-h is measured at
+   runtime (js/sticky-header.js); 0px fallback until then, so no hardcoded height. */
+.filter-rail { padding: 1.25rem; position: sticky; top: calc(var(--header-h, 0px) + 0.75rem); }
+.filter-rail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+.filter-rail-head h2 { margin: 0; }
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--accent-cyan);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+}
+
+.filter-group {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  padding: 0.85rem 0 0;
+  margin: 0 0 0.85rem;
+}
+.filter-group legend {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  padding: 0;
+  margin-bottom: 0.5rem;
+}
+.filter-empty { color: var(--text-muted); font-size: 0.85rem; margin: 0; }
+
+.check-list { display: flex; flex-direction: column; gap: 0.35rem; max-height: 11rem; overflow-y: auto; }
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.check input { accent-color: var(--accent-cyan); }
+.toggle { margin-bottom: 0.4rem; }
+.toggles { display: flex; flex-direction: column; }
+
+.range-row { display: flex; gap: 0.5rem; }
+.range-input {
+  width: 100%;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.5rem;
+}
+
+/* --- Board: ranked rows (flat, not glass) -------------------------------- */
+.board { min-height: 12rem; }
+.row-list { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.row {
+  display: grid;
+  grid-template-columns: 3rem 8rem 1fr auto;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.6rem 0.85rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+}
+.row:hover { background: var(--bg-panel-hover); }
+
+.rank {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--lane-color);
+  text-align: center;
+}
+
+.thumb {
+  display: block;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-base);
+}
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb-missing { width: 100%; height: 100%; background: var(--bg-base); }
+
+.row-main { min-width: 0; }
+.row-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--text-primary);
+  text-decoration: none;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-title:hover { color: var(--lane-color); }
+.row-title-missing { color: var(--text-muted); font-style: italic; }
+.row-channel { color: var(--text-secondary); font-size: 0.85rem; margin: 0.1rem 0 0.4rem; }
+
+.row-stats { display: flex; gap: 1.25rem; flex-wrap: wrap; }
+.stat { display: flex; flex-direction: column; }
+.stat-value { font-weight: 600; color: var(--text-primary); font-size: 0.9rem; }
+.stat-label { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; }
+
+/* --- Track affordance (ephemeral; not a DB write) ------------------------ */
+.track-btn {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.65rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--transition-fast), background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+.track-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--lane-color);
+}
+.track-btn[aria-pressed="true"] {
+  color: #06121f;
+  background: var(--lane-color);
+  border-color: var(--lane-color);
+}
+.track-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* --- Trends view: chart cards (glass) ------------------------------------ */
+.trends {
+  grid-column: 1 / -1; /* span full width when the rail/board are hidden */
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-height: 12rem;
+}
+.chart-card { padding: 1.25rem; }
+.chart-card h2 { margin: 0 0 0.85rem; }
+.chart-mount { width: 100%; height: 340px; }
+.chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+/* --- Empty / error states ------------------------------------------------ */
+.empty-state {
+  padding: 3rem 1.5rem;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.empty-state p { margin: 0.35rem 0; }
+.empty-state .heading-sm { color: var(--text-primary); }
+.empty-error .heading-sm { color: var(--accent-red); }
+
+/* --- Focus visibility (never removed) ------------------------------------ */
+:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* --- Responsive: rail becomes a drawer, rows reflow ---------------------- */
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; }
+  .filter-drawer-toggle { display: inline-flex; }
+  .filter-rail { display: none; position: static; }
+  .filter-rail.open { display: block; }
+  .row {
+    grid-template-columns: 2.5rem 1fr auto;
+    grid-template-areas: "rank thumb track" "main main main";
+  }
+  .rank { grid-area: rank; }
+  .thumb { grid-area: thumb; max-width: 8rem; }
+  .row-main { grid-area: main; }
+  .track-btn { grid-area: track; align-self: start; }
+}
+
+/* --- Reduced motion ------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
