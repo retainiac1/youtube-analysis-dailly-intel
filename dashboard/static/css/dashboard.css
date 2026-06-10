@@ -30,7 +30,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
 #app[data-lane="overall"] { --lane-color: var(--accent-purple); }
 
 /* --- Pinned header strip -------------------------------------------------- */
-/* Wraps the topbar, tab-row, and (mobile) filter toggle so the whole strip pins
+/* Wraps the topbar, lane-row, and (mobile) filter toggle so the whole strip pins
    as one unit. Frosted via the same Glass tokens as .glass-panel so scrolling
    content blurs behind it with no bleed-through in either theme. The strip's
    content stays within #app's horizontal padding, so it aligns with the board
@@ -49,7 +49,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
   border-bottom: 1px solid var(--glass-border);
 }
 /* The drawer toggle is content-width and left-aligned (it stretches by default as
-   a flex child); the topbar/tab-row keep their full-width flex layouts. */
+   a flex child); the topbar/lane-row keep their full-width flex layouts. */
 .sticky-header .filter-drawer-toggle { align-self: flex-start; }
 
 /* --- Top bar -------------------------------------------------------------- */
@@ -57,6 +57,14 @@ html { scroll-padding-top: var(--header-h, 0px); }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+/* Title + page nav grouped on the left so page navigation reads as belonging with
+   the title; the run picker and theme toggle stay on the right (space-between). */
+.topbar-left {
+  display: flex;
+  align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
 }
@@ -81,14 +89,10 @@ html { scroll-padding-top: var(--header-h, 0px); }
 }
 .icon-btn { padding: 0.5rem 0.75rem; font-size: 1.1rem; }
 
-/* --- View + lane tabs (segmented controls) ------------------------------- */
-.tab-row {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-.view-tabs, .lane-tabs {
+/* --- Page nav (top tier) + lane tabs (second tier) ----------------------- */
+/* Both are segmented-control pills, but position separates them: page nav sits up
+   with the title, the lane scope sits on its own row below. */
+.page-nav, .lane-tabs {
   display: inline-flex;
   gap: 0.25rem;
   padding: 0.25rem;
@@ -96,39 +100,32 @@ html { scroll-padding-top: var(--header-h, 0px); }
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
 }
-.view-tab {
+/* Page navigation (which page): real links that drive the router. The active page
+   is a NEUTRAL filled pill, never a lane colour, so page nav and the lane scope
+   read as different kinds of control. */
+.page-nav-link {
   font-family: var(--font-display);
   font-weight: 600;
   font-size: 0.95rem;
   color: var(--text-secondary);
-  background: transparent;
-  border: none;
+  text-decoration: none;
   border-radius: var(--radius-sm);
   padding: 0.5rem 1.25rem;
   cursor: pointer;
   transition: color var(--transition-fast), background var(--transition-fast);
 }
-.view-tab:hover { color: var(--text-primary); }
-/* Board/Trends is navigation (which page), so its active option is a NEUTRAL
-   filled pill, never a lane colour. The lane tabs below keep their lane colours
-   for scope, so the two control groups read as different kinds of control. */
-.view-tab[aria-selected="true"] {
+.page-nav-link:hover { color: var(--text-primary); }
+.page-nav-link[aria-current="page"] {
   color: var(--bg-base);
   background: var(--text-primary);
 }
 
-/* Divider in the gap between the navigation group (view) and the scope group
-   (lane): a neutral hairline so the separation is structural, not colour alone. */
-.lane-tabs { position: relative; }
-.lane-tabs::before {
-  content: "";
-  position: absolute;
-  left: -0.625rem;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 1px;
-  height: 1.5rem;
-  background: var(--border-glass);
+/* Second tier holds the lane scope on its own row. */
+.lane-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
 }
 .lane-tab {
   font-family: var(--font-display);

@@ -29,8 +29,19 @@
          js/sticky-header.js); the rail offset and scroll-padding read that var so
          there is no hardcoded header height anywhere. -->
     <div class="sticky-header">
+      <!-- Top tier: global page nav (left, with the title) + run picker and theme
+           toggle (right). The Board/Trends links drive the client router, so they
+           are real links (aria-current marks the page), not an in-page toggle. -->
       <header class="topbar">
-        <h1 class="heading-xl app-title">daily-intel</h1>
+        <div class="topbar-left">
+          <h1 class="heading-xl app-title">daily-intel</h1>
+          <nav class="page-nav" aria-label="Pages">
+            <a class="page-nav-link" data-route href="/board" id="nav-board"
+               aria-current="page" tabindex="0">Board</a>
+            <a class="page-nav-link" data-route href="/trends" id="nav-trends"
+               tabindex="-1">Trends</a>
+          </nav>
+        </div>
         <div class="topbar-controls">
           <label class="run-picker">
             <span class="control-label">Run</span>
@@ -41,14 +52,9 @@
         </div>
       </header>
 
-      <div class="tab-row">
-        <nav class="view-tabs" role="tablist" aria-label="View">
-          <button class="view-tab" role="tab" data-view="board" id="view-board"
-                  aria-selected="true" tabindex="0">Board</button>
-          <button class="view-tab" role="tab" data-view="trends" id="view-trends"
-                  aria-selected="false" tabindex="-1">Trends</button>
-        </nav>
-
+      <!-- Second tier: content scope. The lane tabs stay a tablist (they narrow
+           the data within whichever page is shown) and persist across pages. -->
+      <div class="lane-row">
         <nav class="lane-tabs" role="tablist" aria-label="Lane">
           <button class="lane-tab" role="tab" data-lane="health" id="tab-health"
                   aria-selected="true" tabindex="0">Health</button>

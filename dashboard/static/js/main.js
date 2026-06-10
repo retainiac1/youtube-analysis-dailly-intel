@@ -1,10 +1,13 @@
 // Bootstrap: load runs + lane options, render the board, and wire the run
-// picker, lane tabs, filter rail (debounced), theme toggle, and mobile drawer.
+// picker, page nav (router), lane tabs, filter rail (debounced), theme toggle,
+// and mobile drawer. Board and Trends are URL-routed pages (/board, /trends); the
+// router swaps which page is shown, while the run and lane persist across both.
 
 import * as api from "./api.js";
 import * as filters from "./filters.js";
 import * as board from "./board.js";
 import * as trends from "./trends.js";
+import * as router from "./router.js";
 import "./sticky-header.js"; // side-effect: publishes --header-h for the pinned strip
 
 const app = document.getElementById("app");
@@ -15,13 +18,15 @@ const railGroups = document.getElementById("filter-groups");
 const rail = document.getElementById("filter-rail");
 const drawerToggle = document.getElementById("filter-drawer-toggle");
 const tabs = [...document.querySelectorAll(".lane-tab")];
-const viewTabs = [...document.querySelectorAll(".view-tab")];
+const pageNav = [...document.querySelectorAll(".page-nav-link")];
 
 const MAX_TRACKED = 5;
+const TRENDS_ROUTE = "/trends";
 
-// tracked is EPHEMERAL in-memory view state (which videos are charted), distinct
-// from starred (a Phase 3 DB write). It is never persisted.
-const state = { runDate: null, lane: "health", view: "board", tracked: new Set() };
+// The active page is owned by the router (router.current()); run/lane/tracked are
+// shared state that persists across pages. tracked is EPHEMERAL in-memory view
+// state (which videos are charted), distinct from starred (a Phase 3 DB write).
+const state = { runDate: null, lane: "health", tracked: new Set() };
 
 function trackState() {
   return { tracked: state.tracked, full: state.tracked.size >= MAX_TRACKED };
@@ -73,25 +78,28 @@ function selectLane(lane) {
   state.lane = lane;
   board.setActiveTab(app, tabs, lane);
   onRunOrLaneChange();
-  if (state.view === "trends") onLaneChangeTrends();
+  if (router.current() === TRENDS_ROUTE) onLaneChangeTrends();
 }
 
-function selectView(view) {
-  if (view === state.view) return;
-  state.view = view;
-  for (const t of viewTabs) {
-    const active = t.dataset.view === view;
-    t.setAttribute("aria-selected", active ? "true" : "false");
-    t.tabIndex = active ? 0 : -1;
-  }
-  const onBoard = view === "board";
-  boardEl.hidden = !onBoard;
-  rail.hidden = !onBoard;
-  drawerToggle.hidden = !onBoard;
-  trendsEl.hidden = onBoard;
-  // Render the charts on first entry / re-entry (an ECharts instance on a hidden
-  // element cannot size itself, so we only render while Trends is visible).
-  if (view === "trends") trends.refreshAll(state);
+// Route handlers: show the page's content region and hide the others. These only
+// toggle visibility (they do not re-render the board), so Board's rows and filter
+// state survive navigating away to Trends and back. The board's data is loaded by
+// run/lane changes and the initial load, independent of which page is shown.
+function enterBoard() {
+  boardEl.hidden = false;
+  rail.hidden = false;
+  drawerToggle.hidden = false;
+  trendsEl.hidden = true;
+}
+
+function enterTrends() {
+  boardEl.hidden = true;
+  rail.hidden = true;
+  drawerToggle.hidden = true;
+  trendsEl.hidden = false;
+  // Render the charts on entry: an ECharts instance on a hidden element cannot
+  // size itself, so charts are only rendered while Trends is visible.
+  trends.refreshAll(state);
 }
 
 // Arrow-key roving focus for a segmented tablist.
@@ -110,8 +118,9 @@ function wireTablist(tabList, onSelect, keyOf) {
 }
 
 function setupTabs() {
+  // Lane tabs only; the page-nav (Board/Trends) keyboard + click handling lives in
+  // the router, since those links drive navigation rather than scope a tablist.
   wireTablist(tabs, selectLane, (t) => t.dataset.lane);
-  wireTablist(viewTabs, selectView, (t) => t.dataset.view);
 }
 
 function setupTheme() {
@@ -122,7 +131,7 @@ function setupTheme() {
     root.setAttribute("data-theme", next);
     localStorage.setItem("site-theme", next);
     // ECharts cannot re-theme a live instance, so rebuild the visible charts.
-    if (state.view === "trends") trends.rerenderFromCache();
+    if (router.current() === TRENDS_ROUTE) trends.rerenderFromCache();
   });
 }
 
@@ -135,7 +144,7 @@ function setupTracking() {
     if (state.tracked.has(id)) state.tracked.delete(id);
     else if (state.tracked.size < MAX_TRACKED) state.tracked.add(id);
     reloadBoard(); // re-render rows to reflect tracked / "5 max" state
-    if (state.view === "trends") trends.refreshTrajectory(state);
+    if (router.current() === TRENDS_ROUTE) trends.refreshTrajectory(state);
   });
 }
 
@@ -174,10 +183,17 @@ async function init() {
   });
   board.setActiveTab(app, tabs, state.lane);
 
+  // Register routes (wires page-nav clicks/keys); do not dispatch until data loads.
+  router.initRouter({
+    routes: { "/board": enterBoard, "/trends": enterTrends },
+    links: pageNav,
+    fallback: "/board",
+  });
+
   runSelect.addEventListener("change", () => {
     state.runDate = runSelect.value;
     onRunOrLaneChange();
-    if (state.view === "trends") onRunChangeTrends();
+    if (router.current() === TRENDS_ROUTE) onRunChangeTrends();
   });
 
   let runs;
@@ -195,7 +211,11 @@ async function init() {
   }
   board.populateRunSelect(runSelect, runs);
   state.runDate = runs[0];
+  // Load the board (rows + filter options) so it is ready regardless of the
+  // landing page, then dispatch the current URL: "/" redirects to /board, and a
+  // deep link to /trends renders the charts via enterTrends.
   await onRunOrLaneChange();
+  router.start();
 }
 
 init();

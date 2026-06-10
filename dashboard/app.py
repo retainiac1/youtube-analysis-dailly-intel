@@ -19,6 +19,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from fastapi import Depends, FastAPI, HTTPException, Query  # noqa: E402
+from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 import config  # noqa: E402
@@ -305,5 +306,27 @@ def api_distribution(
     }
 
 
-# Static page. Mounted LAST so it does not shadow the /api routes.
-app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
+# Static assets + SPA shell. Registered AFTER every /api route above.
+#
+# Asset roots are mounted per directory (js/css/vendor are the only ones under
+# static/), NOT as a single mount at "/". A Mount("/") compiles to /{path:path}
+# and matches EVERY request, so it would swallow client routes like /board and
+# /trends (StaticFiles 404s a missing path; html=True does not fall back to
+# index.html for non-directory paths), and any catch-all after it would be dead
+# code. Per-directory mounts only claim their own prefix, leaving page paths to
+# the catch-all below.
+app.mount("/js", StaticFiles(directory=str(_STATIC_DIR / "js")), name="js")
+app.mount("/css", StaticFiles(directory=str(_STATIC_DIR / "css")), name="css")
+app.mount("/vendor", StaticFiles(directory=str(_STATIC_DIR / "vendor")), name="vendor")
+
+
+@app.get("/{path:path}", include_in_schema=False)
+async def spa(path: str):
+    """Serve the app shell for any non-/api, non-asset path so deep links and
+    refreshes on client routes (/, /board, /trends, future pages) return index.html
+    instead of a 404; the vanilla router then renders the matching page. The /api
+    routes above match first by specificity; this guard keeps an unmatched /api/*
+    a 404 rather than serving HTML in its place (path has no leading slash here)."""
+    if path.startswith("api"):
+        raise HTTPException(status_code=404)
+    return FileResponse(str(_STATIC_DIR / "index.html"))
