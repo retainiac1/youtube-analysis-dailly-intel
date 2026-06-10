@@ -159,7 +159,16 @@ export function renderBump(el, data, lane) {
 
   inst.setOption({
     animation: !prefersReducedMotion,
-    tooltip: { trigger: "axis" },
+    // Per-item (not axis): hovering one line shows just that video's rank at the
+    // hovered run. An axis tooltip listed every ranked video (~20 rows, taller than
+    // the chart), which overflowed into the pinned header above and the next card
+    // below. A single-item tooltip is small and stays clear of both.
+    tooltip: {
+      trigger: "item",
+      formatter: (p) =>
+        `<strong>${escapeHtml(truncate(p.seriesName, 50))}</strong><br/>` +
+        `rank ${p.value} on ${escapeHtml(p.name)}`,
+    },
     grid: baseGrid,
     ...axes(t, {
       xAxis: { type: "category", data: runDates, boundaryGap: false },
