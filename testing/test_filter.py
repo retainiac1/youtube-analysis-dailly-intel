@@ -169,6 +169,52 @@ def test_distribution_buckets_boundaries():
     }
 
 
+def test_distribution_buckets_moved_to_config():
+    """The bucket constants now live in config.py (stdlib-only) so the dashboard
+    can reuse them without importing swipefile. swipefile re-imports them, so the
+    two names must be the SAME object and produce identical output."""
+    import config
+
+    # Re-import, not a copy: same function object and same tuple.
+    assert config.distribution_buckets is swipefile.distribution_buckets
+    assert config.DISTRIBUTION_BUCKETS is swipefile.DISTRIBUTION_BUCKETS
+    assert config.DISTRIBUTION_BUCKETS == (
+        ">=100k", "50-100k", "20-50k", "10-20k", "5-10k", "1-5k", "<1k",
+    )
+
+    # Thresholds did not shift across the move (same vector as the boundary test).
+    assert config.distribution_buckets(
+        [100000, 99999, 50000, 9999, 1000, 999, 25000]
+    ) == {
+        ">=100k": 1, "50-100k": 2, "20-50k": 1,
+        "10-20k": 0, "5-10k": 1, "1-5k": 1, "<1k": 1,
+    }
+
+
+def test_distribution_bucket_single_value_classifier():
+    """distribution_buckets tallies via the single-value distribution_bucket, so
+    the two must agree and the boundaries must be the documented thresholds."""
+    import config
+
+    # Boundary labels (the dashboard histogram classifies one count at a time).
+    assert config.distribution_bucket(100_000) == ">=100k"
+    assert config.distribution_bucket(99_999) == "50-100k"
+    assert config.distribution_bucket(50_000) == "50-100k"
+    assert config.distribution_bucket(20_000) == "20-50k"
+    assert config.distribution_bucket(10_000) == "10-20k"
+    assert config.distribution_bucket(5_000) == "5-10k"
+    assert config.distribution_bucket(1_000) == "1-5k"
+    assert config.distribution_bucket(999) == "<1k"
+    assert config.distribution_bucket(0) == "<1k"
+
+    # Tallying per-element via distribution_bucket reproduces distribution_buckets.
+    vector = [100000, 99999, 50000, 9999, 1000, 999, 25000, 0, 7500]
+    by_classifier = {k: 0 for k in config.DISTRIBUTION_BUCKETS}
+    for c in vector:
+        by_classifier[config.distribution_bucket(c)] += 1
+    assert by_classifier == config.distribution_buckets(vector)
+
+
 def test_language_drop_values_only_present_non_english():
     batch = [
         fake_video("es", audio="es"),                       # language

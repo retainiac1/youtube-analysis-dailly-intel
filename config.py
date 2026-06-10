@@ -121,6 +121,43 @@ LOCAL_TZ = "America/New_York"
 
 VALID_BUCKETS = {"health", "habit"}
 
+# View-count distribution buckets. Shared between the pipeline's tuning
+# diagnostics (swipefile.py re-imports these) and the dashboard's distribution
+# histogram. They live here, in the stdlib-only config module, so the dashboard
+# can reuse the exact thresholds WITHOUT importing swipefile.py (which would drag
+# in the whole API/network dependency tree). Do not redefine the thresholds
+# elsewhere.
+DISTRIBUTION_BUCKETS = (">=100k", "50-100k", "20-50k", "10-20k", "5-10k", "1-5k", "<1k")
+
+
+def distribution_bucket(count: int) -> str:
+    """Return the DISTRIBUTION_BUCKETS label a single raw view count falls into.
+    Comparisons use raw integer thresholds; any k-notation is display-only and
+    never reaches here, so 99,999 lands in '50-100k'. Single source of truth for
+    the bucket boundaries (distribution_buckets tallies via this)."""
+    if count >= 100_000:
+        return ">=100k"
+    if count >= 50_000:
+        return "50-100k"
+    if count >= 20_000:
+        return "20-50k"
+    if count >= 10_000:
+        return "10-20k"
+    if count >= 5_000:
+        return "5-10k"
+    if count >= 1_000:
+        return "1-5k"
+    return "<1k"
+
+
+def distribution_buckets(counts: list[int]) -> dict[str, int]:
+    """Tally raw view counts into DISTRIBUTION_BUCKETS, keyed in canonical order.
+    Thresholds are defined once in distribution_bucket()."""
+    out = {k: 0 for k in DISTRIBUTION_BUCKETS}
+    for c in counts:
+        out[distribution_bucket(c)] += 1
+    return out
+
 # NOTE: MIN_VIEWS, SHORT_MAX_SECONDS and SEARCH_RELEVANCE_LANGUAGE are
 # user-tunable and now loaded from settings.toml above (see SETTINGS_DEFAULTS).
 # MIN_VIEWS is the live-tuned qualifying-view floor; SHORT_MAX_SECONDS remains

@@ -29,6 +29,7 @@ from config import (
     CSV_COLUMNS,
     DAILY_QUOTA_LIMIT,
     DB_PATH,
+    DISTRIBUTION_BUCKETS,
     MIN_VIEWS,
     OUTPUT_CSV,
     OUTPUT_XLSX_BASE,
@@ -44,6 +45,7 @@ from config import (
     VALID_BUCKETS,
     VIDEOS_QUOTA_COST,
     ConfigError,
+    distribution_buckets,
     get_published_after,
     now_local_iso,
     pacific_date,
@@ -165,7 +167,9 @@ def filter_videos(videos: list[dict], min_views: int, max_duration: int,
 
 # --- Tuning diagnostics (read-only; never perturb the drop counts) -----------
 
-DISTRIBUTION_BUCKETS = (">=100k", "50-100k", "20-50k", "10-20k", "5-10k", "1-5k", "<1k")
+# DISTRIBUTION_BUCKETS and distribution_buckets() now live in config.py (stdlib-
+# only) so the dashboard can reuse the exact thresholds without importing this
+# module; both are re-imported above and remain available as swipefile.* here.
 
 
 def qualifying_view_counts(videos: list[dict], min_views: int, max_duration: int,
@@ -183,29 +187,6 @@ def qualifying_view_counts(videos: list[dict], min_views: int, max_duration: int
             counts.append(int(video.get("statistics", {}).get("viewCount")))
     counts.sort(reverse=True)
     return counts
-
-
-def distribution_buckets(counts: list[int]) -> dict[str, int]:
-    """Bucket raw view counts into DISTRIBUTION_BUCKETS. Comparisons use raw
-    integer thresholds — any k-notation is display-only and never reaches here, so
-    99,999 lands in '50-100k'."""
-    out = {k: 0 for k in DISTRIBUTION_BUCKETS}
-    for c in counts:
-        if c >= 100_000:
-            out[">=100k"] += 1
-        elif c >= 50_000:
-            out["50-100k"] += 1
-        elif c >= 20_000:
-            out["20-50k"] += 1
-        elif c >= 10_000:
-            out["10-20k"] += 1
-        elif c >= 5_000:
-            out["5-10k"] += 1
-        elif c >= 1_000:
-            out["1-5k"] += 1
-        else:
-            out["<1k"] += 1
-    return out
 
 
 def language_drop_values(videos: list[dict], min_views: int, max_duration: int,

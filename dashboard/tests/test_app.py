@@ -1,4 +1,51 @@
+import sqlite3
+import threading
+
 import config
+import db
+
+
+def _query_in_thread(conn):
+    """Run a trivial query on `conn` from a fresh thread; return the exception
+    raised there (or None). sqlite3 raises ProgrammingError when a connection is
+    used off its creating thread and check_same_thread is True."""
+    box = {}
+
+    def run():
+        try:
+            conn.execute("SELECT 1").fetchone()
+            box["err"] = None
+        except Exception as e:  # noqa: BLE001 - we want to inspect it
+            box["err"] = e
+
+    t = threading.Thread(target=run)
+    t.start()
+    t.join()
+    return box["err"]
+
+
+def test_get_connection_default_blocks_cross_thread(tmp_path):
+    """The pipeline contract: the default connection is single-thread guarded."""
+    path = str(tmp_path / "t.db")
+    db.init_db(path)
+    conn = db.get_connection(path)
+    try:
+        assert isinstance(_query_in_thread(conn), sqlite3.ProgrammingError)
+    finally:
+        conn.close()
+
+
+def test_get_connection_check_same_thread_false_allows_cross_thread(tmp_path):
+    """The dashboard opens connections with check_same_thread=False so FastAPI's
+    threadpool can create the connection on one worker and use it on another
+    (concurrent chart requests) without a ProgrammingError."""
+    path = str(tmp_path / "t.db")
+    db.init_db(path)
+    conn = db.get_connection(path, check_same_thread=False)
+    try:
+        assert _query_in_thread(conn) is None
+    finally:
+        conn.close()
 
 
 def test_runs_lists_run_dates(client):
@@ -63,3 +110,16 @@ def test_placeholder_page_served(client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "daily-intel dashboard" in resp.text
+
+
+def test_index_asset_links_resolve(client):
+    """Every CSS/JS the page references must actually serve. Guards against a
+    wrong path (the static mount is at '/', so links must NOT carry a '/static'
+    prefix)."""
+    import re
+
+    page = client.get("/").text
+    assets = re.findall(r'(?:href|src)="(/[^"]+\.(?:css|js))"', page)
+    assert assets, "index.html references no local css/js"
+    for url in assets:
+        assert client.get(url).status_code == 200, f"asset 404: {url}"
