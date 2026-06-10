@@ -399,12 +399,25 @@ html { scroll-padding-top: var(--header-h, 0px); }
   display: none;
 }
 
+/* Two columns: the chart stack on the left (flexible), a fixed interpretation
+   rail on the right. grid-column 1 / -1 keeps the page full width within .layout
+   when the board and filter rail are hidden. */
 .trends {
-  grid-column: 1 / -1; /* span full width when the rail/board are hidden */
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 1.5rem;
+  align-items: start;
+  min-height: 12rem;
+}
+/* The chart column. min-width: 0 is load-bearing: without it the ECharts mounts
+   force this track wider than 1fr and push the rail off, so the charts would not
+   keep their width beside the rail. */
+.trends-charts {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
-  min-height: 12rem;
+  min-width: 0;
 }
 .chart-card { padding: 1.25rem; }
 .chart-card h2 { margin: 0 0 0.85rem; }
@@ -445,6 +458,46 @@ html { scroll-padding-top: var(--header-h, 0px); }
   max-width: 70ch;
 }
 
+/* --- Trends interpretation rail (read-only, right column) ---------------- */
+/* Mirrors the left filter rail: sticky and offset below the pinned header by the
+   runtime-measured --header-h, so it stays in view while the charts scroll. The
+   lane-color left border (set on #app[data-lane]) ties the summary to the lane. */
+.interpretation-rail {
+  padding: 1.25rem;
+  position: sticky;
+  top: calc(var(--header-h, 0px) + 0.75rem);
+  border-left: 3px solid var(--lane-color);
+}
+.interpretation-rail .rail-title {
+  margin: 0 0 0.5rem;
+  color: var(--text-primary);
+}
+/* The rail's prose is the same read-only style as the page, sized down a touch and
+   left unbounded so it wraps to the narrow column rather than 70ch. */
+.interpretation-rail .interpretation-text {
+  font-size: 0.9rem;
+  max-width: none;
+}
+.interpretation-rail .interpretation-meta { margin: 0 0 0.85rem; }
+/* The only navigation out of the read-only rail: routes to /interpretation. */
+.rail-tune {
+  display: inline-block;
+  margin-top: 1rem;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--lane-color);
+  text-decoration: none;
+}
+.rail-tune:hover { text-decoration: underline; }
+/* The rail's own empty state sits left-aligned in the narrow column, not centered
+   like the full-page empty state. */
+.interpretation-rail .rail-empty {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+.interpretation-rail .rail-empty p { margin: 0 0 0.5rem; }
+
 /* --- Empty / error states ------------------------------------------------ */
 .empty-state {
   padding: 3rem 1.5rem;
@@ -468,6 +521,10 @@ html { scroll-padding-top: var(--header-h, 0px); }
   .filter-drawer-toggle { display: inline-flex; }
   .filter-rail { display: none; position: static; }
   .filter-rail.open { display: block; }
+  /* Trends collapses to a single column; the rail un-sticks and moves above the
+     charts (grid honors order), so the summary leads on narrow screens. */
+  .trends { grid-template-columns: 1fr; }
+  .interpretation-rail { position: static; order: -1; }
   .row {
     grid-template-columns: 2.5rem 1fr auto;
     grid-template-areas: "rank thumb actions" "main main main";

@@ -9,6 +9,7 @@ import * as filters from "./filters.js";
 import * as board from "./board.js";
 import * as trends from "./trends.js";
 import * as interpretation from "./interpretation.js";
+import * as interpRail from "./interpretation-rail.js";
 import * as router from "./router.js";
 import "./sticky-header.js"; // side-effect: publishes --header-h for the pinned strip
 
@@ -67,14 +68,17 @@ async function onRunOrLaneChange() {
   await reloadBoard();
 }
 
-// A run change refreshes only the histogram (the one run-scoped chart); the bump
-// chart and trajectory span all runs and only change with the lane.
+// A run change refreshes the histogram (the one run-scoped chart) and the
+// interpretation rail (the summary is keyed on run + lane); the bump chart and
+// trajectory span all runs and only change with the lane.
 async function onRunChangeTrends() {
   await trends.refreshHistogram(state);
+  interpRail.refresh(state);
 }
 
 async function onLaneChangeTrends() {
   await trends.refreshAll(state);
+  interpRail.refresh(state);
 }
 
 function selectLane(lane) {
@@ -107,6 +111,8 @@ function enterTrends() {
   // Render the charts on entry: an ECharts instance on a hidden element cannot
   // size itself, so charts are only rendered while Trends is visible.
   trends.refreshAll(state);
+  // The read-only interpretation rail beside the charts (run + lane scoped).
+  interpRail.refresh(state);
 }
 
 function enterInterpretation() {
@@ -279,6 +285,7 @@ async function init() {
     trajectory: document.getElementById("chart-trajectory"),
   });
   interpretation.init(interpretationEl);
+  interpRail.init(document.getElementById("trends-interp-rail"));
   board.setActiveTab(app, tabs, state.lane);
 
   // Register routes (wires page-nav clicks/keys); do not dispatch until data loads.

@@ -85,18 +85,26 @@
       <main class="board" id="board" aria-live="polite"></main>
 
       <main class="trends" id="trends" aria-live="polite" hidden>
-        <section class="glass-panel chart-card">
-          <h2 class="heading-sm">Rank movement across runs</h2>
-          <div id="chart-bump" class="chart-mount"></div>
-        </section>
-        <section class="glass-panel chart-card">
-          <h2 class="heading-sm">View-count distribution (this run)</h2>
-          <div id="chart-distribution" class="chart-mount"></div>
-        </section>
-        <section class="glass-panel chart-card">
-          <h2 class="heading-sm">Tracked video trajectory</h2>
-          <div id="chart-trajectory" class="chart-mount"></div>
-        </section>
+        <div class="trends-charts">
+          <section class="glass-panel chart-card">
+            <h2 class="heading-sm">Rank movement across runs</h2>
+            <div id="chart-bump" class="chart-mount"></div>
+          </section>
+          <section class="glass-panel chart-card">
+            <h2 class="heading-sm">View-count distribution (this run)</h2>
+            <div id="chart-distribution" class="chart-mount"></div>
+          </section>
+          <section class="glass-panel chart-card">
+            <h2 class="heading-sm">Tracked video trajectory</h2>
+            <div id="chart-trajectory" class="chart-mount"></div>
+          </section>
+        </div>
+        <!-- Read-only interpretation rail: the stored summary for the current run
+             and lane, shown beside the evidence. Display only (no controls, no run
+             button, no write path); its content is rendered by interpretation-rail.js
+             and the "Tune" link routes to /interpretation for generation. -->
+        <aside class="glass-panel interpretation-rail" id="trends-interp-rail"
+               aria-label="Interpretation"></aside>
       </main>
 
       <main class="interpretation" id="interpretation" aria-live="polite" hidden></main>
