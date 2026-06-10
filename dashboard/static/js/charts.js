@@ -123,25 +123,6 @@ function axes(t, opts) {
 
 const baseGrid = { left: 48, right: 24, top: 28, bottom: 40 };
 
-// Tooltip placement (all three Trends charts use this). ECharts defaults to placing
-// the tooltip above the cursor; near the top of a chart that pushes a tall tooltip
-// up off the chart's top edge, which abuts the pinned header, so it gets clipped by
-// / hidden behind the header band. Place it above by default, but drop it below the
-// cursor when the above-position would overflow the top, so it never enters the
-// header band. Coordinates are chart-relative; the chart sits entirely below the
-// header, so "below the cursor" is always clear of the header. (We do NOT confine,
-// and do NOT raise z-index above the header.)
-function tooltipBelowAtTop(point, params, dom, rect, size) {
-  const [x, y] = point;
-  const [w, h] = size.contentSize;
-  const [vw] = size.viewSize;
-  let px = x + 16;
-  if (px + w > vw) px = Math.max(0, x - w - 16);
-  let py = y - h - 16;
-  if (py < 0) py = y + 16;
-  return [px, py];
-}
-
 // --- Bump chart: rank movement across run_dates (rank 1 on top) --------------
 export function renderBump(el, data, lane) {
   const runDates = data.run_dates || [];
@@ -178,7 +159,7 @@ export function renderBump(el, data, lane) {
 
   inst.setOption({
     animation: !prefersReducedMotion,
-    tooltip: { trigger: "axis", position: tooltipBelowAtTop },
+    tooltip: { trigger: "axis" },
     grid: baseGrid,
     ...axes(t, {
       xAxis: { type: "category", data: runDates, boundaryGap: false },
@@ -228,7 +209,6 @@ export function renderHistogram(el, data, lane) {
     animation: !prefersReducedMotion,
     tooltip: {
       trigger: "axis",
-      position: tooltipBelowAtTop,
       axisPointer: { type: "shadow" },
       formatter: (params) => tooltipFor(params[0].dataIndex),
     },
@@ -308,7 +288,7 @@ export function renderTrajectory(el, payload, lane) {
 
   inst.setOption({
     animation: !prefersReducedMotion,
-    tooltip: { trigger: "axis", position: tooltipBelowAtTop },
+    tooltip: { trigger: "axis" },
     legend: {
       textStyle: { color: t.textStyle.color },
       top: 0,

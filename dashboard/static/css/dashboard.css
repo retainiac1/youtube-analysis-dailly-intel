@@ -16,12 +16,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
   --lane-color: var(--accent-cyan);
   max-width: 1280px;
   margin: 0 auto;
-  /* No top padding: the sticky header is the first child, so any scrollable space
-     above it inside #app gives it an un-stuck travel zone (the old 1.5rem ~= 24px),
-     which springs the strip down then back during overscroll at the top (the
-     "bounce"). Flush top = zero travel. The header's own padding gives breathing
-     room. Horizontal/bottom padding unchanged. */
-  padding: 0 1.5rem 4rem;
+  padding: 1.5rem 1.5rem 4rem;
 }
 #app[data-lane="health"]  { --lane-color: var(--accent-cyan); }
 #app[data-lane="habit"]   { --lane-color: var(--accent-blue); }
