@@ -447,4 +447,4 @@ STOP.
 - Schema bump 2 -> 3, additive, seed preserved, via the existing user_version
   hook.
 - `upsert_interpretation` deferred to Phase 4 (for the external generator).
-- Deps fastapi, uvicorn, httpx (test). Location dashboard/ in project root.
+  - Deps fastapi, uvicorn, httpx (test). Location dashboard/ in project root. 
