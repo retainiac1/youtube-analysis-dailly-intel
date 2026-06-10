@@ -6,6 +6,13 @@
 
 body { margin: 0; min-height: 100vh; }
 
+/* Disable macOS rubber-band / elastic overscroll on the page scroll. Confirmed in
+   Chrome (toggle test) as the cause of the pinned header "bouncing" ~1/4 inch when
+   overscrolling at the top: the elastic bounce momentarily moves the sticky strip.
+   Side effect: no elastic-overscroll affordance for the whole page, which is fine
+   for this single-screen dashboard. */
+html, body { overscroll-behavior-y: none; }
+
 /* Keep keyboard scroll-into-view (focused rows/links) clear of the pinned header.
    --header-h is measured at runtime in js/sticky-header.js; 0px until then. */
 html { scroll-padding-top: var(--header-h, 0px); }
