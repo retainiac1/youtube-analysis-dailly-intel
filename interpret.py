@@ -23,11 +23,13 @@ import argparse
 import sys
 
 import db
-from config import DB_PATH, ConfigError, now_local_iso, validate_config
+from config import DB_PATH, ConfigError, VALID_BUCKETS, now_local_iso, validate_config
 from llm import generate
 
-# Lane order matches compute_rankings keys: "overall" plus VALID_BUCKETS.
-SCOPES = ("overall", "health", "habit")
+# Lane order matches compute_rankings keys: "overall" plus VALID_BUCKETS. Derived
+# from the single source of truth (config.VALID_BUCKETS) so adding a bucket does not
+# require editing two places; sorted() makes the order deterministic.
+SCOPES = ("overall",) + tuple(sorted(VALID_BUCKETS))
 
 # A sane default valid for every provider's temperature range (Anthropic 0-1,
 # others 0-2). The adapter validates against its own range downstream.
@@ -117,14 +119,15 @@ def synthesize_run(conn, run_date: str, model: str, *, temperature: float,
 
 
 def _resolve_run_date(conn, requested):
-    """The CLI default: the most recent run_date present in `rankings`. The
-    generator never derives run_date from `now`."""
+    """The default: the most recent run_date present in `rankings`. The generator
+    never derives run_date from `now`. Raises ValueError when `rankings` is empty;
+    the caller (main / a dashboard endpoint) decides how to surface that — this
+    importable core stays free of process-exit coupling."""
     if requested is not None:
         return requested
     run_dates = db.fetch_run_dates(conn)
     if not run_dates:
-        raise SystemExit("error: no run_date present in rankings; nothing to "
-                         "summarize")
+        raise ValueError("no run_date present in rankings; nothing to summarize")
     return run_dates[0]["run_date"]
 
 
@@ -156,7 +159,11 @@ def main(argv=None) -> None:
     db.init_db(DB_PATH)
     conn = db.get_connection(DB_PATH)
     try:
-        run_date = _resolve_run_date(conn, args.run_date)
+        try:
+            run_date = _resolve_run_date(conn, args.run_date)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            raise SystemExit(1)
         scopes = (args.scope,) if args.scope else SCOPES
         print(f"interpreting run_date={run_date} model={args.model} "
               f"temperature={args.temperature} seed={args.seed}",

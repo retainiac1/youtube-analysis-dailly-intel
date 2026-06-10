@@ -1,16 +1,32 @@
+import pytest
+
 import db
 import interpret
 import llm
 
 
+# --- fixtures --------------------------------------------------------------
+# `db_path` initializes a fresh temp DB; `conn` layers an open connection on top
+# and closes it after the test. CLI tests take `db_path` because they use separate
+# connections around main() (mirroring the real separate-process boundary).
+
+@pytest.fixture
+def db_path(tmp_path):
+    path = str(tmp_path / "test.db")
+    db.init_db(path)
+    return path
+
+
+@pytest.fixture
+def conn(db_path):
+    connection = db.get_connection(db_path)
+    yield connection
+    connection.close()
+
+
 # --- test fixtures: seed lanes ---------------------------------------------
 # A ranking row always exists; the videos row is optional so a LEFT-JOIN NULL
 # (missing video) can be exercised. fetch_lane LEFT JOINs videos on video_id.
-
-def _init(tmp_path):
-    db_path = str(tmp_path / "test.db")
-    db.init_db(db_path)
-    return db_path
 
 
 def _seed_ranking(conn, run_date, bucket, rank, video_id, metric_value,
@@ -50,16 +66,11 @@ def _make_fake_generate(rec, *, text="One. Two. Three.", input_tokens=120,
 
 # --- build_prompt ----------------------------------------------------------
 
-def test_build_prompt_states_scope_and_exact_count(tmp_path):
-    db_path = _init(tmp_path)
-    conn = db.get_connection(db_path)
-    try:
-        _seed_ranking(conn, "2026-06-09", "health", 1, "v1", 3.1,
-                      title="Sleep Hacks", channel_title="DrSleep")
-        conn.commit()
-        rows = db.fetch_lane(conn, "2026-06-09", "health")
-    finally:
-        conn.close()
+def test_build_prompt_states_scope_and_exact_count(conn):
+    _seed_ranking(conn, "2026-06-09", "health", 1, "v1", 3.1,
+                  title="Sleep Hacks", channel_title="DrSleep")
+    conn.commit()
+    rows = db.fetch_lane(conn, "2026-06-09", "health")
 
     prompt = interpret.build_prompt("2026-06-09", "health", rows)
     assert "health" in prompt
@@ -68,35 +79,23 @@ def test_build_prompt_states_scope_and_exact_count(tmp_path):
     assert "DrSleep" in prompt
 
 
-def test_build_prompt_count_matches_row_count(tmp_path):
-    db_path = _init(tmp_path)
-    conn = db.get_connection(db_path)
-    try:
-        for i in range(3):
-            _seed_ranking(conn, "2026-06-09", "overall", i + 1,
-                          f"v{i}", 3.0 - i)
-        conn.commit()
-        rows = db.fetch_lane(conn, "2026-06-09", "overall")
-    finally:
-        conn.close()
+def test_build_prompt_count_matches_row_count(conn):
+    for i in range(3):
+        _seed_ranking(conn, "2026-06-09", "overall", i + 1, f"v{i}", 3.0 - i)
+    conn.commit()
+    rows = db.fetch_lane(conn, "2026-06-09", "overall")
 
     prompt = interpret.build_prompt("2026-06-09", "overall", rows)
     assert "3" in prompt
     assert len(rows) == 3
 
 
-def test_build_prompt_tolerates_null_video_fields(tmp_path):
+def test_build_prompt_tolerates_null_video_fields(conn):
     # A ranking whose video row is missing: title/channel/views are NULL via the
     # LEFT JOIN. The prompt must NOT contain the literal string "None".
-    db_path = _init(tmp_path)
-    conn = db.get_connection(db_path)
-    try:
-        _seed_ranking(conn, "2026-06-09", "habit", 1, "ghost", 4.0,
-                      with_video=False)
-        conn.commit()
-        rows = db.fetch_lane(conn, "2026-06-09", "habit")
-    finally:
-        conn.close()
+    _seed_ranking(conn, "2026-06-09", "habit", 1, "ghost", 4.0, with_video=False)
+    conn.commit()
+    rows = db.fetch_lane(conn, "2026-06-09", "habit")
 
     assert rows[0]["title"] is None          # precondition: NULL field present
     prompt = interpret.build_prompt("2026-06-09", "habit", rows)
@@ -105,175 +104,136 @@ def test_build_prompt_tolerates_null_video_fields(tmp_path):
 
 # --- synthesize_lane -------------------------------------------------------
 
-def test_synthesize_lane_writes_interpretation_and_logs(tmp_path, monkeypatch):
-    db_path = _init(tmp_path)
+def test_synthesize_lane_writes_interpretation_and_logs(conn, monkeypatch):
     rec = []
     monkeypatch.setattr(interpret, "generate",
                         _make_fake_generate(rec, text="A summary.",
                                             input_tokens=200, output_tokens=30,
                                             seed_applied=42))
-    conn = db.get_connection(db_path)
-    try:
-        _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
-        conn.commit()
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
 
-        result = interpret.synthesize_lane(
-            conn, "2026-06-09", "overall", "openai:gpt-5.4-nano",
-            temperature=0.7, seed=42,
-        )
-        assert result["skipped"] is False
-        assert result["text"] == "A summary."
-        assert len(rec) == 1                              # generate called once
-        assert rec[0]["model"] == "openai:gpt-5.4-nano"
+    result = interpret.synthesize_lane(
+        conn, "2026-06-09", "overall", "openai:gpt-5.4-nano",
+        temperature=0.7, seed=42,
+    )
+    assert result["skipped"] is False
+    assert result["text"] == "A summary."
+    assert len(rec) == 1                              # generate called once
+    assert rec[0]["model"] == "openai:gpt-5.4-nano"
 
-        interp = conn.execute(
-            "SELECT scope, text, model FROM interpretations"
-        ).fetchall()
-        assert len(interp) == 1
-        assert interp[0]["model"] == "openai:gpt-5.4-nano"
-        assert interp[0]["text"] == "A summary."
+    interp = conn.execute(
+        "SELECT scope, text, model FROM interpretations"
+    ).fetchall()
+    assert len(interp) == 1
+    assert interp[0]["model"] == "openai:gpt-5.4-nano"
+    assert interp[0]["text"] == "A summary."
 
-        inv = conn.execute(
-            "SELECT model, temperature, seed, filter, input_tokens, "
-            "output_tokens FROM llm_invocations"
-        ).fetchall()
-        assert len(inv) == 1
-        assert inv[0]["model"] == "openai:gpt-5.4-nano"
-        assert inv[0]["temperature"] == 0.7
-        assert inv[0]["seed"] == 42
-        assert inv[0]["filter"] is None
-        assert inv[0]["input_tokens"] == 200
-        assert inv[0]["output_tokens"] == 30
-    finally:
-        conn.close()
+    inv = conn.execute(
+        "SELECT model, temperature, seed, filter, input_tokens, "
+        "output_tokens FROM llm_invocations"
+    ).fetchall()
+    assert len(inv) == 1
+    assert inv[0]["model"] == "openai:gpt-5.4-nano"
+    assert inv[0]["temperature"] == 0.7
+    assert inv[0]["seed"] == 42
+    assert inv[0]["filter"] is None
+    assert inv[0]["input_tokens"] == 200
+    assert inv[0]["output_tokens"] == 30
 
 
-def test_synthesize_lane_logs_seed_applied_not_user_seed(tmp_path, monkeypatch):
+def test_synthesize_lane_logs_seed_applied_not_user_seed(conn, monkeypatch):
     # The user typed seed=42 but the provider dropped it (seed_applied=None).
     # The log must record the truth (NULL), not what the user typed.
-    db_path = _init(tmp_path)
     monkeypatch.setattr(interpret, "generate",
                         _make_fake_generate([], seed_applied=None))
-    conn = db.get_connection(db_path)
-    try:
-        _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
-        conn.commit()
-        interpret.synthesize_lane(conn, "2026-06-09", "overall",
-                                  "anthropic:claude-haiku-4-5",
-                                  temperature=0.5, seed=42)
-        seed = conn.execute("SELECT seed FROM llm_invocations").fetchone()["seed"]
-        assert seed is None
-    finally:
-        conn.close()
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    interpret.synthesize_lane(conn, "2026-06-09", "overall",
+                              "anthropic:claude-haiku-4-5",
+                              temperature=0.5, seed=42)
+    seed = conn.execute("SELECT seed FROM llm_invocations").fetchone()["seed"]
+    assert seed is None
 
 
-def test_synthesize_lane_empty_skips_llm_and_writes_nothing(tmp_path, monkeypatch):
-    db_path = _init(tmp_path)
+def test_synthesize_lane_empty_skips_llm_and_writes_nothing(conn, monkeypatch):
     rec = []
     monkeypatch.setattr(interpret, "generate", _make_fake_generate(rec))
-    conn = db.get_connection(db_path)
-    try:
-        result = interpret.synthesize_lane(
-            conn, "2026-06-09", "health", "openai:gpt-5.4-nano",
-            temperature=1.0, seed=None,
-        )
-        assert result["skipped"] is True
-        assert rec == []                                  # LLM NOT called
-        assert conn.execute(
-            "SELECT COUNT(*) c FROM interpretations").fetchone()["c"] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) c FROM llm_invocations").fetchone()["c"] == 0
-    finally:
-        conn.close()
+    result = interpret.synthesize_lane(
+        conn, "2026-06-09", "health", "openai:gpt-5.4-nano",
+        temperature=1.0, seed=None,
+    )
+    assert result["skipped"] is True
+    assert rec == []                                  # LLM NOT called
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM interpretations").fetchone()["c"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM llm_invocations").fetchone()["c"] == 0
 
 
-def test_synthesize_lane_rerun_overwrites_interp_appends_log(tmp_path, monkeypatch):
-    db_path = _init(tmp_path)
+def test_synthesize_lane_rerun_overwrites_interp_appends_log(conn, monkeypatch):
     monkeypatch.setattr(interpret, "generate", _make_fake_generate([]))
-    conn = db.get_connection(db_path)
-    try:
-        _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
-        conn.commit()
-        interpret.synthesize_lane(conn, "2026-06-09", "overall",
-                                  "openai:gpt-5.4-nano", temperature=1.0,
-                                  seed=None)
-        interpret.synthesize_lane(conn, "2026-06-09", "overall",
-                                  "openai:gpt-5.4-nano", temperature=1.0,
-                                  seed=None)
-        assert conn.execute(
-            "SELECT COUNT(*) c FROM interpretations").fetchone()["c"] == 1
-        assert conn.execute(
-            "SELECT COUNT(*) c FROM llm_invocations").fetchone()["c"] == 2
-    finally:
-        conn.close()
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    interpret.synthesize_lane(conn, "2026-06-09", "overall",
+                              "openai:gpt-5.4-nano", temperature=1.0, seed=None)
+    interpret.synthesize_lane(conn, "2026-06-09", "overall",
+                              "openai:gpt-5.4-nano", temperature=1.0, seed=None)
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM interpretations").fetchone()["c"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM llm_invocations").fetchone()["c"] == 2
 
 
-def test_synthesize_lane_rolls_back_log_on_upsert_failure(tmp_path, monkeypatch):
+def test_synthesize_lane_rolls_back_log_on_upsert_failure(conn, monkeypatch):
     # Pinned write order: log_invocation runs first, then upsert_interpretation,
     # both inside ONE transaction. If the upsert raises, the rollback must also
     # remove the already-inserted invocation row (no orphan log).
-    db_path = _init(tmp_path)
     monkeypatch.setattr(interpret, "generate", _make_fake_generate([]))
 
     def boom(*a, **k):
         raise RuntimeError("disk full")
     monkeypatch.setattr(db, "upsert_interpretation", boom)
 
-    conn = db.get_connection(db_path)
-    try:
-        _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
-        conn.commit()
-        try:
-            interpret.synthesize_lane(conn, "2026-06-09", "overall",
-                                      "openai:gpt-5.4-nano", temperature=1.0,
-                                      seed=None)
-            raised = False
-        except RuntimeError:
-            raised = True
-        assert raised                                     # the error propagated
-        assert conn.execute(
-            "SELECT COUNT(*) c FROM llm_invocations").fetchone()["c"] == 0
-        assert conn.execute(
-            "SELECT COUNT(*) c FROM interpretations").fetchone()["c"] == 0
-    finally:
-        conn.close()
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    with pytest.raises(RuntimeError):
+        interpret.synthesize_lane(conn, "2026-06-09", "overall",
+                                  "openai:gpt-5.4-nano", temperature=1.0,
+                                  seed=None)
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM llm_invocations").fetchone()["c"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM interpretations").fetchone()["c"] == 0
 
 
 # --- synthesize_run --------------------------------------------------------
 
-def test_synthesize_run_mixed_written_and_skipped(tmp_path, monkeypatch):
-    db_path = _init(tmp_path)
+def test_synthesize_run_mixed_written_and_skipped(conn, monkeypatch):
     rec = []
     monkeypatch.setattr(interpret, "generate", _make_fake_generate(rec))
-    conn = db.get_connection(db_path)
-    try:
-        # overall + health populated; habit left empty.
-        _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
-        _seed_ranking(conn, "2026-06-09", "health", 1, "v2", 2.0)
-        conn.commit()
+    # overall + health populated; habit left empty.
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    _seed_ranking(conn, "2026-06-09", "health", 1, "v2", 2.0)
+    conn.commit()
 
-        results = interpret.synthesize_run(conn, "2026-06-09",
-                                           "openai:gpt-5.4-nano",
-                                           temperature=0.7, seed=None)
-        by_scope = {r["scope"]: r for r in results}
-        assert by_scope["overall"]["skipped"] is False
-        assert by_scope["health"]["skipped"] is False
-        assert by_scope["habit"]["skipped"] is True
-        # Two real lanes -> two generate calls, both with the run's model+params.
-        assert len(rec) == 2
-        assert all(c["model"] == "openai:gpt-5.4-nano" for c in rec)
-        assert all(c["temperature"] == 0.7 for c in rec)
-    finally:
-        conn.close()
+    results = interpret.synthesize_run(conn, "2026-06-09", "openai:gpt-5.4-nano",
+                                       temperature=0.7, seed=None)
+    by_scope = {r["scope"]: r for r in results}
+    assert by_scope["overall"]["skipped"] is False
+    assert by_scope["health"]["skipped"] is False
+    assert by_scope["habit"]["skipped"] is True
+    # Two real lanes -> two generate calls, both with the run's model+params.
+    assert len(rec) == 2
+    assert all(c["model"] == "openai:gpt-5.4-nano" for c in rec)
+    assert all(c["temperature"] == 0.7 for c in rec)
 
 
 # --- CLI -------------------------------------------------------------------
 
-def test_cli_defaults_to_latest_run_date(tmp_path, monkeypatch):
-    db_path = _init(tmp_path)
+def test_cli_defaults_to_latest_run_date(db_path, monkeypatch):
     monkeypatch.setattr(interpret, "DB_PATH", db_path)
-    monkeypatch.setattr(interpret, "generate",
-                        _make_fake_generate([], seed_applied="echo"))
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate([]))
     conn = db.get_connection(db_path)
     try:
         # Two run_dates; latest is 2026-06-09.
@@ -297,8 +257,7 @@ def test_cli_defaults_to_latest_run_date(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_cli_scope_limits_to_one_lane(tmp_path, monkeypatch):
-    db_path = _init(tmp_path)
+def test_cli_scope_limits_to_one_lane(db_path, monkeypatch):
     monkeypatch.setattr(interpret, "DB_PATH", db_path)
     monkeypatch.setattr(interpret, "generate", _make_fake_generate([]))
     conn = db.get_connection(db_path)
