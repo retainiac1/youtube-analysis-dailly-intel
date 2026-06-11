@@ -243,6 +243,66 @@ def test_live_generate(model):
     assert result.input_tokens > 0, f"{model}: no input tokens reported"
 
 
+# --- non-positive seed is dropped (xAI rejects seed <= 0) -------------------
+
+def test_generate_drops_non_positive_seed(monkeypatch):
+    # seed=0 (and negatives) are normalized to "no seed" in generate(), so the
+    # adapter never forwards an invalid value and seed_applied is None.
+    for bad in (0, -1):
+        rec = {}
+        monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
+        r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=bad)
+        assert "seed" not in rec, f"seed={bad} must not be forwarded"
+        assert r.seed_applied is None
+
+
+def test_generate_keeps_positive_seed(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
+    r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=7)
+    assert rec["seed"] == 7 and r.seed_applied == 7
+
+
+# --- provider API errors become clean LLMError (never a raw 500) ------------
+
+def test_api_error_base_maps_each_provider():
+    import openai
+    import anthropic
+    from google.genai import errors as genai_errors
+    assert llm._api_error_base("openai") is openai.OpenAIError
+    assert llm._api_error_base("xai") is openai.OpenAIError  # xAI rides openai SDK
+    assert llm._api_error_base("anthropic") is anthropic.AnthropicError
+    assert llm._api_error_base("google") is genai_errors.APIError
+
+
+def _raising_openai(exc):
+    class _Completions:
+        def create(self, **kwargs):
+            raise exc
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+
+
+def test_generate_wraps_xai_api_error(monkeypatch):
+    import openai
+    monkeypatch.setattr(
+        llm, "_client_xai",
+        lambda: _raising_openai(openai.OpenAIError("boom from x.ai")))
+    with pytest.raises(llm.LLMError) as exc:
+        llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None)
+    assert "xai" in str(exc.value) and "boom from x.ai" in str(exc.value)
+
+
+def test_generate_wraps_openai_api_error(monkeypatch):
+    import openai
+    monkeypatch.setattr(
+        llm, "_client_openai",
+        lambda: _raising_openai(openai.OpenAIError("boom")))
+    with pytest.raises(llm.LLMError) as exc:
+        llm.generate("openai:gpt-5.4-nano", "p", temperature=0.5, seed=None)
+    assert "openai" in str(exc.value)
+
+
 # --- model_capabilities ----------------------------------------------------
 
 def test_model_capabilities_anthropic_omits_seed():

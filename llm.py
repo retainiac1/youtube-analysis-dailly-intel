@@ -101,7 +101,32 @@ def generate(model: str, prompt: str, *, temperature: float,
         raise LLMError(
             f"Unknown provider {provider!r}; supported providers are: {supported}"
         )
+    # A non-positive seed is treated as "no seed". xAI rejects seed <= 0 ("Seed must
+    # be positive"); 0/negative are degenerate elsewhere too. Normalizing here (one
+    # place) keeps behavior uniform and forwards only a valid seed; seed_applied then
+    # logs None for these, the honest "no seed governed this run".
+    if seed is not None and seed <= 0:
+        seed = None
     return adapter(model_id, prompt, temperature=temperature, seed=seed)
+
+
+def _api_error_base(provider: str):
+    """The installed SDK's API-error base class for `provider`, imported lazily
+    (the SDK is only present/needed when the adapter runs). Adapters catch this to
+    convert a provider API failure (bad request, model not found, rate limit, auth,
+    connection) into a clean LLMError, so the dashboard shows an inline message
+    instead of a raw 500. Catching the BASE (not bare Exception) means genuine code
+    bugs still surface as 500. Verified against installed versions: openai 2.41.0
+    (OpenAIError), anthropic 0.109.1 (AnthropicError), google.genai (errors.APIError).
+    xAI rides the openai client, so its errors are in the openai hierarchy."""
+    if provider in ("openai", "xai"):
+        import openai
+        return openai.OpenAIError
+    if provider == "anthropic":
+        import anthropic
+        return anthropic.AnthropicError
+    from google.genai import errors
+    return errors.APIError
 
 
 # --- key + temperature helpers ---------------------------------------------
@@ -202,12 +227,15 @@ def _generate_anthropic(model_id, prompt, *, temperature, seed):
     # is omitted and seed_applied is always None.
     _check_temperature("anthropic", temperature, 0.0, 1.0)
     client = _client_anthropic()
-    resp = client.messages.create(
-        model=model_id,
-        max_tokens=MAX_OUTPUT_TOKENS,
-        temperature=temperature,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        resp = client.messages.create(
+            model=model_id,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            temperature=temperature,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except _api_error_base("anthropic") as e:
+        raise LLMError(f"anthropic: {e}") from e
     text = next((b.text for b in resp.content if b.type == "text"), "")
     return GenerateResult(text, resp.usage.input_tokens,
                           resp.usage.output_tokens, seed_applied=None)
@@ -229,7 +257,10 @@ def _generate_openai(model_id, prompt, *, temperature, seed):
         kwargs["temperature"] = temperature
     if seed is not None:
         kwargs["seed"] = seed
-    resp = client.chat.completions.create(**kwargs)
+    try:
+        resp = client.chat.completions.create(**kwargs)
+    except _api_error_base("openai") as e:
+        raise LLMError(f"openai: {e}") from e
     return GenerateResult(resp.choices[0].message.content,
                           resp.usage.prompt_tokens, resp.usage.completion_tokens,
                           seed_applied=seed)
@@ -248,7 +279,10 @@ def _generate_xai(model_id, prompt, *, temperature, seed):
     }
     if seed is not None:
         kwargs["seed"] = seed
-    resp = client.chat.completions.create(**kwargs)
+    try:
+        resp = client.chat.completions.create(**kwargs)
+    except _api_error_base("xai") as e:
+        raise LLMError(f"xai: {e}") from e
     return GenerateResult(resp.choices[0].message.content,
                           resp.usage.prompt_tokens, resp.usage.completion_tokens,
                           seed_applied=seed)
@@ -265,9 +299,12 @@ def _generate_google(model_id, prompt, *, temperature, seed):
         seed=seed,
         max_output_tokens=MAX_OUTPUT_TOKENS,
     )
-    resp = client.models.generate_content(
-        model=model_id, contents=prompt, config=config
-    )
+    try:
+        resp = client.models.generate_content(
+            model=model_id, contents=prompt, config=config
+        )
+    except _api_error_base("google") as e:
+        raise LLMError(f"google: {e}") from e
     usage = resp.usage_metadata
     return GenerateResult(resp.text, usage.prompt_token_count,
                           usage.candidates_token_count, seed_applied=seed)
