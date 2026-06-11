@@ -462,6 +462,16 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .interpret-controls {
   padding: 1.25rem 1.5rem;
   margin-bottom: 1.5rem;
+  /* .glass-panel sets backdrop-filter -> each panel is its own stacking context.
+     The result card is a later sibling, so without these the card paints OVER this
+     panel's open dropdown. Order them explicitly (controls above result). No
+     ancestor here sets overflow!=visible, so the dropdown floats unclipped. */
+  position: relative;
+  z-index: 2;
+}
+.interpret-result {
+  position: relative;
+  z-index: 1;
 }
 .interpret-controls h2 { margin: 0 0 1rem; }
 .interpret-controls-row {
@@ -476,7 +486,10 @@ html { scroll-padding-top: var(--header-h, 0px); }
   flex-direction: column;
   gap: 0.35rem;
 }
-.interpret-control input,
+/* Direct-child scope (`>`) so these text-input styles apply ONLY to the
+   temperature/seed inputs (direct children of their .interpret-control labels),
+   NOT to the checkboxes nested in the Fields dropdown panel. */
+.interpret-control > input,
 .interpret-select {
   font-family: var(--font-body);
   font-size: 0.95rem;
@@ -486,13 +499,85 @@ html { scroll-padding-top: var(--header-h, 0px); }
   border-radius: var(--radius-md);
   padding: 0.5rem 0.75rem;
 }
-.interpret-control input { width: 7rem; }
+.interpret-control > input { width: 7rem; }
 .interpret-select { cursor: pointer; }
 /* A control the selected model ignores: dimmed and non-interactive, so the surface
    never implies a parameter is live when the model would silently drop it. */
 .interpret-control.control-muted { opacity: 0.45; }
-.interpret-control.control-muted input { cursor: not-allowed; }
-.interpret-run { padding: 0.55rem 1.5rem; }
+.interpret-control.control-muted > input { cursor: not-allowed; }
+/* A modest extra gap before Run (on top of the row's 1rem gap) so it sits a clear,
+   normal distance after the Prompt Columns box — separated, not flung to the edge. */
+.interpret-run { padding: 0.55rem 1.5rem; margin-left: 1.5rem; }
+/* Prompt-columns multi-select: a button that toggles an absolutely-positioned
+   checkbox menu, so the controls row height doesn't jump when it opens. */
+.fields-dropdown { position: relative; }
+/* The toggle is styled as the Model <select> box (it carries .interpret-select for
+   bg/border/radius/padding/font); these add the box layout + a chevron on the right.
+   appearance:none + explicit line-height keep its height equal to the real <select>. */
+.fields-toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 11rem;
+  line-height: normal;   /* match the native <select>'s line box so heights align */
+  text-align: left;
+}
+/* Caret marks it as a dropdown; via ::after so it survives the dynamic summary
+   textContent. Rotates when open. */
+.fields-toggle::after {
+  content: "▾";
+  margin-left: 0.5rem;
+  font-size: 0.85em;
+  display: inline-block;
+  transition: transform var(--transition-fast);
+}
+.fields-toggle[aria-expanded="true"]::after { transform: rotate(180deg); }
+.fields-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  min-width: 12rem;
+  max-height: 16rem;          /* cap so 10 options don't sprawl */
+  overflow-y: auto;           /* scroll past the cap */
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.35rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+/* The display:flex above pins the panel visible and would DEFEAT the `hidden`
+   attribute (an author display rule outranks the UA [hidden] rule) — the same
+   gotcha the routed page regions handle. Assert it here so toggling fieldsPanel.hidden
+   actually collapses the menu; without this the dropdown can never close. */
+.fields-panel[hidden] { display: none; }
+/* Menu rows: checkbox tight to its label (the width:7rem bleed is gone), padded,
+   rounded, with a hover highlight so it reads as a menu, not a list box. */
+.fields-option {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fields-option:hover { background: var(--bg-card); }
+.fields-option input {
+  width: auto;                /* belt-and-suspenders vs the input base style */
+  margin: 0;
+  flex: none;
+  cursor: pointer;
+}
 /* Labeled run-time readout: caption stacked above the value (mirrors the other
    controls), so it reads as a field with a resting "—" rather than empty space. */
 .interpret-runtime { gap: 0.35rem; }

@@ -18,7 +18,11 @@ import config
 # v5: added llm_invocations.duration_ms (generator run time). This is the FIRST
 # bump that runs ALTER TABLE on an existing table — CREATE IF NOT EXISTS cannot add
 # a column — so init_db carries an explicit, atomic ADD COLUMN + stamp branch.
-SCHEMA_VERSION = 5
+# v6: added the `app_preferences` key-value table (remembered UI choices, e.g. the
+# generator's selected prompt fields). Additive IF NOT EXISTS path; the seed gains
+# the empty table on next init. The v5 ADD COLUMN branch is guarded, so re-running
+# init_db for this bump skips it.
+SCHEMA_VERSION = 6
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -142,6 +146,13 @@ SCHEMA_STATEMENTS: list[str] = [
         output_tokens INTEGER,
         generated_at TEXT,
         duration_ms INTEGER    -- v5: generator run time (NULL for un-instrumented rows)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS app_preferences (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TEXT
     )
     """,
 ]
@@ -573,7 +584,14 @@ def fetch_lane(
                v.link,
                v.thumbnail_url,
                v.view_count,
-               v.views_to_subs_ratio
+               v.views_to_subs_ratio,
+               v.like_count,
+               v.comment_count,
+               v.views_per_day,
+               v.duration_seconds,
+               v.published_at,
+               v.matched_queries,
+               v.top_comments
         FROM rankings r
         LEFT JOIN videos v ON v.video_id = r.video_id
         WHERE r.run_date = ? AND r.bucket = ?
@@ -618,6 +636,31 @@ def fetch_latest_invocation(conn: sqlite3.Connection) -> sqlite3.Row | None:
         "SELECT model, temperature, seed FROM llm_invocations "
         "ORDER BY id DESC LIMIT 1"
     ).fetchone()
+
+
+def get_preference(conn: sqlite3.Connection, key: str) -> str | None:
+    """Return the stored value for a UI preference key, or None when unset.
+    Values are opaque TEXT (the caller decides the encoding, e.g. a JSON list for
+    the generator's selected prompt fields). Read-only."""
+    row = conn.execute(
+        "SELECT value FROM app_preferences WHERE key = ?", (key,)
+    ).fetchone()
+    return row["value"] if row is not None else None
+
+
+def set_preference(conn: sqlite3.Connection, key: str, value: str,
+                   now: str) -> None:
+    """Upsert a UI preference (insert, or overwrite value/updated_at on conflict).
+    Does not commit — the caller wraps it in `transaction`."""
+    conn.execute(
+        """
+        INSERT INTO app_preferences (key, value, updated_at)
+        VALUES (:key, :value, :now)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                       updated_at = excluded.updated_at
+        """,
+        {"key": key, "value": value, "now": now},
+    )
 
 
 # --- Refresh support --------------------------------------------------------

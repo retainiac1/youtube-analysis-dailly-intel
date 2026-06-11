@@ -272,6 +272,26 @@ def test_interpret_defaults_empty_table(client):
     caps = body["capabilities"]
     assert caps["anthropic:claude-haiku-4-5"]["seed"] is False
     assert caps["openai:gpt-5.4-nano"]["temperature"] is False
+    # Prompt-field options (all) + the selection (default when nothing persisted).
+    keys = [f["key"] for f in body["available_fields"]]
+    assert "like_count" in keys and "top_comments" in keys
+    assert body["selected_fields"] == interpret.DEFAULT_PROMPT_FIELDS
+
+
+def test_interpret_persists_field_selection(client, seeded_db_path, monkeypatch):
+    monkeypatch.setattr(interpret, "generate", _fake_generate())
+    # Send an unordered list with an unknown key; it is normalized on the way in.
+    client.post("/api/interpret", json={
+        "run_date": "2026-06-08", "scope": "health", "model": VALID_MODEL,
+        "temperature": 0.7, "seed": None,
+        "fields": ["like_count", "view_count", "bogus"],
+    })
+    # The persisted selection is the normalized set, and the defaults read echoes it.
+    body = client.get("/api/interpret-defaults").json()
+    assert body["selected_fields"] == ["view_count", "like_count"]
+    stored = _count(seeded_db_path, "app_preferences",
+                    "WHERE key='prompt_fields'")
+    assert stored == 1
 
 
 def test_interpret_defaults_with_history(client, seeded_db_path):

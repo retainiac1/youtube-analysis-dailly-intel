@@ -31,7 +31,9 @@ def conn(db_path):
 
 def _seed_ranking(conn, run_date, bucket, rank, video_id, metric_value,
                   *, with_video=True, title="Cool Short", channel_title="Chan",
-                  view_count=100000, ratio=2.5):
+                  view_count=100000, ratio=2.5, like_count=None, comment_count=None,
+                  views_per_day=None, duration_seconds=None, published_at=None,
+                  matched_queries=None, top_comments=None):
     conn.execute(
         "INSERT INTO rankings (run_date, bucket, rank, video_id, metric_value, "
         "captured_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -41,10 +43,14 @@ def _seed_ranking(conn, run_date, bucket, rank, video_id, metric_value,
     if with_video:
         conn.execute(
             "INSERT INTO videos (video_id, title, channel_title, link, "
-            "thumbnail_url, view_count, views_to_subs_ratio) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "thumbnail_url, view_count, views_to_subs_ratio, like_count, "
+            "comment_count, views_per_day, duration_seconds, published_at, "
+            "matched_queries, top_comments) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (video_id, title, channel_title, "http://y/" + video_id,
-             "http://t/" + video_id, view_count, ratio),
+             "http://t/" + video_id, view_count, ratio, like_count, comment_count,
+             views_per_day, duration_seconds, published_at, matched_queries,
+             top_comments),
         )
 
 
@@ -98,8 +104,62 @@ def test_build_prompt_tolerates_null_video_fields(conn):
     rows = db.fetch_lane(conn, "2026-06-09", "habit")
 
     assert rows[0]["title"] is None          # precondition: NULL field present
+    # Default fields now include the new nullable columns too; none may leak "None".
     prompt = interpret.build_prompt("2026-06-09", "habit", rows)
     assert "None" not in prompt
+
+
+# --- prompt field selection -------------------------------------------------
+
+def test_normalize_fields_defaults_and_sanitizes():
+    # None / empty / all-unknown -> the default set.
+    assert interpret.normalize_fields(None) == interpret.DEFAULT_PROMPT_FIELDS
+    assert interpret.normalize_fields([]) == interpret.DEFAULT_PROMPT_FIELDS
+    assert interpret.normalize_fields(["bogus"]) == interpret.DEFAULT_PROMPT_FIELDS
+    # Unknown dropped, deduped, returned in canonical order (not input order).
+    assert interpret.normalize_fields(
+        ["like_count", "view_count", "like_count", "nope"]
+    ) == ["view_count", "like_count"]
+
+
+def test_build_prompt_renders_only_selected_fields(conn):
+    _seed_ranking(conn, "2026-06-09", "health", 1, "v1", 3.1, title="Sleep",
+                  channel_title="DrSleep", view_count=50000, ratio=4.0,
+                  like_count=820, comment_count=0, views_per_day=15774,
+                  duration_seconds=17, published_at="2026-06-08T01:00:00-04:00",
+                  matched_queries="high protein|gym")
+    conn.commit()
+    rows = db.fetch_lane(conn, "2026-06-09", "health")
+
+    prompt = interpret.build_prompt("2026-06-09", "health", rows,
+                                    ["like_count", "comment_count", "views_per_day",
+                                     "duration_seconds", "published_at",
+                                     "matched_queries"])
+    assert "820 likes" in prompt
+    assert "0 comments" in prompt            # 0 shown, not hidden
+    assert "15774/day" in prompt             # views_per_day cast to int
+    assert "17s" in prompt
+    assert "published 2026-06-08" in prompt  # date only
+    assert 'matched "high protein, gym"' in prompt
+    # NOT selected -> absent.
+    assert "views/subs" not in prompt
+    assert "by DrSleep" not in prompt
+    assert "50000 views" not in prompt
+
+
+def test_build_prompt_top_comments_trimmed(conn):
+    long_c = "x" * 200
+    tc = f"@a: first ({1})|@b: {long_c} ({2})|@c: third|@d: fourth"
+    _seed_ranking(conn, "2026-06-09", "health", 1, "v1", 3.1, top_comments=tc)
+    conn.commit()
+    rows = db.fetch_lane(conn, "2026-06-09", "health")
+
+    prompt = interpret.build_prompt("2026-06-09", "health", rows, ["top_comments"])
+    assert "comments:" in prompt
+    assert "@a: first" in prompt and "@c: third" in prompt
+    assert "@d: fourth" not in prompt        # capped at 3
+    assert ("x" * 200) not in prompt         # long comment trimmed
+    assert "…" in prompt
 
 
 # --- synthesize_lane -------------------------------------------------------

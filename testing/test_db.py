@@ -10,6 +10,7 @@ EXPECTED_TABLES = {
     "categories",
     "interpretations",
     "llm_invocations",
+    "app_preferences",
 }
 
 EXPECTED_COLUMNS = {
@@ -46,6 +47,7 @@ EXPECTED_COLUMNS = {
         "id", "run_date", "scope", "model", "temperature", "seed", "filter",
         "input_tokens", "output_tokens", "generated_at", "duration_ms",
     },
+    "app_preferences": {"key", "value", "updated_at"},
 }
 
 
@@ -105,7 +107,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 5
+        assert version == db.SCHEMA_VERSION == 6
     finally:
         conn.close()
 
@@ -143,19 +145,20 @@ def test_init_db_creates_llm_invocations(tmp_path):
         cols = _columns(conn, "llm_invocations")
         assert {"temperature", "seed", "filter", "duration_ms"}.issubset(cols)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 5
+        assert version == 6
     finally:
         conn.close()
 
 
 def _build_v3_db(db_path):
-    """Construct a real v3 schema (every current statement except the new
-    llm_invocations table), stamped user_version = 3, with a sample videos row
-    and a sample interpretations row. Returns the two seeded rows as dicts."""
+    """Construct a real v3 schema (every current statement except the post-v3
+    tables: llm_invocations [v4] and app_preferences [v6]), stamped
+    user_version = 3, with a sample videos row and a sample interpretations row.
+    Returns the two seeded rows as dicts."""
     conn = db.get_connection(db_path)
     try:
         for statement in db.SCHEMA_STATEMENTS:
-            if "llm_invocations" in statement:
+            if "llm_invocations" in statement or "app_preferences" in statement:
                 continue
             conn.execute(statement)
         conn.execute("PRAGMA user_version = 3")
@@ -177,15 +180,16 @@ def _build_v3_db(db_path):
     return video, interp
 
 
-def test_v3_to_v5_migration_is_non_destructive(tmp_path):
-    """A v3 DB gains llm_invocations (with duration_ms) and bumps straight to v5
-    with pre-existing rows byte-for-byte unchanged."""
+def test_v3_to_v6_migration_is_non_destructive(tmp_path):
+    """A v3 DB gains llm_invocations (with duration_ms) and app_preferences, and
+    bumps straight to v6 with pre-existing rows byte-for-byte unchanged."""
     db_path = str(tmp_path / "test.db")
     video_before, interp_before = _build_v3_db(db_path)
 
     conn = db.get_connection(db_path)
     try:
         assert "llm_invocations" not in _table_names(conn)
+        assert "app_preferences" not in _table_names(conn)
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     finally:
         conn.close()
@@ -196,7 +200,8 @@ def test_v3_to_v5_migration_is_non_destructive(tmp_path):
     try:
         assert "llm_invocations" in _table_names(conn)
         assert "duration_ms" in _columns(conn, "llm_invocations")
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert "app_preferences" in _table_names(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         video_after = dict(conn.execute("SELECT * FROM videos").fetchone())
         interp_after = dict(conn.execute("SELECT * FROM interpretations").fetchone())
         assert video_after == video_before
@@ -232,7 +237,9 @@ def _build_v4_db(db_path):
     conn = db.get_connection(db_path)
     try:
         for statement in db.SCHEMA_STATEMENTS:
-            if "llm_invocations" in statement:
+            # Skip the current llm_invocations (use the pre-duration_ms statement)
+            # and app_preferences (a v6 table that did not exist at v4).
+            if "llm_invocations" in statement or "app_preferences" in statement:
                 continue
             conn.execute(statement)
         conn.execute(_V4_LLM_INVOCATIONS)
@@ -256,15 +263,17 @@ def _build_v4_db(db_path):
     return interp, invocation
 
 
-def test_v4_to_v5_adds_duration_column_non_destructively(tmp_path):
+def test_v4_to_v6_adds_duration_column_non_destructively(tmp_path):
     """An existing v4 DB whose llm_invocations LACKS duration_ms gains the column
-    (ALTER), bumps to v5, and leaves pre-existing rows unchanged (NULL duration)."""
+    (ALTER) and app_preferences, bumps to v6, and leaves pre-existing rows
+    unchanged (NULL duration)."""
     db_path = str(tmp_path / "test.db")
     interp_before, invocation_before = _build_v4_db(db_path)
 
     conn = db.get_connection(db_path)
     try:
         assert "duration_ms" not in _columns(conn, "llm_invocations")
+        assert "app_preferences" not in _table_names(conn)
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
     finally:
         conn.close()
@@ -274,7 +283,8 @@ def test_v4_to_v5_adds_duration_column_non_destructively(tmp_path):
     conn = db.get_connection(db_path)
     try:
         assert "duration_ms" in _columns(conn, "llm_invocations")
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert "app_preferences" in _table_names(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         interp_after = dict(conn.execute("SELECT * FROM interpretations").fetchone())
         assert interp_after == interp_before
         inv_after = dict(conn.execute("SELECT * FROM llm_invocations").fetchone())
@@ -456,5 +466,28 @@ def test_fetch_latest_invocation_returns_max_id_row(tmp_path):
         assert row["model"] == "anthropic:claude-haiku-4-5"
         assert row["temperature"] == 0.3
         assert row["seed"] is None
+    finally:
+        conn.close()
+
+
+def test_preference_set_get_and_overwrite(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        # Absent key -> None.
+        assert db.get_preference(conn, "prompt_fields") is None
+        with db.transaction(conn):
+            db.set_preference(conn, "prompt_fields", '["view_count"]',
+                              "2026-06-10T10:00:00-04:00")
+        assert db.get_preference(conn, "prompt_fields") == '["view_count"]'
+        # Same key overwrites (one row, new value).
+        with db.transaction(conn):
+            db.set_preference(conn, "prompt_fields", '["like_count","comment_count"]',
+                              "2026-06-10T10:05:00-04:00")
+        assert db.get_preference(conn, "prompt_fields") == '["like_count","comment_count"]'
+        assert conn.execute(
+            "SELECT count(*) c FROM app_preferences").fetchone()["c"] == 1
     finally:
         conn.close()

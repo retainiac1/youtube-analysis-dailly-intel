@@ -7,6 +7,7 @@ read goes through db.run_with_db_retry so a pipeline write-lock degrades to a
 short retry rather than a 500.
 """
 
+import json
 import os
 import sqlite3
 import sys
@@ -393,12 +394,35 @@ def api_set_star(
 # This is the deliberate contract change amended into docs/dashboard-plan.MD;
 # everything else in the dashboard stays read-only.
 
+PROMPT_FIELDS_PREF = "prompt_fields"
+
+
+def _stored_prompt_fields(conn: sqlite3.Connection) -> list[str]:
+    """The persisted prompt-field selection, normalized, or the default set. The
+    JSON parse is guarded: a missing OR malformed stored value (hand-edit, partial
+    write) degrades to the default rather than 500-ing the page-load prepopulation
+    path. normalize_fields then drops any unknown/stale keys."""
+    raw = db.run_with_db_retry(
+        lambda: db.get_preference(conn, PROMPT_FIELDS_PREF)
+    )
+    parsed = None
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, list):
+                parsed = loaded
+        except (json.JSONDecodeError, ValueError):
+            parsed = None  # malformed -> fall back to default
+    return interpret.normalize_fields(parsed)
+
+
 class InterpretRequest(BaseModel):
     run_date: str
     scope: str
     model: str
     temperature: float
     seed: int | None = None
+    fields: list[str] | None = None
 
 
 @app.post("/api/interpret")
@@ -417,10 +441,22 @@ def api_interpret(
             status_code=422,
             detail=f"model must be one of {_allowed_models()}",
         )
+    # Normalize + persist the field selection (remember last-used, mirroring how
+    # model/temperature/seed persist). Done before generation so the choice is
+    # saved even if the provider call later errors.
+    fields = interpret.normalize_fields(body.fields)
+
+    def _save_pref():
+        with db.transaction(conn):
+            db.set_preference(conn, PROMPT_FIELDS_PREF,
+                              json.dumps(fields), config.now_local_iso())
+
+    db.run_with_db_retry(_save_pref)
+
     try:
         result = interpret.synthesize_lane(
             conn, body.run_date, body.scope, body.model,
-            temperature=body.temperature, seed=body.seed,
+            temperature=body.temperature, seed=body.seed, fields=fields,
         )
     except llm.LLMError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -462,6 +498,10 @@ def api_interpret_defaults(conn: sqlite3.Connection = Depends(get_conn)):
         "temperature": temperature,
         "seed": seed,
         "capabilities": capabilities,
+        # The selectable prompt fields (options) + the persisted selection. The
+        # multi-select renders all options with these pre-checked.
+        "available_fields": interpret.PROMPT_FIELD_OPTIONS,
+        "selected_fields": _stored_prompt_fields(conn),
     }
 
 

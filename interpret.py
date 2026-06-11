@@ -37,54 +37,170 @@ SCOPES = ("overall",) + tuple(sorted(VALID_BUCKETS))
 DEFAULT_TEMPERATURE = 1.0
 
 
-def build_prompt(run_date: str, scope: str, rows: list) -> str:
-    """Assemble the synthesis prompt from a lane's ranked rows. States the scope
-    and the EXACT row count so the model cannot overstate a trend from a thin set,
-    and asks for 3-4 sentences. Single source of truth for prompt text.
+# --- Prompt fields (server-owned spec) --------------------------------------
+# The SINGLE source of truth for which per-video signals the prompt may carry: it
+# drives the dashboard's multi-select options, the request validation, and the
+# rendering below — so they cannot drift. `rank` and `title` are always-on anchors
+# (every line needs them) and are NOT in this list; everything here is selectable.
+# Each renderer reads ONE fetch_lane column and returns a short string, or None to
+# omit (so a NULL never becomes the literal "None").
 
-    `rows` are fetch_lane rows (sqlite3.Row); fetch_lane LEFT JOINs videos, so
-    title/channel/views may be NULL when the video row is missing. Such fields
-    are omitted from a line rather than emitted as the literal "None"."""
+def _r_channel(row):
+    v = row["channel_title"]
+    return f"by {v}" if v is not None else None
+
+
+def _r_views(row):
+    v = row["view_count"]
+    return f"{v} views" if v is not None else None
+
+
+def _r_ratio(row):
+    v = row["views_to_subs_ratio"]
+    return f"views/subs {v}" if v is not None else None
+
+
+def _r_likes(row):
+    v = row["like_count"]
+    return f"{v} likes" if v is not None else None
+
+
+def _r_comments(row):
+    # comment_count is meaningful at 0 (a video with no comments), so show it
+    # whenever the column is present; only a NULL column is omitted.
+    v = row["comment_count"]
+    return f"{v} comments" if v is not None else None
+
+
+def _r_views_per_day(row):
+    v = row["views_per_day"]
+    return f"{int(v)}/day" if v is not None else None
+
+
+def _r_duration(row):
+    v = row["duration_seconds"]
+    return f"{v}s" if v is not None else None
+
+
+def _r_published(row):
+    v = row["published_at"]
+    # Show the date only (no datetime parsing, so an odd value can never raise).
+    return f"published {v[:10]}" if v else None
+
+
+def _r_matched(row):
+    v = row["matched_queries"]
+    if not v:
+        return None
+    qs = [q for q in v.split("|") if q]
+    return f'matched "{", ".join(qs)}"' if qs else None
+
+
+# Top comments are stored pipe-delimited as `@handle: text (likes)|...`. Render at
+# most 3, each trimmed to ~100 chars, so the heaviest field stays bounded.
+_TOP_COMMENTS_MAX = 3
+_COMMENT_TRIM = 100
+
+
+def _r_top_comments(row):
+    v = row["top_comments"]
+    if not v or v == "[]":
+        return None
+    items = [c.strip() for c in v.split("|") if c.strip()][:_TOP_COMMENTS_MAX]
+    if not items:
+        return None
+    trimmed = [(c[:_COMMENT_TRIM] + "…") if len(c) > _COMMENT_TRIM else c
+               for c in items]
+    return "comments: " + " | ".join(trimmed)
+
+
+# Ordered spec: the canonical field order, the dashboard labels, and the renderer.
+PROMPT_FIELDS = [
+    {"key": "channel_title", "label": "Channel", "render": _r_channel},
+    {"key": "view_count", "label": "Views", "render": _r_views},
+    {"key": "views_to_subs_ratio", "label": "Views/subs ratio", "render": _r_ratio},
+    {"key": "like_count", "label": "Likes", "render": _r_likes},
+    {"key": "comment_count", "label": "Comments", "render": _r_comments},
+    {"key": "views_per_day", "label": "Views/day", "render": _r_views_per_day},
+    {"key": "duration_seconds", "label": "Duration", "render": _r_duration},
+    {"key": "published_at", "label": "Published date", "render": _r_published},
+    {"key": "matched_queries", "label": "Matched query", "render": _r_matched},
+    {"key": "top_comments", "label": "Top comments", "render": _r_top_comments},
+]
+_FIELD_ORDER = [f["key"] for f in PROMPT_FIELDS]
+_RENDERERS = {f["key"]: f["render"] for f in PROMPT_FIELDS}
+# Default selection when no preference is stored: the populated signals, minus the
+# heavy/noisy top_comments (the user can turn it on).
+DEFAULT_PROMPT_FIELDS = [k for k in _FIELD_ORDER if k != "top_comments"]
+
+# The dashboard needs the options WITHOUT the (non-JSON) render callables.
+PROMPT_FIELD_OPTIONS = [{"key": f["key"], "label": f["label"]} for f in PROMPT_FIELDS]
+
+
+def normalize_fields(fields) -> list:
+    """Reduce a requested field list to known keys in canonical order, deduped.
+    None, empty, or an all-unknown list falls back to DEFAULT_PROMPT_FIELDS, so a
+    stale or hand-sent value can never produce a contentless prompt. The ONE place
+    the selection is sanitized; both the write (persist) and render paths use it."""
+    if not fields:
+        return list(DEFAULT_PROMPT_FIELDS)
+    chosen = {f for f in fields if f in _RENDERERS}
+    if not chosen:
+        return list(DEFAULT_PROMPT_FIELDS)
+    return [k for k in _FIELD_ORDER if k in chosen]
+
+
+def build_prompt(run_date: str, scope: str, rows: list, fields=None) -> str:
+    """Assemble the synthesis prompt from a lane's ranked rows, including only the
+    selected per-video `fields` (normalized against PROMPT_FIELDS; None → the
+    default set). States the scope and the EXACT row count so the model cannot
+    overstate a trend from a thin set, and asks for 3-4 sentences. Single source of
+    truth for prompt text.
+
+    `rows` are fetch_lane rows (sqlite3.Row); fetch_lane LEFT JOINs videos, so any
+    video field may be NULL when the video row is missing. Each renderer omits a
+    NULL rather than emitting the literal "None"; `rank` and `title` anchor the
+    line (title omitted when NULL)."""
+    keys = normalize_fields(fields)
+    renderers = [_RENDERERS[k] for k in keys]
     lines = []
     for row in rows:
-        parts = [f"#{row['rank']}"]
-        if row["title"] is not None:
-            parts.append(f'"{row["title"]}"')
-        if row["channel_title"] is not None:
-            parts.append(f"by {row['channel_title']}")
-        if row["view_count"] is not None:
-            parts.append(f"{row['view_count']} views")
-        if row["views_to_subs_ratio"] is not None:
-            parts.append(f"views/subs ratio {row['views_to_subs_ratio']}")
-        lines.append(" — ".join(parts))
+        title = row["title"]
+        anchor = f'#{row["rank"]} "{title}"' if title is not None else f"#{row['rank']}"
+        segs = [s for s in (r(row) for r in renderers) if s]
+        lines.append(anchor + "\n   " + " · ".join(segs) if segs else anchor)
 
     body = "\n".join(lines)
     return (
         f"You are analyzing the '{scope}' leaderboard for the run dated "
         f"{run_date}. It contains exactly {len(rows)} ranked short-form "
-        f"video(s), listed below by rank.\n\n"
+        f"video(s), listed below by rank. Each line shows the selected signals "
+        f"(which may include engagement, view velocity, duration, recency, and "
+        f"the search query that surfaced the video).\n\n"
         f"{body}\n\n"
-        f"Write a 3-4 sentence summary of what stands out in this lane. Base "
-        f"every claim only on these {len(rows)} rows; do not infer a broader "
-        f"trend than {len(rows)} video(s) can support."
+        f"Write a 3-4 sentence summary of what stands out in this lane, weaving in "
+        f"the signals shown where they matter. Base every claim only on these "
+        f"{len(rows)} rows; do not infer a broader trend than {len(rows)} "
+        f"video(s) can support."
     )
 
 
 def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
-                    temperature: float, seed, filter=None) -> dict:
+                    temperature: float, seed, filter=None, fields=None) -> dict:
     """Synthesize one lane: fetch it, and if non-empty call generate() then
     persist. An empty lane skips the LLM call and writes no rows.
 
     `model` is the canonical "provider:model" string, passed straight to
-    generate(). Network happens BEFORE the transaction opens. The two writes run
-    in ONE transaction in the pinned order (log_invocation, then
-    upsert_interpretation), wrapped in run_with_db_retry for the dashboard-lock
-    case."""
+    generate(). `fields` selects which per-video signals the prompt carries
+    (normalized in build_prompt; None → the default set). Network happens BEFORE
+    the transaction opens. The two writes run in ONE transaction in the pinned
+    order (log_invocation, then upsert_interpretation), wrapped in run_with_db_retry
+    for the dashboard-lock case."""
     rows = db.fetch_lane(conn, run_date, scope)
     if not rows:
         return {"scope": scope, "skipped": True}
 
-    prompt = build_prompt(run_date, scope, rows)
+    prompt = build_prompt(run_date, scope, rows, fields)
     # Time the network call: this is the generator "run time" we persist and show.
     # monotonic() is immune to wall-clock adjustments. The DB write below is trivial
     # and deliberately excluded so the figure reflects the model, not SQLite.
@@ -115,12 +231,13 @@ def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
 
 
 def synthesize_run(conn, run_date: str, model: str, *, temperature: float,
-                   seed, scopes=SCOPES) -> list:
+                   seed, scopes=SCOPES, fields=None) -> list:
     """Synthesize every scope for a run sequentially with one model + parameter
-    set, returning the per-scope outcomes (written or skipped-empty)."""
+    set (and one prompt-field selection), returning the per-scope outcomes
+    (written or skipped-empty)."""
     return [
         synthesize_lane(conn, run_date, scope, model,
-                        temperature=temperature, seed=seed)
+                        temperature=temperature, seed=seed, fields=fields)
         for scope in scopes
     ]
 
@@ -155,7 +272,13 @@ def main(argv=None) -> None:
                              "do not support it)")
     parser.add_argument("--scope", choices=SCOPES, default=None,
                         help="limit to one lane (default: all three)")
+    parser.add_argument("--fields", default=None,
+                        help="comma-separated per-video prompt fields "
+                             f"(default: {','.join(DEFAULT_PROMPT_FIELDS)}); "
+                             f"choices: {','.join(_FIELD_ORDER)}")
     args = parser.parse_args(argv)
+    fields = ([f.strip() for f in args.fields.split(",") if f.strip()]
+              if args.fields else None)
 
     try:
         validate_config()
@@ -177,7 +300,7 @@ def main(argv=None) -> None:
               file=sys.stderr)
         results = synthesize_run(conn, run_date, args.model,
                                  temperature=args.temperature, seed=args.seed,
-                                 scopes=scopes)
+                                 scopes=scopes, fields=fields)
         for r in results:
             if r["skipped"]:
                 print(f"  {r['scope']}: skipped (empty lane)", file=sys.stderr)

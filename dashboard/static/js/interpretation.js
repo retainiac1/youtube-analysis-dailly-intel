@@ -127,7 +127,27 @@ async function buildScaffold() {
   ]);
   const errorEl = node("p", { class: "interpret-error", attrs: { role: "alert" } });
 
-  controls = { modelSelect, tempInput, seedInput, runBtn, errorEl, stopwatchEl };
+  // Prompt-fields multi-select: a button that toggles a checkbox panel. The
+  // options + the pre-checked selection come from the server (one source of truth);
+  // the selection persists server-side, so a reload re-checks the same boxes.
+  // Styled to match the Model <select> box (.interpret-select); shows an "N
+  // selected" summary and opens the checkbox menu.
+  const fieldsToggle = node("button", {
+    class: "interpret-select fields-toggle", type: "button", text: "Prompt Columns",
+    attrs: { "aria-expanded": "false", "aria-haspopup": "true" },
+  });
+  const fieldsPanel = node("div", {
+    class: "fields-panel", attrs: { role: "group", "aria-label": "Prompt columns" },
+  });
+  fieldsPanel.hidden = true;
+  const fieldsDropdown = node("div", { class: "fields-dropdown" }, [fieldsToggle, fieldsPanel]);
+  const fieldsControl = node("div", { class: "interpret-control" }, [
+    node("span", { class: "control-label", text: "Prompt Columns" }),
+    fieldsDropdown,
+  ]);
+
+  controls = { modelSelect, tempInput, seedInput, runBtn, errorEl, stopwatchEl,
+               fieldsToggle, fieldsPanel, fieldsDropdown };
 
   const panel = node("section", { class: "glass-panel interpret-controls" }, [
     node("h2", { class: "heading-sm", text: "Generate interpretation" }),
@@ -135,6 +155,7 @@ async function buildScaffold() {
       labeled("Model", modelSelect),
       labeled("Temperature", tempInput),
       labeled("Seed", seedInput),
+      fieldsControl,
       runBtn,
       runtime,
     ]),
@@ -147,9 +168,25 @@ async function buildScaffold() {
   runBtn.addEventListener("click", onRun);
   modelSelect.addEventListener("change", () => applyCapabilities(modelSelect.value));
 
-  // One defaults fetch populates the dropdown options, capability map, and the
-  // last-used model/temperature/seed. A failure leaves Run disabled with an inline
-  // message, but the read path below still shows any stored interpretation.
+  // Fields dropdown wiring: toggle open/closed, keep the count label fresh, and
+  // close on an outside click.
+  fieldsToggle.addEventListener("click", () => {
+    const open = fieldsPanel.hidden;
+    fieldsPanel.hidden = !open;
+    fieldsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  fieldsPanel.addEventListener("change", updateFieldsLabel);
+  document.addEventListener("click", (e) => {
+    if (!fieldsPanel.hidden && !fieldsDropdown.contains(e.target)) {
+      fieldsPanel.hidden = true;
+      fieldsToggle.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  // One defaults fetch populates the model dropdown, capability map, last-used
+  // model/temperature/seed, AND the field options + persisted selection. A failure
+  // leaves Run disabled with an inline message, but the read path below still shows
+  // any stored interpretation.
   try {
     const d = await api.getInterpretDefaults();
     caps = d.capabilities || {};
@@ -161,6 +198,7 @@ async function buildScaffold() {
     tempInput.value = d.temperature != null ? d.temperature : "";
     seedInput.value = d.seed != null ? d.seed : "";
     applyCapabilities(modelSelect.value);
+    buildFieldOptions(d.available_fields || [], d.selected_fields || []);
     if (!(d.models && d.models.length)) {
       runBtn.disabled = true;
       errorEl.textContent = "No models are configured.";
@@ -169,6 +207,27 @@ async function buildScaffold() {
     runBtn.disabled = true;
     errorEl.textContent = `Could not load model options: ${err.message || err}`;
   }
+}
+
+// Render one checkbox per available field, pre-checking the persisted selection,
+// then refresh the toggle's "(N)" count.
+function buildFieldOptions(available, selected) {
+  const set = new Set(selected);
+  const labels = available.map((f) => {
+    const cb = node("input", { type: "checkbox", attrs: { value: f.key } });
+    cb.checked = set.has(f.key);
+    return node("label", { class: "fields-option" }, [cb, node("span", { text: f.label })]);
+  });
+  controls.fieldsPanel.replaceChildren(...labels);
+  updateFieldsLabel();
+}
+
+function selectedFields() {
+  return [...controls.fieldsPanel.querySelectorAll("input:checked")].map((i) => i.value);
+}
+
+function updateFieldsLabel() {
+  controls.fieldsToggle.textContent = `${selectedFields().length} selected`;
 }
 
 function ensureBuilt() {
@@ -211,6 +270,7 @@ async function onRun() {
       model,
       temperature,
       seed,
+      fields: selectedFields(),
     });
     clearInterval(timer);
     // Branch on skipped FIRST: an empty lane wrote nothing, so show the skip state

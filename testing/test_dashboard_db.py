@@ -20,7 +20,7 @@ def test_fresh_db_creates_interpretations_and_stamps_current(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 5
+        assert version == db.SCHEMA_VERSION == 6
     finally:
         conn.close()
 
@@ -66,7 +66,7 @@ def test_seeded_v2_db_migrates_without_harming_seed(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 5
+        assert version == db.SCHEMA_VERSION == 6
         after = dict(
             conn.execute("SELECT * FROM videos WHERE video_id = 'seed'").fetchone()
         )

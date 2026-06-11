@@ -133,12 +133,13 @@ export function getInterpretDefaults() {
 // Trigger synthesis for one lane (run_date, scope=lane) with the chosen model +
 // parameters. Resolves to {scope, skipped, ...} — on success also text, tokens,
 // seed_applied, model; on an empty lane just {scope, skipped:true}.
-export function runInterpret({ runDate, scope, model, temperature, seed }) {
+export function runInterpret({ runDate, scope, model, temperature, seed, fields }) {
   return postJSON("/api/interpret", {
     run_date: runDate,
     scope,
     model,
     temperature,
     seed,
+    fields,
   });
 }
