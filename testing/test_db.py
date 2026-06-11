@@ -44,7 +44,7 @@ EXPECTED_COLUMNS = {
     "interpretations": {"run_date", "scope", "text", "model", "generated_at"},
     "llm_invocations": {
         "id", "run_date", "scope", "model", "temperature", "seed", "filter",
-        "input_tokens", "output_tokens", "generated_at",
+        "input_tokens", "output_tokens", "generated_at", "duration_ms",
     },
 }
 
@@ -105,7 +105,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 4
+        assert version == db.SCHEMA_VERSION == 5
     finally:
         conn.close()
 
@@ -134,16 +134,16 @@ def test_stats_snapshots_unique_run_video(tmp_path):
 
 
 def test_init_db_creates_llm_invocations(tmp_path):
-    """Fresh DB: llm_invocations exists with the param columns at version 4."""
+    """Fresh DB: llm_invocations exists with the param + duration columns at v5."""
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
 
     conn = db.get_connection(db_path)
     try:
         cols = _columns(conn, "llm_invocations")
-        assert {"temperature", "seed", "filter"}.issubset(cols)
+        assert {"temperature", "seed", "filter", "duration_ms"}.issubset(cols)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 4
+        assert version == 5
     finally:
         conn.close()
 
@@ -177,9 +177,9 @@ def _build_v3_db(db_path):
     return video, interp
 
 
-def test_v3_to_v4_migration_is_non_destructive(tmp_path):
-    """A v3 DB gains llm_invocations and bumps to v4 with pre-existing rows
-    byte-for-byte unchanged."""
+def test_v3_to_v5_migration_is_non_destructive(tmp_path):
+    """A v3 DB gains llm_invocations (with duration_ms) and bumps straight to v5
+    with pre-existing rows byte-for-byte unchanged."""
     db_path = str(tmp_path / "test.db")
     video_before, interp_before = _build_v3_db(db_path)
 
@@ -195,11 +195,113 @@ def test_v3_to_v4_migration_is_non_destructive(tmp_path):
     conn = db.get_connection(db_path)
     try:
         assert "llm_invocations" in _table_names(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert "duration_ms" in _columns(conn, "llm_invocations")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         video_after = dict(conn.execute("SELECT * FROM videos").fetchone())
         interp_after = dict(conn.execute("SELECT * FROM interpretations").fetchone())
         assert video_after == video_before
         assert interp_after == interp_before
+    finally:
+        conn.close()
+
+
+# The v4 llm_invocations CREATE, BEFORE duration_ms (nine columns). Used to build a
+# genuine v4 DB so the v4->v5 ADD COLUMN path is actually exercised — building it
+# from the CURRENT statement (which already has duration_ms) would test nothing.
+_V4_LLM_INVOCATIONS = """
+CREATE TABLE llm_invocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date TEXT,
+    scope TEXT,
+    model TEXT,
+    temperature REAL,
+    seed INTEGER,
+    filter TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    generated_at TEXT
+)
+"""
+
+
+def _build_v4_db(db_path):
+    """A real v4 schema: every current CREATE EXCEPT the new llm_invocations (use
+    the pre-duration_ms statement instead), stamped user_version = 4, with a sample
+    interpretations row and a sample llm_invocations row (no duration_ms). Returns
+    the two seeded rows as dicts."""
+    conn = db.get_connection(db_path)
+    try:
+        for statement in db.SCHEMA_STATEMENTS:
+            if "llm_invocations" in statement:
+                continue
+            conn.execute(statement)
+        conn.execute(_V4_LLM_INVOCATIONS)
+        conn.execute("PRAGMA user_version = 4")
+        conn.execute(
+            "INSERT INTO interpretations (run_date, scope, text, model, generated_at) "
+            "VALUES ('2026-06-08', 'overall', 'A summary.', "
+            "'anthropic:claude-haiku-4-5', '2026-06-08T11:00:00-04:00')"
+        )
+        conn.execute(
+            "INSERT INTO llm_invocations (run_date, scope, model, temperature, seed, "
+            "filter, input_tokens, output_tokens, generated_at) VALUES "
+            "('2026-06-08', 'overall', 'anthropic:claude-haiku-4-5', 0.5, NULL, "
+            "NULL, 100, 30, '2026-06-08T11:00:00-04:00')"
+        )
+        conn.commit()
+        interp = dict(conn.execute("SELECT * FROM interpretations").fetchone())
+        invocation = dict(conn.execute("SELECT * FROM llm_invocations").fetchone())
+    finally:
+        conn.close()
+    return interp, invocation
+
+
+def test_v4_to_v5_adds_duration_column_non_destructively(tmp_path):
+    """An existing v4 DB whose llm_invocations LACKS duration_ms gains the column
+    (ALTER), bumps to v5, and leaves pre-existing rows unchanged (NULL duration)."""
+    db_path = str(tmp_path / "test.db")
+    interp_before, invocation_before = _build_v4_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        assert "duration_ms" not in _columns(conn, "llm_invocations")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    finally:
+        conn.close()
+
+    db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        assert "duration_ms" in _columns(conn, "llm_invocations")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        interp_after = dict(conn.execute("SELECT * FROM interpretations").fetchone())
+        assert interp_after == interp_before
+        inv_after = dict(conn.execute("SELECT * FROM llm_invocations").fetchone())
+        # Pre-existing invocation is intact; the new column reads NULL for it.
+        assert inv_after["duration_ms"] is None
+        assert {k: inv_after[k] for k in invocation_before} == invocation_before
+    finally:
+        conn.close()
+
+
+def test_v4_to_v5_migration_is_atomic(tmp_path):
+    """The ALTER and the user_version stamp are one atomic unit under an explicit
+    BEGIN: a rollback after both must leave version 4 AND no duration_ms column.
+    If the PRAGMA committed independently, the version would read 5 — this proves
+    it participates in the transaction."""
+    db_path = str(tmp_path / "test.db")
+    _build_v4_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        conn.execute("BEGIN")
+        conn.execute("ALTER TABLE llm_invocations ADD COLUMN duration_ms INTEGER")
+        conn.execute("PRAGMA user_version = 5")
+        conn.execute("ROLLBACK")
+
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert "duration_ms" not in _columns(conn, "llm_invocations")
     finally:
         conn.close()
 
@@ -251,16 +353,18 @@ def test_log_invocation_appends_and_round_trips(tmp_path):
             db.log_invocation(
                 conn, "2026-06-08", "overall", "openai:gpt-5.4-nano",
                 0.7, 42, None, 3000, 200, "2026-06-08T11:00:00-04:00",
+                duration_ms=1234,
             )
-            # Same (run_date, scope), NULL seed and NULL filter, appends a 2nd row.
+            # Same (run_date, scope), NULL seed/filter, default (NULL) duration_ms,
+            # appends a 2nd row.
             db.log_invocation(
                 conn, "2026-06-08", "overall", "anthropic:claude-haiku-4-5",
                 0.5, None, None, 2500, 150, "2026-06-08T11:05:00-04:00",
             )
 
         rows = conn.execute(
-            "SELECT id, temperature, seed, filter, input_tokens, output_tokens "
-            "FROM llm_invocations ORDER BY id"
+            "SELECT id, temperature, seed, filter, input_tokens, output_tokens, "
+            "duration_ms FROM llm_invocations ORDER BY id"
         ).fetchall()
         assert len(rows) == 2
         assert rows[0]["id"] != rows[1]["id"]  # distinct ids: it is a log
@@ -269,7 +373,88 @@ def test_log_invocation_appends_and_round_trips(tmp_path):
         assert rows[0]["filter"] is None
         assert rows[0]["input_tokens"] == 3000
         assert rows[0]["output_tokens"] == 200
+        assert rows[0]["duration_ms"] == 1234
         assert rows[1]["seed"] is None
         assert rows[1]["filter"] is None
+        assert rows[1]["duration_ms"] is None  # keyword-only default
+    finally:
+        conn.close()
+
+
+def test_fetch_interpretation_returns_latest_duration(tmp_path):
+    """fetch_interpretation reports the duration of the NEWEST invocation for the
+    (run_date, scope) — the run behind the current text — and NULL when none."""
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        with db.transaction(conn):
+            db.upsert_interpretation(
+                conn, "2026-06-08", "overall", "A summary.",
+                "openai:gpt-5.4-nano", "2026-06-08T11:05:00-04:00",
+            )
+            # Two invocations for the same lane; the later (higher id) is the one
+            # whose duration must be reported alongside the current text.
+            db.log_invocation(
+                conn, "2026-06-08", "overall", "openai:gpt-5.4-nano",
+                0.7, 42, None, 3000, 200, "2026-06-08T11:00:00-04:00",
+                duration_ms=900,
+            )
+            db.log_invocation(
+                conn, "2026-06-08", "overall", "openai:gpt-5.4-nano",
+                0.7, 42, None, 3100, 210, "2026-06-08T11:05:00-04:00",
+                duration_ms=1700,
+            )
+
+        row = db.fetch_interpretation(conn, "2026-06-08", "overall")
+        assert row["text"] == "A summary."
+        assert row["duration_ms"] == 1700  # newest invocation's duration
+
+        # A lane with an interpretation but no invocation -> NULL duration.
+        with db.transaction(conn):
+            db.upsert_interpretation(
+                conn, "2026-06-08", "health", "Seed text.",
+                "model-x", "2026-06-08T11:05:00-04:00",
+            )
+        seed_row = db.fetch_interpretation(conn, "2026-06-08", "health")
+        assert seed_row["text"] == "Seed text."
+        assert seed_row["duration_ms"] is None
+    finally:
+        conn.close()
+
+
+def test_fetch_latest_invocation_empty_returns_none(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        assert db.fetch_latest_invocation(conn) is None
+    finally:
+        conn.close()
+
+
+def test_fetch_latest_invocation_returns_max_id_row(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        with db.transaction(conn):
+            db.log_invocation(
+                conn, "2026-06-08", "overall", "openai:gpt-5.4-nano",
+                0.7, 42, None, 3000, 200, "2026-06-08T11:00:00-04:00",
+            )
+            # The later insert (higher id) is the one prepopulation should return.
+            db.log_invocation(
+                conn, "2026-06-08", "health", "anthropic:claude-haiku-4-5",
+                0.3, None, None, 2500, 150, "2026-06-08T11:05:00-04:00",
+            )
+
+        row = db.fetch_latest_invocation(conn)
+        assert row["model"] == "anthropic:claude-haiku-4-5"
+        assert row["temperature"] == 0.3
+        assert row["seed"] is None
     finally:
         conn.close()

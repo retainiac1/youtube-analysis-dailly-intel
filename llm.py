@@ -134,6 +134,35 @@ def _is_openai_reasoning_model(model_id: str) -> bool:
     return model_id.startswith(OPENAI_REASONING_PREFIXES)
 
 
+def model_capabilities(model: str) -> dict:
+    """Which tunable parameters the adapter for `model` ACTUALLY honors, so a UI
+    can grey the controls a model would silently ignore (the same dishonest-
+    surface problem `seed_applied` prevents in the log, kept out of the controls).
+
+    This mirrors the per-adapter parameter handling below and is the single source
+    the dashboard reads, instead of re-deriving provider rules client-side:
+    - Anthropic omits `seed` (Messages API has no seed) -> seed=False.
+    - OpenAI reasoning models (GPT-5 / o-series) omit `temperature` -> temperature
+      =False; they still honor seed. Non-reasoning OpenAI, xAI, Gemini honor both.
+
+    `model` is the canonical "provider:model"; it is split via the one splitter
+    (`split_model`). An unknown provider raises LLMError, same gate as generate(),
+    so callers must only pass already-allowed models (see app._allowed_models)."""
+    provider, model_id = split_model(model)
+    if provider not in SUPPORTED_PROVIDERS:
+        supported = ", ".join(SUPPORTED_PROVIDERS)
+        raise LLMError(
+            f"Unknown provider {provider!r}; supported providers are: {supported}"
+        )
+    temperature = True
+    seed = True
+    if provider == "anthropic":
+        seed = False
+    if provider == "openai" and _is_openai_reasoning_model(model_id):
+        temperature = False
+    return {"temperature": temperature, "seed": seed}
+
+
 # --- client factories (key check FIRST, then lazy SDK import) ---------------
 # Order is load-bearing: read the key and raise before importing the SDK, so an
 # absent key never surfaces as an ImportError. Each is a separate seam tests

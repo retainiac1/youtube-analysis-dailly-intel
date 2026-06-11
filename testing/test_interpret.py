@@ -119,6 +119,9 @@ def test_synthesize_lane_writes_interpretation_and_logs(conn, monkeypatch):
     )
     assert result["skipped"] is False
     assert result["text"] == "A summary."
+    # The measured run time is returned and is a non-negative int (timed around the
+    # mocked generate(), so it is tiny but present).
+    assert isinstance(result["duration_ms"], int) and result["duration_ms"] >= 0
     assert len(rec) == 1                              # generate called once
     assert rec[0]["model"] == "openai:gpt-5.4-nano"
 
@@ -131,7 +134,7 @@ def test_synthesize_lane_writes_interpretation_and_logs(conn, monkeypatch):
 
     inv = conn.execute(
         "SELECT model, temperature, seed, filter, input_tokens, "
-        "output_tokens FROM llm_invocations"
+        "output_tokens, duration_ms FROM llm_invocations"
     ).fetchall()
     assert len(inv) == 1
     assert inv[0]["model"] == "openai:gpt-5.4-nano"
@@ -140,6 +143,8 @@ def test_synthesize_lane_writes_interpretation_and_logs(conn, monkeypatch):
     assert inv[0]["filter"] is None
     assert inv[0]["input_tokens"] == 200
     assert inv[0]["output_tokens"] == 30
+    # The logged duration matches what the result reported.
+    assert inv[0]["duration_ms"] == result["duration_ms"]
 
 
 def test_synthesize_lane_logs_seed_applied_not_user_seed(conn, monkeypatch):

@@ -20,6 +20,28 @@ async function putJSON(url, body) {
   return resp.json();
 }
 
+// POST that surfaces the server's error `detail` (the generate endpoint returns a
+// clean {detail} on a 400 — missing key, out-of-range temperature, etc. — and the
+// UI shows it inline). The body parse is guarded so a non-JSON error (e.g. a proxy
+// page) falls back to the status line instead of throwing a parse error that masks
+// the real status.
+async function postJSON(url, body) {
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    let detail = `${resp.status} ${resp.statusText}`;
+    try {
+      const b = await resp.json();
+      if (b && b.detail) detail = b.detail;
+    } catch (_) { /* non-JSON body: keep the status line */ }
+    throw new Error(detail);
+  }
+  return resp.json();
+}
+
 // Serialize {run_date, lane} plus a filters object into a query string.
 // Arrays append one param per value (the repeatable-param contract the backend
 // expects); booleans append only when true; null / "" are omitted.
@@ -97,4 +119,26 @@ export function setStarred(videoId, starred) {
     `/api/videos/${encodeURIComponent(videoId)}/star`,
     { starred },
   );
+}
+
+// --- Phase 3 generator: prepopulation + run ---------------------------------
+
+// Model options, per-model honored-parameter map (capabilities), and the last-used
+// model/temperature/seed (or defaults). One fetch populates both the dropdown and
+// the current selection.
+export function getInterpretDefaults() {
+  return getJSON("/api/interpret-defaults");
+}
+
+// Trigger synthesis for one lane (run_date, scope=lane) with the chosen model +
+// parameters. Resolves to {scope, skipped, ...} — on success also text, tokens,
+// seed_applied, model; on an empty lane just {scope, skipped:true}.
+export function runInterpret({ runDate, scope, model, temperature, seed }) {
+  return postJSON("/api/interpret", {
+    run_date: runDate,
+    scope,
+    model,
+    temperature,
+    seed,
+  });
 }

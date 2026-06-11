@@ -458,6 +458,59 @@ html { scroll-padding-top: var(--header-h, 0px); }
   max-width: 70ch;
 }
 
+/* --- Interpretation generate controls (the /interpretation page) --------- */
+.interpret-controls {
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.interpret-controls h2 { margin: 0 0 1rem; }
+.interpret-controls-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+/* Each labeled control stacks its caption above the input. */
+.interpret-control {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.interpret-control input,
+.interpret-select {
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.75rem;
+}
+.interpret-control input { width: 7rem; }
+.interpret-select { cursor: pointer; }
+/* A control the selected model ignores: dimmed and non-interactive, so the surface
+   never implies a parameter is live when the model would silently drop it. */
+.interpret-control.control-muted { opacity: 0.45; }
+.interpret-control.control-muted input { cursor: not-allowed; }
+.interpret-run { padding: 0.55rem 1.5rem; }
+/* Labeled run-time readout: caption stacked above the value (mirrors the other
+   controls), so it reads as a field with a resting "—" rather than empty space. */
+.interpret-runtime { gap: 0.35rem; }
+.interpret-stopwatch {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  min-width: 3.5rem;
+  padding: 0.5rem 0;
+}
+.interpret-error {
+  margin: 0.85rem 0 0;
+  color: var(--accent-red, #ff6b6b);
+  font-size: 0.85rem;
+  min-height: 1rem;
+}
+
 /* --- Trends interpretation rail (read-only, right column) ---------------- */
 /* Mirrors the left filter rail: sticky and offset below the pinned header by the
    runtime-measured --header-h, so it stays in view while the charts scroll. The

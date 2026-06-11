@@ -241,3 +241,85 @@ def test_live_generate(model):
                           temperature=1.0, seed=7)
     assert result.text and result.text.strip(), f"{model}: empty text"
     assert result.input_tokens > 0, f"{model}: no input tokens reported"
+
+
+# --- model_capabilities ----------------------------------------------------
+
+def test_model_capabilities_anthropic_omits_seed():
+    # Anthropic honors temperature but has no seed param.
+    assert llm.model_capabilities("anthropic:claude-haiku-4-5") == {
+        "temperature": True, "seed": False,
+    }
+
+
+def test_model_capabilities_openai_reasoning_omits_temperature():
+    # gpt-5.4-nano is a reasoning model: temperature omitted, seed honored.
+    assert llm.model_capabilities("openai:gpt-5.4-nano") == {
+        "temperature": False, "seed": True,
+    }
+
+
+def test_model_capabilities_openai_non_reasoning_honors_both():
+    assert llm.model_capabilities("openai:gpt-4o") == {
+        "temperature": True, "seed": True,
+    }
+
+
+def test_model_capabilities_xai_and_google_honor_both():
+    assert llm.model_capabilities("xai:grok-4-fast") == {
+        "temperature": True, "seed": True,
+    }
+    assert llm.model_capabilities("google:gemini-2.5-flash-lite") == {
+        "temperature": True, "seed": True,
+    }
+
+
+def test_model_capabilities_unknown_provider_raises():
+    with pytest.raises(llm.LLMError) as exc:
+        llm.model_capabilities("nope:model")
+    for provider in ("anthropic", "openai", "xai", "google"):
+        assert provider in str(exc.value)
+
+
+# --- pin model_capabilities to the adapters (kills drift) ------------------
+# For each shipped price-map model, run generate() against the provider's fake and
+# assert capability AGREES with what the adapter actually did: seed honored iff
+# seed_applied is not None, and temperature honored iff it reached the SDK call.
+# temperature is a top-level kwarg for anthropic/openai/xai but rides inside the
+# `config` object for google, so the forwarding check is per-provider — and it
+# checks ABSENCE (key/attr missing), never "== None", so it cannot pass vacuously.
+
+_FACTORY_AND_FAKE = {
+    "anthropic": ("_client_anthropic", _fake_anthropic),
+    "openai": ("_client_openai", _fake_openai),
+    "xai": ("_client_xai", _fake_openai),
+    "google": ("_client_google", _fake_google),
+}
+
+
+def _temperature_forwarded(provider, rec):
+    if provider == "google":
+        cfg = rec.get("config")
+        return cfg is not None and getattr(cfg, "temperature", None) is not None
+    return "temperature" in rec
+
+
+@pytest.mark.parametrize("model", sorted(config.PRICES))
+def test_capabilities_match_adapter(model, monkeypatch):
+    provider = llm.split_model(model)[0]
+    factory_name, fake = _FACTORY_AND_FAKE[provider]
+    rec = {}
+    monkeypatch.setattr(llm, factory_name, lambda: fake(rec))
+
+    caps = llm.model_capabilities(model)
+    # temperature 0.5 is valid for every provider's range (anthropic 0-1, others
+    # 0-2); a seed is supplied so seed_applied reflects whether it was honored.
+    result = llm.generate(model, "p", temperature=0.5, seed=42)
+
+    assert (result.seed_applied is not None) == caps["seed"], (
+        f"{model}: seed_applied={result.seed_applied!r} vs caps.seed={caps['seed']}"
+    )
+    assert _temperature_forwarded(provider, rec) == caps["temperature"], (
+        f"{model}: temperature forwarded={_temperature_forwarded(provider, rec)} "
+        f"vs caps.temperature={caps['temperature']}"
+    )

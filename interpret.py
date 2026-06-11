@@ -21,6 +21,7 @@ Invariants (see docs/interpretations-generator-plan.MD):
 
 import argparse
 import sys
+import time
 
 import db
 from config import DB_PATH, ConfigError, VALID_BUCKETS, now_local_iso, validate_config
@@ -84,14 +85,19 @@ def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
         return {"scope": scope, "skipped": True}
 
     prompt = build_prompt(run_date, scope, rows)
+    # Time the network call: this is the generator "run time" we persist and show.
+    # monotonic() is immune to wall-clock adjustments. The DB write below is trivial
+    # and deliberately excluded so the figure reflects the model, not SQLite.
+    start = time.monotonic()
     result = generate(model, prompt, temperature=temperature, seed=seed)
+    duration_ms = int((time.monotonic() - start) * 1000)
     now = now_local_iso()
 
     def _write():
         with db.transaction(conn):
             db.log_invocation(conn, run_date, scope, model, temperature,
                               result.seed_applied, filter, result.input_tokens,
-                              result.output_tokens, now)
+                              result.output_tokens, now, duration_ms=duration_ms)
             db.upsert_interpretation(conn, run_date, scope, result.text, model,
                                      now)
 
@@ -104,6 +110,7 @@ def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
         "input_tokens": result.input_tokens,
         "output_tokens": result.output_tokens,
         "seed_applied": result.seed_applied,
+        "duration_ms": duration_ms,
     }
 
 

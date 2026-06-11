@@ -15,7 +15,10 @@ import config
 # IF NOT EXISTS path; the seed gains the empty table on next init).
 # v4: added the `llm_invocations` table for the interpretation generator (same
 # non-destructive IF NOT EXISTS path; the seed gains the empty table on next init).
-SCHEMA_VERSION = 4
+# v5: added llm_invocations.duration_ms (generator run time). This is the FIRST
+# bump that runs ALTER TABLE on an existing table — CREATE IF NOT EXISTS cannot add
+# a column — so init_db carries an explicit, atomic ADD COLUMN + stamp branch.
+SCHEMA_VERSION = 5
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -137,7 +140,8 @@ SCHEMA_STATEMENTS: list[str] = [
         filter TEXT,           -- v2 forward-compat; ALWAYS NULL in v1
         input_tokens INTEGER,
         output_tokens INTEGER,
-        generated_at TEXT
+        generated_at TEXT,
+        duration_ms INTEGER    -- v5: generator run time (NULL for un-instrumented rows)
     )
     """,
 ]
@@ -164,24 +168,52 @@ def get_connection(
     return conn
 
 
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    """The column names of `table` (via PRAGMA table_info). Used to make the
+    column-add migration idempotent: only ALTER when the column is genuinely
+    missing, so re-running init_db on an already-migrated DB is a no-op."""
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
 def init_db(db_path: str) -> None:
     """Create all tables if they do not exist and stamp the schema version.
 
-    Safe to run repeatedly: every statement uses CREATE TABLE IF NOT EXISTS and
-    PRAGMA user_version is set idempotently. The user_version read is the hook
-    for future, non-destructive migrations."""
+    Fresh and additive (CREATE IF NOT EXISTS) paths are idempotent. The v4->v5
+    bump is the first that ALTERs an existing table (CREATE IF NOT EXISTS cannot
+    add a column), so it runs in an EXPLICIT transaction: add the column if
+    missing, THEN stamp the version, then commit — so user_version is never ahead
+    of the schema, and any interruption leaves a state the idempotent column check
+    heals on the next run."""
     # SQLite will not create missing parent directories; ensure they exist.
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(db_path)
     try:
         current_version = conn.execute("PRAGMA user_version").fetchone()[0]
-        # Future migrations branch on current_version here. For v1 the
-        # IF NOT EXISTS statements are sufficient for both fresh and existing DBs.
+        # Additive tables: safe to autocommit (idempotent, no existing data touched).
         for statement in SCHEMA_STATEMENTS:
             conn.execute(statement)
-        if current_version != SCHEMA_VERSION:
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.commit()
+
+        # Migration + version stamp as ONE atomic unit. An EXPLICIT BEGIN is
+        # required: db.transaction / Python's legacy sqlite3 autocommit only opens
+        # an implicit transaction before DML (INSERT/UPDATE/DELETE), never before
+        # ALTER/PRAGMA, so without this BEGIN both statements would autocommit and
+        # a rollback would be a no-op. With it, the ADD COLUMN and the user_version
+        # header write roll back together on any failure.
+        conn.execute("BEGIN")
+        try:
+            # v4 -> v5: add llm_invocations.duration_ms to existing tables. A fresh
+            # DB already has it from the CREATE above, so the check skips the ALTER.
+            if "duration_ms" not in _column_names(conn, "llm_invocations"):
+                conn.execute(
+                    "ALTER TABLE llm_invocations ADD COLUMN duration_ms INTEGER"
+                )
+            # Stamp LAST, so the version is never ahead of the schema.
+            if current_version != SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
 
@@ -345,24 +377,26 @@ def set_starred(conn: sqlite3.Connection, video_id: str, starred: bool,
 
 def log_invocation(conn: sqlite3.Connection, run_date: str, scope: str,
                    model: str, temperature: float, seed, filter,
-                   input_tokens: int, output_tokens: int, now: str) -> None:
+                   input_tokens: int, output_tokens: int, now: str,
+                   *, duration_ms=None) -> None:
     """Append one row to the llm_invocations log recording the full parameter set
     that produced a generation. Append-only (autoincrement id), so re-running a
     lane adds a new row rather than overwriting. `model` is canonical
     "provider:model"; `seed` is NULL when the provider did not apply one; `filter`
-    is NULL in v1. Does not commit — the caller wraps it in `transaction`."""
+    is NULL in v1. `duration_ms` (keyword-only) is the measured generator run time,
+    NULL when not measured. Does not commit — the caller wraps it in `transaction`."""
     conn.execute(
         """
         INSERT INTO llm_invocations
             (run_date, scope, model, temperature, seed, filter,
-             input_tokens, output_tokens, generated_at)
+             input_tokens, output_tokens, generated_at, duration_ms)
         VALUES (:run_date, :scope, :model, :temperature, :seed, :filter,
-                :input_tokens, :output_tokens, :now)
+                :input_tokens, :output_tokens, :now, :duration_ms)
         """,
         {"run_date": run_date, "scope": scope, "model": model,
          "temperature": temperature, "seed": seed, "filter": filter,
          "input_tokens": input_tokens, "output_tokens": output_tokens,
-         "now": now},
+         "now": now, "duration_ms": duration_ms},
     )
 
 
@@ -552,13 +586,37 @@ def fetch_lane(
 def fetch_interpretation(
     conn: sqlite3.Connection, run_date: str, scope: str
 ) -> sqlite3.Row | None:
-    """Return the interpretations row for (run_date, scope) or None when absent.
-    scope holds a bucket value (health / habit / overall). Read-only; the row is
-    written by an external generator (upsert_interpretation lands in Phase 4)."""
+    """Return the interpretations row for (run_date, scope) or None when absent,
+    plus `duration_ms` — the run time of the invocation that produced the current
+    text. scope holds a bucket value (health / habit / overall). duration_ms is
+    NULL when no invocation exists for the row (e.g. the seed's pre-instrumentation
+    rows).
+
+    The duration subquery picks the NEWEST llm_invocations row for the same
+    (run_date, scope). That is the run behind the current text ONLY because
+    synthesize_lane logs the invocation and upserts the interpretation in ONE
+    transaction (the pinned write order): the highest invocation id always matches
+    the stored text. Do not reorder those writes, or this duration would belong to
+    a different run than the displayed text. duration_ms is the LAST selected
+    column (appended), so name-indexed consumers are undisturbed."""
     return conn.execute(
-        "SELECT run_date, scope, text, model, generated_at "
-        "FROM interpretations WHERE run_date = ? AND scope = ?",
+        "SELECT i.run_date, i.scope, i.text, i.model, i.generated_at, "
+        "       (SELECT li.duration_ms FROM llm_invocations li "
+        "        WHERE li.run_date = i.run_date AND li.scope = i.scope "
+        "        ORDER BY li.id DESC LIMIT 1) AS duration_ms "
+        "FROM interpretations i WHERE i.run_date = ? AND i.scope = ?",
         (run_date, scope),
+    ).fetchone()
+
+
+def fetch_latest_invocation(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """Return the most recent llm_invocations row (model, temperature, seed), or
+    None when the log is empty. MAX(id) is the recency proxy (the autoincrement id
+    is monotonic), so this never lexically compares generated_at. The dashboard
+    reads it to prepopulate the generate controls with the last-used parameters."""
+    return conn.execute(
+        "SELECT model, temperature, seed FROM llm_invocations "
+        "ORDER BY id DESC LIMIT 1"
     ).fetchone()
 
 

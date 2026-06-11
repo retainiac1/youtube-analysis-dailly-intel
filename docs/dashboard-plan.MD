@@ -16,6 +16,19 @@ Phase 0 is fully specced and ready to hand to CC. Phases 1-4 are scoped here at
 the level needed to keep them in view; each gets its own detailed spec pass
 before it is built, after the prior phase's STOP gate clears.
 
+### Amendment (Phase 3 generator, 2026-06-10)
+This plan originally declared interpretations strictly read-only in the dashboard
+("the app has no write path at all"). The interpretation-generator feature (see
+`docs/interpretations-generator-plan.MD`) deliberately amends that: the dashboard
+now has **exactly one** interpretation-write path — `POST /api/interpret`, which
+runs synthesis for the viewed lane via the importable generator core and persists
+the canonical `interpretations` row + an `llm_invocations` log row — plus the
+read-only `GET /api/interpret-defaults` that prepopulates the generate controls.
+The outbound LLM call and its keys live entirely server-side. **Everything else in
+the dashboard remains read-only**; the read-only-strict statements below are
+preserved as written and individually marked `(amended: see Phase 3 generator
+amendment)` so the contract history stays honest.
+
 ### Architecture decisions (locked)
 - Backend: FastAPI + Python, reusing `db.py` helpers. No new connection or
   transaction code.
@@ -26,9 +39,13 @@ before it is built, after the prior phase's STOP gate clears.
   `overall`). Updated every run. Displayed read-only by the dashboard.
 - The dashboard does NOT generate interpretations. An external, synthesize-style
   step writes them (separate workstream, out of scope here). The dashboard only
-  reads and displays them.
+  reads and displays them. *(amended: see Phase 3 generator amendment — the
+  dashboard now also triggers synthesis via `POST /api/interpret`, calling the
+  shared generator core; it does not reimplement generation.)*
 - Read-mostly: the ONLY writes the dashboard performs are `videos.user_notes`
-  and `videos.starred` (Phase 3). Everything else is read-only.
+  and `videos.starred` (Phase 3). Everything else is read-only. *(amended: see
+  Phase 3 generator amendment — also `POST /api/interpret` writes one
+  `interpretations` row + one `llm_invocations` row per run.)*
 - Location: a `dashboard/` package in the project root
   (`/Users/maryjonesm1/claude-cowork/daily-intel/dashboard/`).
 - New deps: `fastapi`, `uvicorn`, and `httpx` (test only, for `TestClient`).
@@ -268,7 +285,10 @@ Files touched:
 
 NOTE: `upsert_interpretation` is DEFERRED. It belongs to the external generator
 workstream (Phase 4 reference), not Phase 0. Phase 0 is read-only-strict: the
-app has no write path at all.
+app has no write path at all. *(amended: see Phase 3 generator amendment.
+`upsert_interpretation` and `log_invocation` now exist and the dashboard DOES
+call them, but only through the one `POST /api/interpret` write path; Phase 0's
+read endpoints stayed read-only.)*
 
 FastAPI skeleton (`dashboard/app.py`):
 - A per-request DB dependency that opens via `db.get_connection` and closes in a
@@ -415,7 +435,9 @@ Scope:
   the external generator has its writer. The DASHBOARD never calls it; it exists
   for the separate synthesize-style step. Building that step is out of scope (it
   is the interpretation generator workstream, like synthesize.py in the pipeline
-  plan).
+  plan). *(amended: see Phase 3 generator amendment — that workstream shipped, and
+  the dashboard now DOES call `upsert_interpretation`, via the one
+  `POST /api/interpret` endpoint built on the generator core.)*
 
 Watch items:
 - Absent interpretation (a run with no generated text yet) renders as a clean
@@ -432,6 +454,8 @@ STOP.
 
 - The interpretation generator itself (the external synthesize-style step that
   writes `interpretations` rows). The dashboard only displays its output.
+  *(amended: see Phase 3 generator amendment — the generator was built, and the
+  dashboard now triggers it for the viewed lane via `POST /api/interpret`.)*
 - Authentication / multi-user. This is a local single-user tool.
 - Editing API-owned data of any kind from the dashboard.
 - Scheduling or triggering pipeline runs from the dashboard.
@@ -442,8 +466,11 @@ STOP.
 ## Decisions: all resolved
 - Backend FastAPI + Python, reusing db.py. Frontend static HTML/JS, no build.
 - Interpretation table `(run_date, scope)`, scope = bucket, updated every run,
-  read-only in the dashboard, written by an external step.
-- Dashboard writes only `user_notes` and `starred`.
+  read-only in the dashboard, written by an external step. *(amended: see Phase 3
+  generator amendment — the dashboard now also writes it via `POST /api/interpret`.)*
+- Dashboard writes only `user_notes` and `starred`. *(amended: see Phase 3
+  generator amendment — plus `interpretations` + `llm_invocations` via the one
+  `POST /api/interpret` write path.)*
 - Schema bump 2 -> 3, additive, seed preserved, via the existing user_version
   hook.
 - `upsert_interpretation` deferred to Phase 4 (for the external generator).
