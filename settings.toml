@@ -70,3 +70,30 @@ bucket = "health"
 "openai:gpt-5.4-nano"          = { input = 0.20, output = 1.25 }
 "xai:grok-4-fast"              = { input = 0.20, output = 0.50 }
 "google:gemini-2.5-flash-lite" = { input = 0.10, output = 0.40 }
+
+# Palette, thresholds, and donut radii for the dashboard's LLM-spend visual (the
+# spend-share donut + token/cost leaderboard). None of these are hardcoded in JS or
+# CSS; they are served to the frontend with the /api/spend payload. Bar mapping is
+# fixed: tokens = blue, dollars = green. The badge palette is a SINGLE GREEN RAMP by
+# efficiency (NOT a red/green stoplight): efficient (low $/M) = deepest green,
+# expensive (high $/M) = brightest green, mid in between.
+#
+# The section name is the UPPERCASE key the loader looks up (config.load_settings
+# does parsed.get("SPEND_VIZ")); a lowercase or dotted name would silently fall back
+# to the in-code DEFAULT_SPEND_VIZ instead of applying these edits.
+[SPEND_VIZ]
+token_bar_color    = "#6FA8F5"   # blue: tokens
+cost_bar_color     = "#3FA66A"   # green: dollars
+# Ordered greens, darkest first. Slice i (by share, largest first) gets color i;
+# extra models beyond the list wrap. Largest share => darkest.
+donut_slice_colors = ["#14532D", "#166534", "#15803D", "#16A34A", "#22C55E", "#4ADE80"]
+donut_inner_radius = "55%"       # ring hole
+donut_outer_radius = "80%"
+efficiency_good    = 0.50        # $/M at or below -> "good" badge (deepest green)
+efficiency_warn    = 1.00        # $/M at or above -> "warn" badge (brightest green)
+good_bg = "#14532D"   # <= efficiency_good: deep green fill
+good_fg = "#D1FAE5"   # pale mint text on deep green
+mid_bg  = "#15803D"   # between cutoffs: mid green fill
+mid_fg  = "#ECFDF5"   # near-white text on mid green
+warn_bg = "#4ADE80"   # >= efficiency_warn: bright green fill
+warn_fg = "#052E16"   # very dark green text on bright green

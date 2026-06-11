@@ -26,6 +26,21 @@ def make_good_config() -> SimpleNamespace:
             "anthropic:claude-haiku-4-5": {"input": 1.00, "output": 5.00},
             "openai:gpt-5.4-nano": {"input": 0.20, "output": 1.25},
         },
+        SPEND_VIZ={
+            "token_bar_color": "#6FA8F5",
+            "cost_bar_color": "#3FA66A",
+            "donut_slice_colors": ["#14532D", "#16A34A"],
+            "donut_inner_radius": "55%",
+            "donut_outer_radius": "80%",
+            "efficiency_good": 0.50,
+            "efficiency_warn": 1.00,
+            "good_bg": "#14532D",
+            "good_fg": "#D1FAE5",
+            "mid_bg": "#15803D",
+            "mid_fg": "#ECFDF5",
+            "warn_bg": "#4ADE80",
+            "warn_fg": "#052E16",
+        },
     )
 
 
@@ -172,6 +187,65 @@ def test_settings_toml_has_quoted_price_keys():
         "google:gemini-2.5-flash-lite",
     ):
         assert key in prices, key
+
+
+def test_spend_viz_well_formed_passes():
+    # Positive control: a good SPEND_VIZ validates cleanly, so the negatives below
+    # are not passing for an unrelated reason.
+    config.validate_config(make_good_config())
+
+
+def test_spend_viz_empty_color_raises_named_error():
+    # Otherwise-valid config; only one SPEND_VIZ color is blank.
+    cfg = make_good_config()
+    cfg.SPEND_VIZ = {**cfg.SPEND_VIZ, "token_bar_color": ""}
+    with pytest.raises(config.ConfigError, match="token_bar_color"):
+        config.validate_config(cfg)
+
+
+def test_spend_viz_empty_slice_list_raises_named_error():
+    cfg = make_good_config()
+    cfg.SPEND_VIZ = {**cfg.SPEND_VIZ, "donut_slice_colors": []}
+    with pytest.raises(config.ConfigError, match="donut_slice_colors"):
+        config.validate_config(cfg)
+
+
+def test_spend_viz_non_string_slice_raises_named_error():
+    cfg = make_good_config()
+    cfg.SPEND_VIZ = {**cfg.SPEND_VIZ, "donut_slice_colors": ["#fff", 5]}
+    with pytest.raises(config.ConfigError, match="donut_slice_colors"):
+        config.validate_config(cfg)
+
+
+def test_spend_viz_bool_threshold_is_rejected():
+    # bool is an int subclass; a hand-edited `efficiency_good = true` must fail.
+    cfg = make_good_config()
+    cfg.SPEND_VIZ = {**cfg.SPEND_VIZ, "efficiency_good": True}
+    with pytest.raises(config.ConfigError, match="efficiency_good"):
+        config.validate_config(cfg)
+
+
+def test_spend_viz_negative_threshold_raises_named_error():
+    cfg = make_good_config()
+    cfg.SPEND_VIZ = {**cfg.SPEND_VIZ, "efficiency_warn": -1.0}
+    with pytest.raises(config.ConfigError, match="efficiency_warn"):
+        config.validate_config(cfg)
+
+
+def test_spend_viz_good_above_warn_raises_named_error():
+    cfg = make_good_config()
+    cfg.SPEND_VIZ = {**cfg.SPEND_VIZ, "efficiency_good": 2.0, "efficiency_warn": 1.0}
+    with pytest.raises(config.ConfigError, match="efficiency_good"):
+        config.validate_config(cfg)
+
+
+def test_settings_toml_spend_viz_round_trips():
+    # Guards against an accidental lowercase/dotted [SPEND_VIZ] section name, which
+    # would silently fall back to DEFAULT_SPEND_VIZ instead of applying the file.
+    viz = config.load_settings()["SPEND_VIZ"]
+    assert viz is not config.DEFAULT_SPEND_VIZ
+    assert viz["token_bar_color"] == "#6FA8F5"
+    assert viz["efficiency_good"] == 0.50
 
 
 def test_config_error_is_value_error():

@@ -650,42 +650,143 @@ html { scroll-padding-top: var(--header-h, 0px); }
 
 /* --- Spend panel (Interpretation page, read-only) ------------------------ */
 /* Sticky like the rails so it stays in view while the controls/card scroll. Two
-   sections (this run / month to date), each a total line + a row per model. */
+   sections (this run / month to date), each a scope header + spend-share donut +
+   a per-model leaderboard. All viz-semantic colors (token/cost bars, donut slices,
+   badges) are inline from settings.toml; only neutral tracks/borders use theme
+   tokens here, so the stylesheet carries no magic colors. */
 .spend-panel {
   padding: 1.25rem;
   position: sticky;
   top: calc(var(--header-h, 0px) + 0.75rem);
 }
 .spend-title { margin: 0 0 0.85rem; color: var(--text-primary); }
-.spend-section + .spend-section { margin-top: 1.1rem; }
-.spend-section-title {
-  margin: 0 0 0.4rem;
+.spend-section + .spend-section { margin-top: 1.4rem; }
+
+/* Scope header: label left, total right. */
+.spend-scope-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.spend-scope-title { font-size: 0.82rem; color: var(--text-secondary); }
+.spend-scope-total {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* tokens=blue / cost=green caption + the $/M definition. */
+.spend-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.85rem;
+  margin-bottom: 0.4rem;
   font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
   color: var(--text-muted);
 }
-.spend-total {
-  margin: 0 0 0.5rem;
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: var(--text-primary);
+.spend-legend-item { display: inline-flex; align-items: center; gap: 0.35rem; }
+.spend-pm-note { margin-left: auto; font-size: 0.68rem; color: var(--text-muted); }
+.spend-swatch {
+  width: 0.9rem;
+  height: 0.55rem;
+  border-radius: 2px;
+  flex-shrink: 0;
 }
-/* One model row: model name, then the token split and cost stacked beneath it. */
-.spend-row {
+.spend-swatch-empty {
+  background: var(--glass-border);
+  border: 1px solid var(--glass-border);
+}
+
+/* Donut + its static model->color legend, side by side (wraps when narrow). */
+.spend-donut-wrap {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  margin: 0.4rem 0 1rem;
+}
+.spend-donut { width: 150px; height: 150px; flex-shrink: 0; }
+.spend-donut-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.spend-donut-legend {
+  flex: 1 1 9rem;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.1rem;
-  padding: 0.4rem 0;
+  gap: 0.25rem;
+}
+.spend-legend-row { display: flex; align-items: center; gap: 0.45rem; font-size: 0.72rem; }
+.spend-legend-row .spend-swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 3px;
+}
+.spend-legend-model {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.spend-legend-share { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* Leaderboard: a row per model, most efficient first. */
+.spend-leaderboard { display: flex; flex-direction: column; }
+.spend-leader-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.6rem 0;
   border-top: 1px solid var(--glass-border);
+}
+.spend-leader-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
 }
 .spend-model {
   font-size: 0.82rem;
   color: var(--text-primary);
-  word-break: break-all; /* canonical provider:model can be long in a 300px column */
+  word-break: break-all; /* canonical provider:model can be long in a narrow column */
 }
-.spend-tokens { font-size: 0.72rem; color: var(--text-muted); }
-.spend-cost { font-size: 0.8rem; color: var(--text-secondary); }
+.spend-badge {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.spend-bar-line { display: flex; align-items: center; gap: 0.5rem; }
+.spend-bar-track {
+  flex: 1;
+  min-width: 0;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--glass-border);
+  overflow: hidden;
+}
+.spend-bar-fill { height: 100%; border-radius: 999px; min-width: 2px; }
+.spend-bar-value {
+  flex-shrink: 0;
+  width: 6.5rem;
+  text-align: right;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
 .spend-cost-unavailable { color: var(--text-muted); font-style: italic; }
 .spend-empty { margin: 0; font-size: 0.85rem; color: var(--text-secondary); }
 

@@ -447,3 +447,63 @@ def test_spend_empty_log_returns_zeroed(client, monkeypatch):
     assert body["run"]["total_cost"] == 0.0
     assert body["run"]["has_unpriced"] is False
     assert body["month_to_date"]["per_model"] == []
+
+
+def test_spend_share_pct_and_cost_per_million(spend_client, monkeypatch):
+    """Each priced row carries share_pct (slice of the scope total) and
+    cost_per_million (blended $/M), computed server-side. share_pct over priced
+    rows sums to 1; cost_per_million = cost / (in + out) * 1e6."""
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
+    body = spend_client.get("/api/spend", params={"run_date": "2026-06-08"}).json()
+    run = _by_model(body["run"])
+
+    openai = run["openai:gpt-5.4-nano"]
+    expected_cost = llm.estimate_cost("openai:gpt-5.4-nano", 4000, 300, config.PRICES)
+    assert openai["cost_per_million"] == pytest.approx(
+        expected_cost / (4000 + 300) * 1_000_000
+    )
+    assert openai["share_pct"] == pytest.approx(
+        expected_cost / body["run"]["total_cost"]
+    )
+
+    priced_shares = [
+        m["share_pct"] for m in body["run"]["per_model"] if m["cost"] is not None
+    ]
+    assert sum(priced_shares) == pytest.approx(1.0)
+
+
+def test_spend_derived_values_null_for_unpriced(spend_client, monkeypatch):
+    """An unpriced model has null cost, so both derived values are null too (no
+    share of a total it is excluded from, no $/M without a cost)."""
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
+    body = spend_client.get("/api/spend", params={"run_date": "2026-06-08"}).json()
+    made_up = _by_model(body["run"])["made:up"]
+    assert made_up["cost"] is None
+    assert made_up["share_pct"] is None
+    assert made_up["cost_per_million"] is None
+
+
+def test_spend_share_pct_null_when_total_zero(spend_client, monkeypatch):
+    """With every model unpriced the scope total is 0; share_pct is null rather
+    than a divide-by-zero."""
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
+    monkeypatch.setattr(config, "PRICES", {})  # nothing is priced
+    body = spend_client.get("/api/spend", params={"run_date": "2026-06-08"}).json()
+    assert body["run"]["total_cost"] == 0.0
+    for m in body["run"]["per_model"]:
+        assert m["cost"] is None
+        assert m["share_pct"] is None
+        assert m["cost_per_million"] is None
+
+
+def test_spend_serves_viz_palette(spend_client, monkeypatch):
+    """The response carries the spend-viz palette/thresholds from settings so the
+    frontend never hardcodes them."""
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
+    body = spend_client.get("/api/spend", params={"run_date": "2026-06-08"}).json()
+    viz = body["viz"]
+    assert viz == config.SPEND_VIZ
+    for key in ("token_bar_color", "cost_bar_color", "donut_slice_colors",
+                "donut_inner_radius", "donut_outer_radius", "efficiency_good",
+                "efficiency_warn"):
+        assert key in viz

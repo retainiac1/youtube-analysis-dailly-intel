@@ -158,6 +158,8 @@ function setupTheme() {
     localStorage.setItem("site-theme", next);
     // ECharts cannot re-theme a live instance, so rebuild the visible charts.
     if (router.current() === TRENDS_ROUTE) trends.rerenderFromCache();
+    // The spend panel's donuts are ECharts too -- rebuild them on the same toggle.
+    if (router.current() === INTERPRETATION_ROUTE) spend.rerenderFromCache();
   });
 }
 

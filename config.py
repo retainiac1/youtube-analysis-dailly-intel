@@ -51,6 +51,33 @@ DEFAULT_PRICES = {
     "google:gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
 }
 
+# Colors, thresholds, and donut radii for the dashboard's LLM-spend visual (the
+# spend-share donut + token/cost leaderboard). Kept here, not hardcoded in JS/CSS,
+# so the palette is tunable in one place and validated at startup. The bar mapping
+# is fixed: tokens = blue, dollars = green. The badge palette is a SINGLE GREEN
+# RAMP by efficiency (NOT a red/green stoplight): efficient (low $/M) = deepest
+# green, expensive (high $/M) = brightest green, mid in between. Each fill carries
+# a contrasting text color so the pill reads on the dark glass panel.
+DEFAULT_SPEND_VIZ = {
+    "token_bar_color": "#6FA8F5",
+    "cost_bar_color": "#3FA66A",
+    # Ordered greens, darkest first; slice i (by share, largest first) gets color
+    # i, wrapping if there are more models than colors. Largest share => darkest.
+    "donut_slice_colors": [
+        "#14532D", "#166534", "#15803D", "#16A34A", "#22C55E", "#4ADE80",
+    ],
+    "donut_inner_radius": "55%",
+    "donut_outer_radius": "80%",
+    "efficiency_good": 0.50,
+    "efficiency_warn": 1.00,
+    "good_bg": "#14532D",
+    "good_fg": "#D1FAE5",
+    "mid_bg": "#15803D",
+    "mid_fg": "#ECFDF5",
+    "warn_bg": "#4ADE80",
+    "warn_fg": "#052E16",
+}
+
 # name -> default, for every externalized tunable. load_settings() merges the
 # parsed TOML over these, so a missing key always resolves to its default.
 SETTINGS_DEFAULTS: dict[str, object] = {
@@ -64,6 +91,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "CATEGORY_REGION": DEFAULT_CATEGORY_REGION,
     "SEARCH_QUERIES": DEFAULT_SEARCH_QUERIES,
     "PRICES": DEFAULT_PRICES,
+    "SPEND_VIZ": DEFAULT_SPEND_VIZ,
 }
 
 # Resolve relative to THIS file, not CWD, so it works regardless of where the
@@ -104,6 +132,7 @@ SAFETY_BUFFER = _settings["SAFETY_BUFFER"]
 CATEGORY_REGION = _settings["CATEGORY_REGION"]
 SEARCH_QUERIES = _settings["SEARCH_QUERIES"]
 PRICES = _settings["PRICES"]
+SPEND_VIZ = _settings["SPEND_VIZ"]
 
 PUBLISHED_AFTER = "2025-09-01T00:00:00Z"
 PUBLISHED_BEFORE = None
@@ -362,6 +391,51 @@ def validate_config(cfg: object | None = None) -> None:
                 )
             if value < 0:
                 raise ConfigError(f"{where} '{field}' must be non-negative, got {value}")
+
+    # SPEND_VIZ: the dashboard spend-visual palette/thresholds/radii. Every color
+    # and radius is a non-empty string; donut_slice_colors a non-empty list of
+    # them; the two $/M cutoffs are non-negative numbers with good <= warn. A
+    # hand-edit typo fails loud here, naming the offending key.
+    viz = getattr(cfg, "SPEND_VIZ")
+    if not isinstance(viz, dict):
+        raise ConfigError(
+            f"Config key SPEND_VIZ must be a dict, got {type(viz).__name__}"
+        )
+    string_keys = (
+        "token_bar_color", "cost_bar_color", "donut_inner_radius",
+        "donut_outer_radius", "good_bg", "good_fg", "mid_bg", "mid_fg",
+        "warn_bg", "warn_fg",
+    )
+    for key in string_keys:
+        value = viz.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(
+                f"SPEND_VIZ['{key}'] must be a non-empty string, got {value!r}"
+            )
+
+    slices = viz.get("donut_slice_colors")
+    if not isinstance(slices, list) or not slices:
+        raise ConfigError(
+            "SPEND_VIZ['donut_slice_colors'] must be a non-empty list"
+        )
+    for i, color in enumerate(slices):
+        if not isinstance(color, str) or not color.strip():
+            raise ConfigError(
+                f"SPEND_VIZ['donut_slice_colors'][{i}] must be a non-empty string, "
+                f"got {color!r}"
+            )
+
+    for key in ("efficiency_good", "efficiency_warn"):
+        value = viz.get(key)
+        # bool is an int subclass; reject it where a number is required.
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ConfigError(f"SPEND_VIZ['{key}'] must be a number, got {value!r}")
+        if value < 0:
+            raise ConfigError(f"SPEND_VIZ['{key}'] must be non-negative, got {value}")
+    if viz["efficiency_good"] > viz["efficiency_warn"]:
+        raise ConfigError(
+            "SPEND_VIZ['efficiency_good'] must be <= SPEND_VIZ['efficiency_warn']"
+        )
 
 
 # Validate the loaded settings at import. An external settings.toml means

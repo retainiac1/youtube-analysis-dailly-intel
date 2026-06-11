@@ -510,7 +510,15 @@ def _price_models(rows: list[sqlite3.Row]) -> dict:
     estimate_cost returns None for a model absent from config.PRICES (the
     'unavailable' display path): the tokens still report, the cost is null, the
     row is flagged unpriced, and it is EXCLUDED from total_cost so the labeled
-    total stays honest."""
+    total stays honest.
+
+    Each priced row also carries two derived values, computed HERE once so the
+    frontend never re-does cost math (single source of truth):
+      share_pct        = cost / total_cost  (this model's slice of the scope spend)
+      cost_per_million = cost / (in + out) * 1e6  (blended $/M, the efficiency key)
+    Both are null when cost is null; share_pct is also null when total_cost is 0
+    and cost_per_million is null when the model logged zero tokens (no divide-by-
+    zero). share_pct needs the scope total, so it is filled in a second pass."""
     per_model, total, has_unpriced = [], 0.0, False
     for r in rows:
         cost = llm.estimate_cost(
@@ -520,13 +528,22 @@ def _price_models(rows: list[sqlite3.Row]) -> dict:
             has_unpriced = True
         else:
             total += cost
+        tokens = r["input_tokens"] + r["output_tokens"]
+        cost_per_million = (
+            cost / tokens * 1_000_000 if cost is not None and tokens > 0 else None
+        )
         per_model.append({
             "model": r["model"],
             "input_tokens": r["input_tokens"],
             "output_tokens": r["output_tokens"],
             "invocations": r["invocations"],
             "cost": cost,
+            "cost_per_million": cost_per_million,
+            "share_pct": None,  # filled below, once the scope total is known
         })
+    for m in per_model:
+        if m["cost"] is not None and total > 0:
+            m["share_pct"] = m["cost"] / total
     return {"total_cost": total, "has_unpriced": has_unpriced, "per_model": per_model}
 
 
@@ -558,6 +575,9 @@ def api_spend(
         "month": month,
         "run": _price_models(run_rows),
         "month_to_date": _price_models(month_rows),
+        # Palette/thresholds/radii for the spend visual. Served here so the colors
+        # live in settings.toml, never hardcoded in the JS/CSS (single source).
+        "viz": config.SPEND_VIZ,
     }
 
 
