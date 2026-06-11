@@ -638,6 +638,44 @@ def fetch_latest_invocation(conn: sqlite3.Connection) -> sqlite3.Row | None:
     ).fetchone()
 
 
+def fetch_spend(
+    conn: sqlite3.Connection, *, run_date: str | None = None,
+    month_prefix: str | None = None,
+) -> list[sqlite3.Row]:
+    """Per-model token totals from llm_invocations, optionally scoped to one
+    run_date and/or one Eastern calendar month. Returns one row per model with
+    summed input/output tokens and the invocation COUNT, ordered by model.
+
+    Tokens only — dollar cost is computed at DISPLAY from config.PRICES and never
+    stored, so it is not this reader's job. COALESCE(...,0) so a row with a NULL
+    token count contributes 0 rather than nulling the whole SUM.
+
+    The two filters use deliberately DIFFERENT time keys (do not collapse them):
+    `run_date` is the pipeline run a generation summarized; `month_prefix` is the
+    Eastern calendar month (YYYY-MM) the spend was actually incurred in. A run
+    re-interpreted today counts under its old run_date AND under this month.
+    `month_prefix` matches substr(generated_at, 1, 7): generated_at is written via
+    now_local_iso() (Eastern, LOCAL_TZ), so its YYYY-MM prefix IS the Eastern
+    month. This is an equality on a derived local-month key, never a lexical
+    ordering of timestamps across offsets."""
+    clauses, params = [], []
+    if run_date is not None:
+        clauses.append("run_date = ?")
+        params.append(run_date)
+    if month_prefix is not None:
+        clauses.append("substr(generated_at, 1, 7) = ?")
+        params.append(month_prefix)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return conn.execute(
+        "SELECT model, "
+        "SUM(COALESCE(input_tokens, 0))  AS input_tokens, "
+        "SUM(COALESCE(output_tokens, 0)) AS output_tokens, "
+        "COUNT(*) AS invocations "
+        f"FROM llm_invocations {where} GROUP BY model ORDER BY model",
+        params,
+    ).fetchall()
+
+
 def get_preference(conn: sqlite3.Connection, key: str) -> str | None:
     """Return the stored value for a UI preference key, or None when unset.
     Values are opaque TEXT (the caller decides the encoding, e.g. a JSON list for

@@ -115,7 +115,7 @@ function applyCapabilities(model) {
 async function buildScaffold() {
   const modelSelect = node("select", { class: "interpret-select", attrs: { "aria-label": "Model" } });
   const tempInput = node("input", { type: "number", attrs: { step: "0.1", min: "0", max: "2", "aria-label": "Temperature" } });
-  const seedInput = node("input", { type: "number", attrs: { step: "1", "aria-label": "Seed" } });
+  const seedInput = node("input", { type: "number", attrs: { step: "1", min: "1", "aria-label": "Seed" } });
   const runBtn = node("button", { class: "btn-primary interpret-run", type: "button", text: "Run" });
   // Run-time element: a labeled value with a visible resting state ("—") so it is
   // never an invisible empty span. Ticks live during a run, then freezes to the
@@ -283,6 +283,10 @@ async function onRun() {
       // stored — rather than the client round-trip, so live and persisted agree.
       stopwatchEl.textContent = formatDuration(res.duration_ms) || "—";
       renderCard({ text: res.text, model: res.model, duration_ms: res.duration_ms });
+      // A written run logged a new invocation, so the spend totals changed. Notify
+      // the spend panel (main.js routes this to spend.refresh). Only the written
+      // branch: a skipped lane logs nothing, so spend is unchanged.
+      document.dispatchEvent(new CustomEvent("interpretation:generated"));
     }
   } catch (err) {
     clearInterval(timer);

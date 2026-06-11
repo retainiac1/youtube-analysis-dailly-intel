@@ -107,7 +107,14 @@
                aria-label="Interpretation"></aside>
       </main>
 
-      <main class="interpretation" id="interpretation" aria-live="polite" hidden></main>
+      <!-- Two stable mounts: interpretation.js owns #interpretation-main (it calls
+           replaceChildren on it), and spend.js owns #spend-panel beside it. Keeping
+           them as separate children means a generation re-render never wipes the
+           spend panel. -->
+      <main class="interpretation" id="interpretation" aria-live="polite" hidden>
+        <div id="interpretation-main"></div>
+        <aside class="glass-panel spend-panel" id="spend-panel" aria-label="LLM spend"></aside>
+      </main>
     </div>
   </div>
 

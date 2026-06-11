@@ -470,6 +470,103 @@ def test_fetch_latest_invocation_returns_max_id_row(tmp_path):
         conn.close()
 
 
+def _seed_spend_log(conn):
+    """A spread of invocations across two runs, two models, and two Eastern
+    months (the YYYY-MM of generated_at): used by the fetch_spend tests."""
+    with db.transaction(conn):
+        # run 2026-06-08, June: openai twice (proves GROUP BY collapse) + anthropic.
+        db.log_invocation(conn, "2026-06-08", "overall", "openai:gpt-5.4-nano",
+                          0.7, 42, None, 3000, 200, "2026-06-08T11:00:00-04:00")
+        db.log_invocation(conn, "2026-06-08", "health", "openai:gpt-5.4-nano",
+                          0.7, 42, None, 1000, 100, "2026-06-08T11:05:00-04:00")
+        db.log_invocation(conn, "2026-06-08", "habit", "anthropic:claude-haiku-4-5",
+                          0.5, None, None, 2500, 150, "2026-06-08T11:06:00-04:00")
+        # run 2026-05-30, May: a different run AND a different month.
+        db.log_invocation(conn, "2026-05-30", "overall", "openai:gpt-5.4-nano",
+                          0.7, 42, None, 500, 50, "2026-05-30T22:00:00-04:00")
+
+
+def test_fetch_spend_groups_by_model_and_sums(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        _seed_spend_log(conn)
+        rows = db.fetch_spend(conn)  # no filter: every invocation
+        by_model = {r["model"]: r for r in rows}
+        # openai appears in three invocations (two June + one May): summed + counted.
+        assert by_model["openai:gpt-5.4-nano"]["input_tokens"] == 3000 + 1000 + 500
+        assert by_model["openai:gpt-5.4-nano"]["output_tokens"] == 200 + 100 + 50
+        assert by_model["openai:gpt-5.4-nano"]["invocations"] == 3
+        assert by_model["anthropic:claude-haiku-4-5"]["input_tokens"] == 2500
+        assert by_model["anthropic:claude-haiku-4-5"]["invocations"] == 1
+        # Ordered by model for a stable readout.
+        assert [r["model"] for r in rows] == sorted(r["model"] for r in rows)
+    finally:
+        conn.close()
+
+
+def test_fetch_spend_run_date_filter(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        _seed_spend_log(conn)
+        rows = db.fetch_spend(conn, run_date="2026-06-08")
+        by_model = {r["model"]: r for r in rows}
+        # Only the June-08 run: openai twice (3000+1000), anthropic once. The May
+        # run's openai row is excluded.
+        assert by_model["openai:gpt-5.4-nano"]["input_tokens"] == 4000
+        assert by_model["openai:gpt-5.4-nano"]["invocations"] == 2
+        assert "anthropic:claude-haiku-4-5" in by_model
+    finally:
+        conn.close()
+
+
+def test_fetch_spend_month_prefix_filter(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        _seed_spend_log(conn)
+        # The substr(generated_at,1,7) Eastern-month key: only May rows.
+        rows = db.fetch_spend(conn, month_prefix="2026-05")
+        assert len(rows) == 1
+        assert rows[0]["model"] == "openai:gpt-5.4-nano"
+        assert rows[0]["input_tokens"] == 500
+        assert rows[0]["invocations"] == 1
+        # And only June rows the other way.
+        june = db.fetch_spend(conn, month_prefix="2026-06")
+        assert sum(r["invocations"] for r in june) == 3
+    finally:
+        conn.close()
+
+
+def test_fetch_spend_coalesces_null_tokens(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        # A NULL-token invocation (e.g. an un-instrumented seed row) must contribute
+        # 0, not null the SUM for its model.
+        with db.transaction(conn):
+            conn.execute(
+                "INSERT INTO llm_invocations (run_date, scope, model, "
+                "input_tokens, output_tokens, generated_at) "
+                "VALUES ('2026-06-08', 'overall', 'openai:gpt-5.4-nano', "
+                "NULL, NULL, '2026-06-08T09:00:00-04:00')"
+            )
+            db.log_invocation(conn, "2026-06-08", "health", "openai:gpt-5.4-nano",
+                              0.7, None, None, 1000, 100, "2026-06-08T09:05:00-04:00")
+        rows = db.fetch_spend(conn)
+        assert len(rows) == 1
+        assert rows[0]["input_tokens"] == 1000  # NULL row added 0, not None
+        assert rows[0]["output_tokens"] == 100
+        assert rows[0]["invocations"] == 2
+    finally:
+        conn.close()
+
+
 def test_preference_set_get_and_overwrite(tmp_path):
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)

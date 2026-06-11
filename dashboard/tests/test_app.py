@@ -1,6 +1,8 @@
 import sqlite3
 import threading
 
+import pytest
+
 import config
 import db
 import interpret
@@ -242,6 +244,20 @@ def test_interpret_llm_error_is_clean_400(client, monkeypatch):
     assert "OPENAI_API_KEY" in resp.json()["detail"]
 
 
+def test_interpret_provider_api_error_is_clean_400(client, monkeypatch):
+    # A provider API error (the adapter wraps it as LLMError) must surface as a
+    # clean 400 with the message, NOT a raw 500 — the grok-seed-0 class of failure.
+    def boom(*a, **k):
+        raise llm.LLMError("xai: Error code: 400 - Seed must be positive but seed = 0")
+    monkeypatch.setattr(interpret, "generate", boom)
+    resp = client.post("/api/interpret", json={
+        "run_date": "2026-06-08", "scope": "health",
+        "model": VALID_MODEL, "temperature": 0.7, "seed": 0,
+    })
+    assert resp.status_code == 400
+    assert "Seed must be positive" in resp.json()["detail"]
+
+
 def test_interpret_bad_model_is_422(client, monkeypatch):
     # Validation rejects the model before any generate call.
     def _fail_if_called(*a, **k):
@@ -329,3 +345,105 @@ def test_index_asset_links_resolve(client):
     assert assets, "index.html references no local css/js"
     for url in assets:
         assert client.get(url).status_code == 200, f"asset 404: {url}"
+
+
+# --- Phase 4: /api/spend ----------------------------------------------------
+
+
+def _by_model(section):
+    return {m["model"]: m for m in section["per_model"]}
+
+
+def test_spend_run_and_month_sections(spend_client, monkeypatch):
+    """The run section sums the selected run; the month section sums the current
+    Eastern month. The two use different time keys, so the May invocation is in
+    neither when the run is June-08 and "now" is June."""
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
+    body = spend_client.get("/api/spend", params={"run_date": "2026-06-08"}).json()
+    assert body["run_date"] == "2026-06-08"
+    assert body["month"] == "2026-06"
+
+    run = _by_model(body["run"])
+    # openai: two June-08 invocations summed (3000+1000 / 200+100).
+    assert run["openai:gpt-5.4-nano"]["input_tokens"] == 4000
+    assert run["openai:gpt-5.4-nano"]["output_tokens"] == 300
+    assert run["openai:gpt-5.4-nano"]["invocations"] == 2
+    expected = llm.estimate_cost("openai:gpt-5.4-nano", 4000, 300, config.PRICES)
+    assert run["openai:gpt-5.4-nano"]["cost"] == pytest.approx(expected)
+    assert run["anthropic:claude-haiku-4-5"]["input_tokens"] == 2500
+
+    # Month-to-date over June: same three models as the June-08 run (the only run
+    # in June here), NOT the May openai row.
+    month = _by_model(body["month_to_date"])
+    assert month["openai:gpt-5.4-nano"]["input_tokens"] == 4000  # 500 May excluded
+    assert "made:up" in month
+
+
+def test_spend_unpriced_model_reports_tokens_null_cost(spend_client, monkeypatch):
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
+    body = spend_client.get("/api/spend", params={"run_date": "2026-06-08"}).json()
+    run = _by_model(body["run"])
+    # "made:up" is absent from PRICES: tokens still report, cost is null.
+    assert run["made:up"]["input_tokens"] == 4000
+    assert run["made:up"]["cost"] is None
+    assert body["run"]["has_unpriced"] is True
+    # The unpriced row is excluded from the labeled total (= sum of priced only).
+    priced = (llm.estimate_cost("openai:gpt-5.4-nano", 4000, 300, config.PRICES)
+              + llm.estimate_cost("anthropic:claude-haiku-4-5", 2500, 150,
+                                  config.PRICES))
+    assert body["run"]["total_cost"] == pytest.approx(priced)
+
+
+def test_spend_recomputes_on_price_change(spend_client, monkeypatch):
+    """Cost is computed at display, not stored: changing PRICES changes the
+    returned total for the SAME stored rows."""
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
+    monkeypatch.setattr(
+        config, "PRICES", {"openai:gpt-5.4-nano": {"input": 1.0, "output": 5.0}}
+    )
+    first = spend_client.get(
+        "/api/spend", params={"run_date": "2026-06-08"}
+    ).json()["run"]["total_cost"]
+
+    monkeypatch.setattr(
+        config, "PRICES", {"openai:gpt-5.4-nano": {"input": 2.0, "output": 10.0}}
+    )
+    second = spend_client.get(
+        "/api/spend", params={"run_date": "2026-06-08"}
+    ).json()["run"]["total_cost"]
+
+    assert second == pytest.approx(first * 2)
+
+
+def test_spend_month_boundary_uses_generated_at(spend_client, monkeypatch):
+    """Patching "now" to May moves the month window: only the May invocation
+    (generated_at 2026-05-30) lands in month_to_date."""
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-05-31T09:00:00-04:00")
+    body = spend_client.get("/api/spend").json()
+    assert body["month"] == "2026-05"
+    month = _by_model(body["month_to_date"])
+    assert list(month) == ["openai:gpt-5.4-nano"]
+    assert month["openai:gpt-5.4-nano"]["input_tokens"] == 500
+    assert month["openai:gpt-5.4-nano"]["invocations"] == 1
+
+
+def test_spend_without_run_date_empties_run_section(spend_client, monkeypatch):
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
+    body = spend_client.get("/api/spend").json()
+    assert body["run_date"] is None
+    assert body["run"]["per_model"] == []
+    assert body["run"]["total_cost"] == 0.0
+    # Month-to-date still computes.
+    assert body["month_to_date"]["per_model"]
+
+
+def test_spend_empty_log_returns_zeroed(client, monkeypatch):
+    """The default seeded DB has no llm_invocations: zeroed sections, status 200."""
+    monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
+    resp = client.get("/api/spend", params={"run_date": "2026-06-08"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run"]["per_model"] == []
+    assert body["run"]["total_cost"] == 0.0
+    assert body["run"]["has_unpriced"] is False
+    assert body["month_to_date"]["per_model"] == []

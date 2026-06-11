@@ -105,6 +105,16 @@ export function getInterpretation(runDate, lane) {
   return getJSON(`/api/interpretation?${qs}`);
 }
 
+// --- Phase 4: spend display -------------------------------------------------
+
+// Two LLM-spend breakdowns: the selected run and the current month, each split by
+// model. runDate is optional (omit it and the run section comes back empty). Tokens
+// are exact; cost is an estimate, null for any model absent from the price map.
+export function getSpend(runDate) {
+  const qs = buildQuery(runDate ? { run_date: runDate } : {}, null);
+  return getJSON(`/api/spend?${qs}`);
+}
+
 // --- Phase 3: the only writes (user_notes + starred) ------------------------
 
 export function setNotes(videoId, userNotes) {

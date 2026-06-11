@@ -241,3 +241,59 @@ def charts_client(charts_db_path):
         yield TestClient(app)
     finally:
         app.dependency_overrides.clear()
+
+
+# --- Phase 4 (spend display) fixtures ---------------------------------------
+
+# llm_invocations: (run_date, scope, model, input_tokens, output_tokens,
+# generated_at). Spread across two runs / two Eastern months / a priced and an
+# UNPRICED model so the /api/spend tests cover grouping, the run vs month time
+# keys, and the null-cost "unavailable" path. "made:up" is deliberately absent
+# from config.PRICES.
+_SPEND_INVOCATIONS = [
+    # run 2026-06-08, June: two openai (GROUP BY collapse) + one anthropic + one
+    # unpriced.
+    ("2026-06-08", "overall", "openai:gpt-5.4-nano", 3000, 200,
+     "2026-06-08T11:00:00-04:00"),
+    ("2026-06-08", "health", "openai:gpt-5.4-nano", 1000, 100,
+     "2026-06-08T11:05:00-04:00"),
+    ("2026-06-08", "habit", "anthropic:claude-haiku-4-5", 2500, 150,
+     "2026-06-08T11:06:00-04:00"),
+    ("2026-06-08", "overall", "made:up", 4000, 400,
+     "2026-06-08T11:07:00-04:00"),
+    # run 2026-05-30, May: a DIFFERENT run AND a different month.
+    ("2026-05-30", "overall", "openai:gpt-5.4-nano", 500, 50,
+     "2026-05-30T22:00:00-04:00"),
+]
+
+
+@pytest.fixture
+def spend_db_path(tmp_path):
+    """A temp DB seeded only with llm_invocations for the /api/spend tests: two
+    runs, two Eastern months, a priced and an unpriced model."""
+    db_path = str(tmp_path / "spend.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        conn.executemany(
+            "INSERT INTO llm_invocations (run_date, scope, model, input_tokens, "
+            "output_tokens, generated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            _SPEND_INVOCATIONS,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+@pytest.fixture
+def spend_client(spend_db_path):
+    from fastapi.testclient import TestClient
+
+    from dashboard.app import app, get_db_path
+
+    app.dependency_overrides[get_db_path] = lambda: spend_db_path
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()

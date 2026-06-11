@@ -505,6 +505,62 @@ def api_interpret_defaults(conn: sqlite3.Connection = Depends(get_conn)):
     }
 
 
+def _price_models(rows: list[sqlite3.Row]) -> dict:
+    """Turn fetch_spend rows into priced per-model dicts plus the section total.
+    estimate_cost returns None for a model absent from config.PRICES (the
+    'unavailable' display path): the tokens still report, the cost is null, the
+    row is flagged unpriced, and it is EXCLUDED from total_cost so the labeled
+    total stays honest."""
+    per_model, total, has_unpriced = [], 0.0, False
+    for r in rows:
+        cost = llm.estimate_cost(
+            r["model"], r["input_tokens"], r["output_tokens"], config.PRICES
+        )
+        if cost is None:
+            has_unpriced = True
+        else:
+            total += cost
+        per_model.append({
+            "model": r["model"],
+            "input_tokens": r["input_tokens"],
+            "output_tokens": r["output_tokens"],
+            "invocations": r["invocations"],
+            "cost": cost,
+        })
+    return {"total_cost": total, "has_unpriced": has_unpriced, "per_model": per_model}
+
+
+@app.get("/api/spend")
+def api_spend(
+    run_date: str | None = Query(default=None),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Two LLM-spend breakdowns, each split by model: the selected run, and the
+    current Eastern calendar month. The two sections use DELIBERATELY DIFFERENT
+    time keys — `run` filters by run_date (the pipeline run summarized);
+    `month_to_date` filters by generated_at's Eastern month (when the spend was
+    incurred) — so a run re-interpreted today shows under its old run AND under this
+    month. Do not collapse them. Tokens are exact (from llm_invocations); dollar cost
+    is an estimate computed HERE from config.PRICES (never stored), null for any
+    model not in the price map. An empty log returns zeroed sections, not an error.
+    run_date is optional: absent -> the run section is empty (month-to-date still
+    computes)."""
+    month = config.now_local_iso()[:7]
+    run_rows = (
+        db.run_with_db_retry(lambda: db.fetch_spend(conn, run_date=run_date))
+        if run_date else []
+    )
+    month_rows = db.run_with_db_retry(
+        lambda: db.fetch_spend(conn, month_prefix=month)
+    )
+    return {
+        "run_date": run_date,
+        "month": month,
+        "run": _price_models(run_rows),
+        "month_to_date": _price_models(month_rows),
+    }
+
+
 # Static assets + SPA shell. Registered AFTER every /api route above.
 #
 # Asset roots are mounted per directory (js/css/vendor are the only ones under

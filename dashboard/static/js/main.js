@@ -10,6 +10,7 @@ import * as board from "./board.js";
 import * as trends from "./trends.js";
 import * as interpretation from "./interpretation.js";
 import * as interpRail from "./interpretation-rail.js";
+import * as spend from "./spend.js";
 import * as router from "./router.js";
 import "./sticky-header.js"; // side-effect: publishes --header-h for the pinned strip
 
@@ -123,6 +124,8 @@ function enterInterpretation() {
   interpretationEl.hidden = false;
   // Fetch + render the interpretation for the current run + lane on entry.
   interpretation.refresh(state);
+  // The spend panel beside it (run section + month-to-date), refreshed on entry.
+  spend.refresh(state);
 }
 
 // Arrow-key roving focus for a segmented tablist.
@@ -284,9 +287,18 @@ async function init() {
     distribution: document.getElementById("chart-distribution"),
     trajectory: document.getElementById("chart-trajectory"),
   });
-  interpretation.init(interpretationEl);
+  // interpretation.js mounts into the inner container (it replaceChildren's its
+  // mount); spend.js owns the sibling panel, so a generation re-render never wipes
+  // it. The outer #interpretation main stays the page region toggled by the router.
+  interpretation.init(document.getElementById("interpretation-main"));
+  spend.init(document.getElementById("spend-panel"));
   interpRail.init(document.getElementById("trends-interp-rail"));
   board.setActiveTab(app, tabs, state.lane);
+
+  // A successful generation changes the spend totals; refresh the panel. The event
+  // is dispatched by interpretation.js after a written run, keeping spend.js
+  // decoupled (it never imports interpretation.js) while main.js owns `state`.
+  document.addEventListener("interpretation:generated", () => spend.refresh(state));
 
   // Register routes (wires page-nav clicks/keys); do not dispatch until data loads.
   router.initRouter({
@@ -303,7 +315,12 @@ async function init() {
     state.runDate = runSelect.value;
     onRunOrLaneChange();
     if (router.current() === TRENDS_ROUTE) onRunChangeTrends();
-    if (router.current() === INTERPRETATION_ROUTE) interpretation.refresh(state);
+    if (router.current() === INTERPRETATION_ROUTE) {
+      interpretation.refresh(state);
+      // The "This run" section is run-scoped, so a run change re-aggregates it
+      // (month-to-date is unaffected but recomputes cheaply on the same call).
+      spend.refresh(state);
+    }
   });
 
   let runs;
