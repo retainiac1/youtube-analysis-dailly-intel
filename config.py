@@ -67,7 +67,7 @@ DEFAULT_SPEND_VIZ = {
     "donut_slice_colors": [
         "#00F2A9", "#22D3A4", "#3BB89B", "#4A9C8E", "#527F7E", "#55636B",
     ],
-    "donut_inner_radius": "55%",
+    "donut_inner_radius": "58%",
     "donut_outer_radius": "80%",
     "efficiency_good": 0.50,
     "efficiency_warn": 1.00,

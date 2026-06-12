@@ -55,11 +55,6 @@ const usdFmt = new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 4,
 });
-// Blended cost per million tokens: 2 dp.
-const pmFmt = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
 // Share of scope spend: a fraction rendered as a 1 dp percent.
 const shareFmt = new Intl.NumberFormat(undefined, {
   style: "percent",
@@ -75,10 +70,6 @@ function fmtCost(cost) {
   return cost == null ? "unavailable" : `$${usdFmt.format(cost)}`;
 }
 
-function fmtPM(cpm) {
-  return cpm == null ? "n/a" : `$${pmFmt.format(cpm)}/M`;
-}
-
 function fmtShare(share) {
   return share == null ? "" : shareFmt.format(share);
 }
@@ -90,18 +81,6 @@ function themeColor(name, fallback) {
     .getPropertyValue(name)
     .trim();
   return v || fallback;
-}
-
-// The $/M badge palette is a single green ramp (NOT a stoplight): efficient -> good,
-// expensive -> warn, mid in between. Returns the {bg, fg} pair from the viz config.
-function badgeColors(cpm, viz) {
-  if (cpm != null && cpm <= viz.efficiency_good) {
-    return { bg: viz.good_bg, fg: viz.good_fg };
-  }
-  if (cpm != null && cpm >= viz.efficiency_warn) {
-    return { bg: viz.warn_bg, fg: viz.warn_fg };
-  }
-  return { bg: viz.mid_bg, fg: viz.mid_fg };
 }
 
 // Unpriced models sort LAST. A naive (a - b) would coerce null to 0 and rank the
@@ -124,20 +103,14 @@ function bar(value, max, color) {
   return node("div", { class: "spend-bar-track" }, [fill]);
 }
 
-// One leaderboard row: model + $/M badge, then the blue token bar and green cost bar
-// each with their trailing value.
+// One leaderboard row: model name, then the blue token bar and the mint cost bar each
+// with their trailing value. Rows are still ordered most-efficient-first (by $/M); the
+// ordering no longer carries a visible badge.
 function leaderRow(m, scopeMaxTokens, scopeMaxCost, viz) {
   const tokens = m.input_tokens + m.output_tokens;
-  const { bg, fg } = badgeColors(m.cost_per_million, viz);
-  const badge = node("span", { class: "spend-badge", text: fmtPM(m.cost_per_million) });
-  badge.style.background = bg;
-  badge.style.color = fg;
 
   return node("div", { class: "spend-leader-row" }, [
-    node("div", { class: "spend-leader-head" }, [
-      node("span", { class: "spend-model", text: m.model }),
-      badge,
-    ]),
+    node("span", { class: "spend-model", text: m.model }),
     node("div", { class: "spend-bar-line" }, [
       bar(tokens, scopeMaxTokens, viz.token_bar_color),
       node("span", { class: "spend-bar-value", text: `${fmtTokens(tokens)} tok` }),
@@ -253,23 +226,11 @@ function buildSection(title, data, emptyText, viz) {
 
 function initDonut({ el: mountEl, priced, total, colorOf, viz }) {
   const inst = echarts.init(mountEl);
-  const textColor = themeColor("--text-primary", "#b4bcd0");
-  const mutedColor = themeColor("--text-muted", "#8b93a7");
   inst.setOption({
     animation: !(
       window.matchMedia &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches
     ),
-    title: {
-      text: `$${usdFmt.format(total)}`,
-      subtext: "est.",
-      left: "center",
-      top: "center",
-      textAlign: "center",
-      textStyle: { color: textColor, fontSize: 16, fontWeight: 600 },
-      subtextStyle: { color: mutedColor, fontSize: 11 },
-      itemGap: 2,
-    },
     tooltip: {
       trigger: "item",
       formatter: (p) => `${p.name}<br/>$${usdFmt.format(p.value)} (${p.percent}%)`,
@@ -292,6 +253,13 @@ function initDonut({ el: mountEl, priced, total, colorOf, viz }) {
     }],
   });
   donutInstances.set(mountEl, inst);
+  // The total sits in the ring's hole as an HTML overlay (not an ECharts title), so it
+  // is exactly centered via CSS and never grazes the ring. pointer-events:none keeps
+  // slice-hover tooltips working on the canvas beneath it.
+  mountEl.appendChild(node("div", { class: "spend-donut-center" }, [
+    node("span", { class: "spend-donut-amount", text: `$${usdFmt.format(total)}` }),
+    node("span", { class: "spend-donut-est", text: "est." }),
+  ]));
 }
 
 function renderError(message) {
@@ -309,8 +277,8 @@ function disposeDonuts() {
   donutInstances.clear();
 }
 
-// The panel-level caption, shown once (not per scope): tokens=blue / cost=mint key
-// and the $/M definition. De-duplicates the legend the old layout repeated per scope.
+// The panel-level caption, shown once (not per scope): the tokens=blue / cost=mint key.
+// De-duplicates the legend the old layout repeated per scope.
 function topCaption(viz) {
   const tokenSwatch = node("span", { class: "spend-swatch" });
   tokenSwatch.style.background = viz.token_bar_color;
@@ -325,10 +293,6 @@ function topCaption(viz) {
         costSwatch, node("span", { text: "cost" }),
       ]),
     ]),
-    node("p", {
-      class: "spend-pm-note",
-      text: "$/M = blended cost per million tokens",
-    }),
   ]);
 }
 

@@ -683,7 +683,6 @@ html { scroll-padding-top: var(--header-h, 0px); }
   color: var(--text-muted);
 }
 .spend-legend-item { display: inline-flex; align-items: center; gap: 0.35rem; }
-.spend-pm-note { margin: 0.3rem 0 0; font-size: 0.68rem; color: var(--text-muted); }
 
 /* Scope header: just the label (the dollar total lives in the donut center); the
    total only appears here for an empty/degenerate scope that has no donut. */
@@ -733,7 +732,36 @@ html { scroll-padding-top: var(--header-h, 0px); }
   gap: 0.6rem 0.9rem;
   margin: 0.3rem 0 0.9rem;
 }
-.spend-donut { width: 116px; height: 116px; flex-shrink: 0; }
+/* Keep this padding/border free: the center overlay below uses inset:0, which only
+   stays concentric with the ECharts canvas when the box and canvas centers coincide. */
+.spend-donut { width: 116px; height: 116px; flex-shrink: 0; position: relative; }
+/* The scope total, centered in the ring's hole as an HTML overlay (not an ECharts
+   title) so it is exactly centered and never grazes the ring. */
+.spend-donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  pointer-events: none;
+}
+.spend-donut-amount {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.78rem;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.spend-donut-est {
+  margin-top: 2px;
+  font-size: 0.6rem;
+  line-height: 1;
+  color: var(--text-muted);
+}
 .spend-donut-empty {
   display: flex;
   align-items: center;
@@ -774,25 +802,10 @@ html { scroll-padding-top: var(--header-h, 0px); }
   padding: 0.6rem 0;
   border-top: 1px solid var(--glass-border);
 }
-.spend-leader-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.5rem;
-}
 .spend-model {
   font-size: 0.82rem;
   color: var(--text-primary);
   word-break: break-all; /* canonical provider:model can be long in a narrow column */
-}
-.spend-badge {
-  flex-shrink: 0;
-  font-size: 0.72rem;
-  font-weight: 600;
-  padding: 0.12rem 0.5rem;
-  border-radius: 999px;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
 }
 .spend-bar-line { display: flex; align-items: center; gap: 0.5rem; }
 .spend-bar-track {
