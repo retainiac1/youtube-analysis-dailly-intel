@@ -44,18 +44,35 @@ function buildToc(toc) {
   return nav;
 }
 
-// Render `shape` into `target`, replacing its contents. bodyHtml arrives already
-// sanitized from the adapter, so it is assigned as trusted-by-construction markup.
-export function render(target, { bodyHtml, toc, mode }) {
+// Render `shape` into `target`, replacing its contents. The presenter branches only on
+// mode, never on format. Returns whatever the mode's render produces: the native mount
+// returns a Promise (renderAsync) the caller can await to catch parse failures; reading
+// returns undefined. The single replaceChildren below is the teardown: each render
+// discards the entire prior view (old article AND the native style sink together), so
+// switching documents never accumulates injected styles or @font-face rules.
+export function render(target, shape) {
+  const { toc, mode } = shape;
   const article = el("article", { class: "doc-article" });
-  article.innerHTML = bodyHtml;
+  let view;
+  let pending;
 
-  const view = mode === "native"
-    ? el("div", { class: "doc-reading doc-reading--native" }, [article])
-    : el("div", { class: "doc-reading" }, [
-        el("aside", { class: "doc-toc" }, [buildToc(toc)]),
-        article,
-      ]);
+  if (mode === "native") {
+    // docx-preview injects the document's own <style>/@font-face into styleEl. Keeping
+    // it inside #documentation (never the shared <head>) scopes those styles to the doc
+    // view; the di-docx className namespace keeps them off dashboard elements. The
+    // adapter's mount owns the renderAsync call (presenter stays format-agnostic).
+    const styleEl = el("div", { class: "doc-native-styles" });
+    pending = shape.mount(article, styleEl);
+    view = el("div", { class: "doc-reading doc-reading--native" }, [styleEl, article]);
+  } else {
+    // bodyHtml arrives already sanitized from the adapter: trusted-by-construction.
+    article.innerHTML = shape.bodyHtml;
+    view = el("div", { class: "doc-reading" }, [
+      el("aside", { class: "doc-toc" }, [buildToc(toc)]),
+      article,
+    ]);
+  }
 
   target.replaceChildren(view);
+  return pending;
 }

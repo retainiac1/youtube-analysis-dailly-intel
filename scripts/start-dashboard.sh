@@ -62,7 +62,8 @@ fi
 
 reload_args=()
 if [[ "$MODE" == "dev" ]]; then
-  reload_args+=(--reload)
+  # reload_args+=(--reload)
+  reload_args+=(--reload --reload-dir dashboard)
 fi
 
 echo "Dashboard → http://$HOST:$PORT ($MODE)"

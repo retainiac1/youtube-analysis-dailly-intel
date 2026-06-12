@@ -1,13 +1,17 @@
-// Per-format document adapters: each turns raw document text into the one normalized
-// shape the presenter understands, { bodyHtml, toc, mode }. This is the ONLY
-// format-aware code in the client. Phase 1 ships markdown + html (both reading mode);
-// docx and pdf drop in later as pure additions keyed by extension.
+// Per-format document adapters, keyed by extension. This is the ONLY format-aware
+// code in the client. Each turns a raw document into one of two normalized shapes the
+// presenter understands:
+//   reading: { bodyHtml, toc, mode: "reading" } - a sanitized HTML string to inject.
+//   native:  { mount, toc, mode: "native" }     - a mount(bodyEl, styleEl) closure the
+//                                                  presenter calls to render in place.
+// markdown + html are reading mode; docx is native (docx-preview). pdf drops in later.
 //
 // Both reading adapters share a single strict sanitize and a single heading -> id +
 // TOC pass, so a document's own palette or scripts can never leak into the dashboard
-// (the html fixture deliberately carries inline styles to prove this).
+// (the html fixture deliberately carries inline styles to prove this). The native
+// trust boundary is different and documented on DOCX_OPTIONS below.
 
-/* global marked, DOMPurify */
+/* global marked, DOMPurify, docx */
 
 // FORBID the style/class attributes and the <style>/<script> tags: DOMPurify keeps
 // these by default, which would let a document's warm palette override the Glass
@@ -16,6 +20,28 @@ const STRICT_SANITIZE = {
   FORBID_ATTR: ["style", "class"],
   FORBID_TAGS: ["style", "script"],
   RETURN_DOM_FRAGMENT: true,
+};
+
+// docx-preview renderAsync options. className is a UNIQUE prefix (not the library
+// default "docx") so every injected document style class is namespaced `.di-docx-*`
+// and cannot match a dashboard element: the native analog of the reading-mode leak
+// guard. The page-metaphor flags render faithful stacked Word pages (real width,
+// margins, page breaks) rather than a reflowed block; header/footer/footnote/endnote
+// rendering stays on for fidelity. STRICT_SANITIZE is deliberately NOT applied here:
+// docx-preview builds the DOM directly from first-party repo bytes client-side (no
+// untrusted string injection), and stripping style/class would destroy the very
+// styling that makes native fidelity work.
+const DOCX_OPTIONS = {
+  className: "di-docx",
+  inWrapper: true,
+  breakPages: true,
+  ignoreWidth: false,
+  ignoreHeight: false,
+  ignoreLastRenderedPageBreak: true,
+  renderHeaders: true,
+  renderFooters: true,
+  renderFootnotes: true,
+  renderEndnotes: true,
 };
 
 // GitHub-style slug: lowercase, runs of non-alphanumerics to single hyphens, trimmed.
@@ -49,4 +75,14 @@ function buildReading(rawHtml) {
 export const ADAPTERS = {
   md: (text) => buildReading(marked.parse(text)),
   html: (text) => buildReading(text),
+  // Native mode: docx-preview renders into elements rather than producing a string,
+  // so the docx adapter receives the document BYTES (an ArrayBuffer) and returns a
+  // `mount(bodyEl, styleEl)` closure instead of bodyHtml. The presenter calls mount;
+  // the closure owns the renderAsync call, keeping docx-preview out of the presenter.
+  // No generated TOC (Word TOC fields are unsupported by the library), so toc is [].
+  docx: (buffer) => ({
+    toc: [],
+    mode: "native",
+    mount: (bodyEl, styleEl) => docx.renderAsync(buffer, bodyEl, styleEl, DOCX_OPTIONS),
+  }),
 };

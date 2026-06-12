@@ -218,6 +218,7 @@ export function getDocumentationRegistry() {
   return getJSON("/api/documentation");
 }
 
+// Reading-mode formats (md/html) are fetched as text for the string adapters.
 export async function getDocumentRaw(tabId, docId) {
   const qs = buildQuery({ tab: tabId, doc: docId }, null);
   const resp = await fetch(`/api/documentation/raw?${qs}`);
@@ -225,4 +226,15 @@ export async function getDocumentRaw(tabId, docId) {
     throw new Error(`${resp.status} ${resp.statusText}`);
   }
   return resp.text();
+}
+
+// Native-mode formats (docx) are binary: fetch the same endpoint as an ArrayBuffer so
+// docx-preview can parse the bytes. Same URL, the body is just read as bytes not text.
+export async function getDocumentBytes(tabId, docId) {
+  const qs = buildQuery({ tab: tabId, doc: docId }, null);
+  const resp = await fetch(`/api/documentation/raw?${qs}`);
+  if (!resp.ok) {
+    throw new Error(`${resp.status} ${resp.statusText}`);
+  }
+  return resp.arrayBuffer();
 }

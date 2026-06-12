@@ -293,10 +293,122 @@ generic presenter would produce nested layouts and a duplicated TOC, masking
 whether the adapter or the fixture is at fault. The example stays strictly the
 STRUCTURAL model for the presenter (what "take structure from it" meant), never a
 rendered test document. STOP for review.
-- Phase 2 (future): docx adapter via mammoth (native mode), presenter unchanged.
+
+- Phase 2
+- PLANNING TASK, Phase 2 (docx via docx-preview). Plan only, no code. Plan before
+execute, explicit STOP gate, bring the plan for review before writing anything. No
+em dashes. No magic numbers. Code wins over docs: read the source and cite
+file:line, do not guess. Verify behavior in a real browser, never by serving a file.
+
+GOAL
+Add docx support so Word documents render on the Documentation page in NATIVE mode:
+the user picks a .docx from the tab's document list and the document displays
+faithfully (looking like the Word document) in a scrollable container, using
+docx-preview. No generated sidebar TOC. This is the native branch the presenter
+left stubbed in Phase 1.
+
+LIBRARY DECISION IS SETTLED: docx-preview (npm "docx-preview",
+github.com/VolodymyrBaydalka/docxjs), chosen over mammoth for fidelity ("present
+as-is"). Do not relitigate. Research-confirmed facts to build on, not rediscover:
+- renderAsync(document, bodyContainer, styleContainer, options) renders the doc
+  directly into bodyContainer and injects document styles/fonts into styleContainer
+  (separate element; if null, bodyContainer is used). It does NOT return an HTML
+  string. document accepts Blob | ArrayBuffer | Uint8Array.
+- It depends on JSZip, loaded BEFORE docx-preview.
+- Word TOC fields are NOT supported by the library (confirmed in its README): a
+  Word table of contents renders as static text with NO working links. This is
+  accepted. We do not build TOC extraction (honors "no TOC extraction"). The native
+  shape carries toc: [] and there is no sidebar TOC for docx.
+
+THE CONTRACT CHANGE CC MUST RESOLVE FIRST (this is NOT a pure addition)
+The Phase 1 adapters are pure bytes/text -> { bodyHtml, toc, mode } string
+producers, and the presenter injects bodyHtml. docx-preview does not produce a
+string; it renders into an element and manages its own styles. So the adapter seam
+must be extended minimally to support a "render into the presenter's target"
+adapter WITHOUT changing the md/html string path. Propose the cleanest extension,
+for example a native shape variant that carries a mount(bodyEl, styleEl) function
+the presenter calls, versus the presenter's native branch owning the renderAsync
+call. Read doc-adapters.js, doc-presenter.js, and documentation.js and cite the
+exact lines the change touches. State why the chosen shape keeps md/html untouched.
+
+VENDORING (offline, no CDN, like ECharts and the Phase 1 libs)
+- Vendor BOTH jszip and docx-preview as pinned globals under
+  dashboard/static/vendor/ (version in the filename), JSZip first, then
+  docx-preview, both before the ES module, served by the existing /vendor mount.
+- Pin the current published docx-preview version; verify the exact version at
+  vendor time rather than assuming a number. Confirm jszip is not already vendored
+  before adding a second copy.
+
+ADAPTER + PRESENTER
+- docx is BINARY. The Phase 1 raw fetch returns text; the docx path must fetch the
+  bytes as an ArrayBuffer. State exactly how the api layer returns bytes for native
+  formats vs text for reading formats so the two paths are explicit, not conflated.
+- The docx adapter/native branch calls docx.renderAsync(arrayBuffer, bodyEl,
+  styleEl, options). Decide and justify the options, in particular:
+  - className set to a UNIQUE prefix (not the default "docx") so injected document
+    style classes are namespaced and cannot collide with dashboard styles.
+  - a dedicated styleContainer element inside #documentation (not the shared head),
+    so the document's injected styles/fonts are scoped to the doc view.
+  - the page-metaphor options (ignoreWidth, ignoreHeight, breakPages,
+    ignoreLastRenderedPageBreak) per the UX decision below.
+  - renderHeaders/Footers/Footnotes/Endnotes left at sensible defaults; state them.
+- DO NOT apply the reading-mode strict sanitize (FORBID style/class) to docx output.
+  That config exists to strip foreign palettes in reading mode; applying it to
+  docx-preview would destroy the very styling that makes native fidelity work.
+  These are first-party repo docs. State the trust boundary explicitly: docx-preview
+  builds the DOM directly from first-party bytes, client-side, no string injection
+  of untrusted markup, so the reading-mode sanitize does not apply here. If any
+  sanitize is proposed, justify it does not strip docx-preview's style classes.
+
+UX DECISION TO SURFACE (do not silently pick)
+docx-preview can render either as stacked Word pages (page width/margins/breaks,
+the literal document look) or as a flowing scrollable block (ignoreWidth and page
+breaks off). The faithful "page" look means light document surfaces against the
+dark Glass chrome, which is normal for a document viewer but is a visual contrast.
+Present both, with a lean and the option flags each needs, and let the reviewer
+choose. Either way the surrounding chrome (the doc-view container, scroll area)
+uses Glass tokens; only the rendered document interior carries the doc's own look.
+
+STILL TRUE FROM PHASE 1 (confirm against code)
+- The server already lists docx as a known native format (FORMAT_MODE has
+  docx: native) and never parses it. Confirm no server change is needed.
+- Tab visibility keys on the client ADAPTERS registry, so registering the docx
+  adapter should make the Bios tab and its docs appear with no controller change
+  beyond the registration and the native-render seam. Confirm this.
+
+INVARIANTS (carried)
+- Only hardcoded value remains PUBLISH_ROOT. Glass tokens for chrome; no new colors
+  or fonts added to the theme (the doc's own fonts are the library's concern, scoped
+  to the doc view). Page-scoped doc tabs stay separate from the global lane tabs.
+- Offline vendoring, no CDN. Server imports only db.py/config.py/stdlib; ALL docx
+  parsing and rendering is client-side. Read-only, no DB writes.
+
+VERIFICATION (real browser, Desktop Chrome via playwright-core, do not assume)
+Serve against a VACUUM INTO copy DB via DASHBOARD_DB_PATH. Seed a real .docx into a
+Bios subfolder (ideally one bio with a field-generated Word TOC and one without).
+Confirm:
+- The Bios tab appears once the adapter is registered; its docx documents list;
+  selecting one renders via docx-preview in a scrollable container.
+- Fidelity: headings, lists, tables, images, and headers/footers render; the
+  document looks like the Word doc.
+- Containment: after a docx renders, the dashboard chrome (page nav, doc tabs,
+  Glass tokens, fonts elsewhere) is visually unchanged. Inspect that the injected
+  document styles are scoped under the chosen className and do not match dashboard
+  elements. This is the native analog of the reading-mode leak guard.
+- The Word-TOC reality is demonstrated, not assumed: confirm a Word TOC renders as
+  static text and its entries do not navigate (expected, since fields are
+  unsupported). No surprise, no extraction attempted.
+- Regression: md and html reading-mode docs still render with their generated TOC,
+  unaffected by the native path or the seam change.
+
+OUTPUT
+A plan only, including the proposed adapter-seam extension with cited line numbers
+and the two UX options for the page-vs-flow look. No code. Bring it for review. 
 STOP.
+
 - Phase 3 (future): pdf adapter via pdf.js (native mode, outline-based TOC).
 STOP.
+
 - Phase 4 (optional): polish (sticky TOC, active-section on scroll via
 IntersectionObserver, deep-link anchors, reading-progress bar). STOP.
 

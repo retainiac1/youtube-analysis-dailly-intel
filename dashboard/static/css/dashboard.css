@@ -1144,7 +1144,22 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .doc-reading {
   display: grid; grid-template-columns: 240px 1fr; gap: 2.5rem; align-items: start;
 }
-.doc-reading--native { grid-template-columns: 1fr; } /* docx/pdf, later phases */
+/* Native view (docx): docx-preview renders faithful Word pages (real page width,
+   margins, page breaks) into the article and injects its own page styling - white
+   pages on a gray wrapper, scoped under the di-docx className into a body-level style
+   sink. We govern only the chrome: a single full-width column, drop the reading
+   measure so pages keep their true width, allow a wide page to scroll horizontally,
+   and replace the library's opaque gray wrapper with a transparent surface so the
+   white pages float on the dark Glass chrome. The page surfaces, shadows, and margins
+   stay the library's - that is the faithful Word look the reviewer chose. The override
+   is scoped under .doc-reading--native so it outranks the library's own
+   single-class .di-docx-wrapper rule regardless of injected-style source order. */
+.doc-reading--native { grid-template-columns: 1fr; overflow-x: auto; }
+.doc-reading--native .doc-article { max-width: none; }
+.doc-reading--native .di-docx-wrapper { background: transparent; padding: 0; }
+/* Style sink for the document's injected <style>/@font-face: its children apply
+   globally and the element itself renders nothing. */
+.doc-native-styles { display: none; }
 /* The TOC sits below the pinned header AND sub-nav, so both measured heights anchor
    it. The edge gap is defined once and consumed twice: the top offset is
    header + subnav + gap, and the max-height subtracts the same plus a second gap (top

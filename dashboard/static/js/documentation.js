@@ -183,9 +183,14 @@ async function loadActiveDoc() {
   const seq = ++loadSeq;
   viewportEl.replaceChildren(notice("Loading…"));
 
-  let text;
+  // Native formats (docx) are binary and parsed from an ArrayBuffer; reading formats
+  // (md/html) are text. The registry's mode (discovery's reading/native verdict) picks
+  // the fetch, so the two payload kinds are never conflated.
+  let payload;
   try {
-    text = await api.getDocumentRaw(tab.tabId, doc.docId);
+    payload = doc.mode === "native"
+      ? await api.getDocumentBytes(tab.tabId, doc.docId)
+      : await api.getDocumentRaw(tab.tabId, doc.docId);
   } catch (err) {
     if (seq === loadSeq) {
       viewportEl.replaceChildren(notice(`Could not load ${doc.title}: ${err.message || err}`));
@@ -195,8 +200,12 @@ async function loadActiveDoc() {
   if (seq !== loadSeq) return; // a newer selection superseded this fetch
 
   try {
-    presenter.render(viewportEl, ADAPTERS[doc.format](text));
+    // render returns a Promise for native (docx-preview); awaiting it routes a parse
+    // failure into the catch so the error notice replaces the half-rendered container.
+    await presenter.render(viewportEl, ADAPTERS[doc.format](payload));
   } catch (err) {
-    viewportEl.replaceChildren(notice(`Could not render ${doc.title}: ${err.message || err}`));
+    if (seq === loadSeq) {
+      viewportEl.replaceChildren(notice(`Could not render ${doc.title}: ${err.message || err}`));
+    }
   }
 }
