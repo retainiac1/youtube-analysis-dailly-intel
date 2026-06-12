@@ -659,18 +659,47 @@ html { scroll-padding-top: var(--header-h, 0px); }
   position: sticky;
   top: calc(var(--header-h, 0px) + 0.75rem);
 }
-.spend-title { margin: 0 0 0.85rem; color: var(--text-primary); }
-.spend-section + .spend-section { margin-top: 1.4rem; }
+.spend-title { margin: 0 0 0.6rem; color: var(--text-primary); }
+/* A divider + breathing room separates the two scopes for clear rhythm. */
+.spend-section + .spend-section {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--glass-border);
+}
 
-/* Scope header: label left, total right. */
+/* Panel-level caption, shown once: tokens=blue / cost=mint key + the $/M note,
+   set off from the scopes by a hairline rule. */
+.spend-caption {
+  margin: 0 0 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--glass-border);
+}
+.spend-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.85rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.spend-legend-item { display: inline-flex; align-items: center; gap: 0.35rem; }
+.spend-pm-note { margin: 0.3rem 0 0; font-size: 0.68rem; color: var(--text-muted); }
+
+/* Scope header: just the label (the dollar total lives in the donut center); the
+   total only appears here for an empty/degenerate scope that has no donut. */
 .spend-scope-header {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   gap: 0.75rem;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.35rem;
 }
-.spend-scope-title { font-size: 0.82rem; color: var(--text-secondary); }
+.spend-scope-title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
 .spend-scope-total {
   font-weight: 600;
   font-size: 0.85rem;
@@ -678,19 +707,11 @@ html { scroll-padding-top: var(--header-h, 0px); }
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-
-/* tokens=blue / cost=green caption + the $/M definition. */
-.spend-legend {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.4rem 0.85rem;
-  margin-bottom: 0.4rem;
-  font-size: 0.72rem;
+.spend-unpriced-note {
+  margin: 0.1rem 0 0.6rem;
+  font-size: 0.68rem;
   color: var(--text-muted);
 }
-.spend-legend-item { display: inline-flex; align-items: center; gap: 0.35rem; }
-.spend-pm-note { margin-left: auto; font-size: 0.68rem; color: var(--text-muted); }
 .spend-swatch {
   width: 0.9rem;
   height: 0.55rem;
@@ -702,27 +723,31 @@ html { scroll-padding-top: var(--header-h, 0px); }
   border: 1px solid var(--glass-border);
 }
 
-/* Donut + its static model->color legend, side by side (wraps when narrow). */
+/* Donut + its static model->color legend, side by side. A smaller donut plus a
+   tighter legend basis keeps them on one row in the narrow rail (they only stack
+   below the mobile breakpoint, where the panel un-sticks). */
 .spend-donut-wrap {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 0.75rem 1rem;
-  margin: 0.4rem 0 1rem;
+  gap: 0.6rem 0.9rem;
+  margin: 0.3rem 0 0.9rem;
 }
-.spend-donut { width: 150px; height: 150px; flex-shrink: 0; }
+.spend-donut { width: 116px; height: 116px; flex-shrink: 0; }
 .spend-donut-empty {
   display: flex;
   align-items: center;
   justify-content: center;
   text-align: center;
+  border: 1px dashed var(--glass-border);
+  border-radius: var(--radius-md);
 }
 .spend-donut-legend {
-  flex: 1 1 9rem;
+  flex: 1 1 6rem;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.3rem;
 }
 .spend-legend-row { display: flex; align-items: center; gap: 0.45rem; font-size: 0.72rem; }
 .spend-legend-row .spend-swatch {

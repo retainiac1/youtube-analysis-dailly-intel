@@ -181,46 +181,33 @@ function donutLegend(priced, colorOf, unpriced) {
 function buildSection(title, data, emptyText, viz) {
   const children = [];
 
-  const total = node("div", { class: "spend-scope-header" }, [
-    node("span", { class: "spend-scope-title", text: title }),
-    node("span", {
+  const priced = data.per_model
+    .filter((m) => m.cost != null)
+    .sort((a, b) => (b.share_pct || 0) - (a.share_pct || 0));
+  const unpriced = data.per_model.filter((m) => m.cost == null);
+  const willRenderDonut = priced.length && data.total_cost > 0;
+
+  // Header is the scope label. The dollar total is the donut's CENTER label, so it is
+  // printed here only when there is no donut to carry it (empty/degenerate scope) --
+  // never both, which removes the duplicated total of the old layout.
+  const header = [node("span", { class: "spend-scope-title", text: title })];
+  if (!willRenderDonut && data.per_model.length) {
+    header.push(node("span", {
       class: "spend-scope-total",
       text: data.has_unpriced
-        ? `Total $${usdFmt.format(data.total_cost)} est. (excludes unpriced)`
-        : `Total $${usdFmt.format(data.total_cost)} est.`,
-    }),
-  ]);
-  children.push(total);
+        ? `$${usdFmt.format(data.total_cost)} est. (excludes unpriced)`
+        : `$${usdFmt.format(data.total_cost)} est.`,
+    }));
+  }
+  children.push(node("div", { class: "spend-scope-header" }, header));
 
   if (!data.per_model.length) {
     children.push(node("p", { class: "spend-empty", text: emptyText }));
     return { section: node("section", { class: "spend-section" }, children) };
   }
 
-  // Bar/legend caption: tokens = blue, cost = green, and the $/M definition.
-  const tokenSwatch = node("span", { class: "spend-swatch" });
-  tokenSwatch.style.background = viz.token_bar_color;
-  const costSwatch = node("span", { class: "spend-swatch" });
-  costSwatch.style.background = viz.cost_bar_color;
-  children.push(node("div", { class: "spend-legend" }, [
-    node("span", { class: "spend-legend-item" }, [
-      tokenSwatch, node("span", { text: "tokens" }),
-    ]),
-    node("span", { class: "spend-legend-item" }, [
-      costSwatch, node("span", { text: "cost" }),
-    ]),
-    node("span", {
-      class: "spend-pm-note",
-      text: "$/M = blended cost per million tokens",
-    }),
-  ]));
-
-  const priced = data.per_model
-    .filter((m) => m.cost != null)
-    .sort((a, b) => (b.share_pct || 0) - (a.share_pct || 0));
-  const unpriced = data.per_model.filter((m) => m.cost == null);
-
-  // share-descending -> slice colors darkest first, so the largest share is darkest.
+  // share-descending -> slice colors brightest first, so the largest share is the most
+  // saturated (and most visible) slice.
   const colorOf = new Map();
   priced.forEach((m, i) => {
     colorOf.set(m.model, viz.donut_slice_colors[i % viz.donut_slice_colors.length]);
@@ -228,7 +215,7 @@ function buildSection(title, data, emptyText, viz) {
 
   const donutEl = node("div", { class: "spend-donut" });
   let pending = null;
-  if (priced.length && data.total_cost > 0) {
+  if (willRenderDonut) {
     pending = { el: donutEl, priced, total: data.total_cost, colorOf, viz };
   } else {
     // Degenerate scope (no priced spend): a placeholder, never an empty chart.
@@ -241,6 +228,12 @@ function buildSection(title, data, emptyText, viz) {
     donutEl,
     donutLegend(priced, colorOf, unpriced),
   ]));
+  if (willRenderDonut && data.has_unpriced) {
+    children.push(node("p", {
+      class: "spend-unpriced-note",
+      text: "Total excludes unpriced models.",
+    }));
+  }
 
   // Leaderboard: every model, most efficient first, unpriced last.
   const scopeMaxTokens = Math.max(
@@ -288,6 +281,9 @@ function initDonut({ el: mountEl, priced, total, colorOf, viz }) {
       avoidLabelOverlap: false,
       label: { show: false },
       labelLine: { show: false },
+      // A panel-colored stroke separates adjacent slices so same-family mint stops
+      // never blur together.
+      itemStyle: { borderColor: themeColor("--bg-base", "#0a0f1a"), borderWidth: 2 },
       data: priced.map((m) => ({
         name: m.model,
         value: m.cost,
@@ -313,6 +309,29 @@ function disposeDonuts() {
   donutInstances.clear();
 }
 
+// The panel-level caption, shown once (not per scope): tokens=blue / cost=mint key
+// and the $/M definition. De-duplicates the legend the old layout repeated per scope.
+function topCaption(viz) {
+  const tokenSwatch = node("span", { class: "spend-swatch" });
+  tokenSwatch.style.background = viz.token_bar_color;
+  const costSwatch = node("span", { class: "spend-swatch" });
+  costSwatch.style.background = viz.cost_bar_color;
+  return node("div", { class: "spend-caption" }, [
+    node("div", { class: "spend-legend" }, [
+      node("span", { class: "spend-legend-item" }, [
+        tokenSwatch, node("span", { text: "tokens" }),
+      ]),
+      node("span", { class: "spend-legend-item" }, [
+        costSwatch, node("span", { text: "cost" }),
+      ]),
+    ]),
+    node("p", {
+      class: "spend-pm-note",
+      text: "$/M = blended cost per million tokens",
+    }),
+  ]);
+}
+
 function render(data) {
   disposeDonuts();
   const runLabel = data.run_date ? `This run · ${data.run_date}` : "This run";
@@ -321,11 +340,14 @@ function render(data) {
     `Month to date · ${data.month}`, data.month_to_date,
     "No runs this month yet.", data.viz,
   );
-  el.replaceChildren(
+  const hasData =
+    data.run.per_model.length || data.month_to_date.per_model.length;
+  const children = [
     node("h2", { class: "heading-sm spend-title", text: "LLM spend" }),
-    run.section,
-    month.section,
-  );
+  ];
+  if (hasData) children.push(topCaption(data.viz));
+  children.push(run.section, month.section);
+  el.replaceChildren(...children);
   // Init donuts only after their mount elements are attached and sized.
   if (run.pending) initDonut(run.pending);
   if (month.pending) initDonut(month.pending);

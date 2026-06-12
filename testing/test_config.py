@@ -244,7 +244,7 @@ def test_settings_toml_spend_viz_round_trips():
     # would silently fall back to DEFAULT_SPEND_VIZ instead of applying the file.
     viz = config.load_settings()["SPEND_VIZ"]
     assert viz is not config.DEFAULT_SPEND_VIZ
-    assert viz["token_bar_color"] == "#6FA8F5"
+    assert viz["token_bar_color"] == "#2D7CFF"
     assert viz["efficiency_good"] == 0.50
 
 

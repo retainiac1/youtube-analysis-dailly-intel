@@ -82,11 +82,12 @@ bucket = "health"
 # does parsed.get("SPEND_VIZ")); a lowercase or dotted name would silently fall back
 # to the in-code DEFAULT_SPEND_VIZ instead of applying these edits.
 [SPEND_VIZ]
-token_bar_color    = "#6FA8F5"   # blue: tokens
-cost_bar_color     = "#3FA66A"   # green: dollars
-# Ordered greens, darkest first. Slice i (by share, largest first) gets color i;
-# extra models beyond the list wrap. Largest share => darkest.
-donut_slice_colors = ["#14532D", "#166534", "#15803D", "#16A34A", "#22C55E", "#4ADE80"]
+token_bar_color    = "#2D7CFF"   # tokens: the brand blue (--accent-blue)
+cost_bar_color     = "#00F2A9"   # cost: the brand mint (--accent-cyan)
+# A mint ramp, BRIGHTEST first. Slice i (by share, largest first) gets color i, so the
+# biggest slice is the most saturated/visible -- the opposite of burying it in a dark
+# tone. Stops stay distinguishable and dim toward a muted teal-gray for tail models.
+donut_slice_colors = ["#00F2A9", "#22D3A4", "#3BB89B", "#4A9C8E", "#527F7E", "#55636B"]
 donut_inner_radius = "55%"       # ring hole
 donut_outer_radius = "80%"
 efficiency_good    = 0.50        # $/M at or below -> "good" badge (deepest green)

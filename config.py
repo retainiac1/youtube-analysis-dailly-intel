@@ -59,12 +59,13 @@ DEFAULT_PRICES = {
 # green, expensive (high $/M) = brightest green, mid in between. Each fill carries
 # a contrasting text color so the pill reads on the dark glass panel.
 DEFAULT_SPEND_VIZ = {
-    "token_bar_color": "#6FA8F5",
-    "cost_bar_color": "#3FA66A",
-    # Ordered greens, darkest first; slice i (by share, largest first) gets color
-    # i, wrapping if there are more models than colors. Largest share => darkest.
+    "token_bar_color": "#2D7CFF",  # brand --accent-blue
+    "cost_bar_color": "#00F2A9",   # brand --accent-cyan (mint)
+    # A mint ramp, BRIGHTEST first; slice i (by share, largest first) gets color i,
+    # wrapping if there are more models than colors. Largest share => most saturated
+    # / most visible, dimming toward a muted teal-gray for the tail.
     "donut_slice_colors": [
-        "#14532D", "#166534", "#15803D", "#16A34A", "#22C55E", "#4ADE80",
+        "#00F2A9", "#22D3A4", "#3BB89B", "#4A9C8E", "#527F7E", "#55636B",
     ],
     "donut_inner_radius": "55%",
     "donut_outer_radius": "80%",
