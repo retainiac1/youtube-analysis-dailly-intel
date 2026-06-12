@@ -11,6 +11,8 @@ import json
 import os
 import sqlite3
 import sys
+from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
 # Repo root holds config.py and db.py. Put it on sys.path so this app imports them
@@ -28,6 +30,7 @@ import config  # noqa: E402
 import db  # noqa: E402
 import interpret  # noqa: E402
 import llm  # noqa: E402
+from dashboard import discovery  # noqa: E402
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -36,7 +39,21 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 # value, not a videos.buckets member). The lane maps directly to rankings.bucket.
 VALID_LANES = {"health", "habit", "overall"}
 
-app = FastAPI(title="daily-intel dashboard", docs_url="/api/docs")
+@asynccontextmanager
+async def _lifespan(app: "FastAPI"):
+    """Ensure the schema exists and is migrated to the current version on startup
+    (idempotent + additive; offline-seeds the baseline models). The dashboard
+    otherwise relies on the pipeline having run init_db, so launching it standalone
+    against an un-migrated DB would 500 on every registry read (the dropdown, spend,
+    /api/models). This makes the dashboard self-sufficient and never-broken. The DB
+    path is resolved the same way every request resolves it (DASHBOARD_DB_PATH or
+    config.DB_PATH)."""
+    db.init_db(get_db_path())
+    yield
+
+
+app = FastAPI(title="daily-intel dashboard", docs_url="/api/docs",
+              lifespan=_lifespan)
 
 
 def _lane_to_bucket(lane: str) -> str:
@@ -50,23 +67,23 @@ def _lane_to_bucket(lane: str) -> str:
     return lane
 
 
-def _allowed_models() -> list[str]:
+def _allowed_models(conn: sqlite3.Connection) -> list[str]:
     """The canonical 'provider:model' strings the generate controls may offer: the
-    config.PRICES keys (the canonical selector source) whose provider has a working
-    adapter. The provider is extracted via llm.split_model — the ONE splitter — so
-    there is no second place the canonical string is parsed. validate_config checks
-    PRICES rate values but NOT the provider prefix, so a hand-edited key for an
-    unsupported provider is filtered out here rather than offered and then failing
-    at generate(). Sorted for a stable dropdown order."""
+    `models` registry rows the dropdown reader returns (enabled, not deleted, with a
+    current price) whose provider has a working adapter. db.fetch_dropdown_models is
+    the single source; the SUPPORTED_PROVIDERS guard (via llm.split_model, the ONE
+    splitter) drops a hand-added row for an unsupported provider rather than offering
+    it and then failing at generate(). fetch_dropdown_models already orders by
+    model, so the dropdown is stable."""
     out = []
-    for m in config.PRICES:
+    for row in db.fetch_dropdown_models(conn):
         try:
-            provider, _ = llm.split_model(m)
+            provider, _ = llm.split_model(row["model"])
         except llm.LLMError:
             continue
         if provider in llm.SUPPORTED_PROVIDERS:
-            out.append(m)
-    return sorted(out)
+            out.append(row["model"])
+    return out
 
 
 def get_db_path() -> str:
@@ -145,8 +162,11 @@ def api_interpretation(
     scope: str = Query(..., min_length=1),
     conn: sqlite3.Connection = Depends(get_conn),
 ):
-    """Stored interpretation text for (run_date, scope). Absent text renders as a
-    clean empty state (status 200, empty string), never an error."""
+    """Stored interpretation text for (run_date, scope), plus the applied provenance
+    (temperature/seed/think — NULL where not applicable) so the view can show how the
+    run was produced. Absent text renders as a clean empty state (status 200, empty
+    string), never an error. The thinking CONTENT is not persisted, so it is absent
+    here; it rides back only on the fresh /api/interpret response."""
     row = db.run_with_db_retry(
         lambda: db.fetch_interpretation(conn, run_date, scope)
     )
@@ -158,6 +178,9 @@ def api_interpretation(
             "model": None,
             "generated_at": None,
             "duration_ms": None,
+            "temperature": None,
+            "seed": None,
+            "think": None,
         }
     return {
         "run_date": run_date,
@@ -166,6 +189,9 @@ def api_interpretation(
         "model": row["model"],
         "generated_at": row["generated_at"],
         "duration_ms": row["duration_ms"],
+        "temperature": row["temperature"],
+        "seed": row["seed"],
+        "think": row["think"],
     }
 
 
@@ -422,6 +448,7 @@ class InterpretRequest(BaseModel):
     model: str
     temperature: float
     seed: int | None = None
+    think: bool | None = None
     fields: list[str] | None = None
 
 
@@ -436,10 +463,11 @@ def api_interpret(
     failure (missing key, out-of-range temperature, unknown provider) is a clean
     400 with the message, never a raw 500. Keys never leave the server."""
     _lane_to_bucket(body.scope)  # 422 on a bad lane
-    if body.model not in _allowed_models():
+    allowed = _allowed_models(conn)
+    if body.model not in allowed:
         raise HTTPException(
             status_code=422,
-            detail=f"model must be one of {_allowed_models()}",
+            detail=f"model must be one of {allowed}",
         )
     # Normalize + persist the field selection (remember last-used, mirroring how
     # model/temperature/seed persist). Done before generation so the choice is
@@ -456,7 +484,8 @@ def api_interpret(
     try:
         result = interpret.synthesize_lane(
             conn, body.run_date, body.scope, body.model,
-            temperature=body.temperature, seed=body.seed, fields=fields,
+            temperature=body.temperature, seed=body.seed, think=body.think,
+            fields=fields,
         )
     except llm.LLMError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -474,13 +503,24 @@ def api_interpret_defaults(conn: sqlite3.Connection = Depends(get_conn)):
     per-model honored-parameter map (so the client greys controls a model ignores),
     and the last-used model/temperature/seed (the MAX(id) invocation), or defaults
     on an empty log. The selected model is clamped into the offered set so a model
-    later removed from PRICES never shows as a phantom selection."""
+    later disabled/deleted never shows as a phantom selection."""
     row = db.run_with_db_retry(lambda: db.fetch_latest_invocation(conn))
-    models = _allowed_models()
-    # capabilities is built ONLY over the filtered `models`, never raw config.PRICES:
-    # model_capabilities raises LLMError on an unsupported provider, so iterating a
-    # hand-added bad PRICES key would 500 this read endpoint. Keep it over models.
-    capabilities = {m: llm.model_capabilities(m) for m in models}
+    models = db.run_with_db_retry(lambda: _allowed_models(conn))
+    # capabilities reads the flags straight from each model's registry row (the
+    # source of truth), built ONLY over the offered `models`. fetch_model returns the
+    # row regardless of flags, but every model here already cleared the dropdown
+    # filter, so the row exists.
+    capabilities = {
+        m: {"temperature": bool(r["supports_temperature"]),
+            "seed": bool(r["supports_seed"]),
+            # `reasoning` SHOWS the think toggle (the model can think); `think`
+            # ENABLES it (this provider's adapter actually honors the toggle). A
+            # reasoning model on a non-honoring provider shows a disabled, off toggle.
+            "reasoning": bool(r["is_reasoning"]),
+            "think": bool(r["is_reasoning"]) and r["provider"] in llm.THINK_PROVIDERS}
+        for m in models
+        if (r := db.fetch_model(conn, m)) is not None
+    }
 
     default_model = models[0] if models else None
     if row is None:
@@ -506,14 +546,16 @@ def api_interpret_defaults(conn: sqlite3.Connection = Depends(get_conn)):
 
 
 def _price_models(rows: list[sqlite3.Row]) -> dict:
-    """Turn fetch_spend rows into priced per-model dicts plus the section total.
-    estimate_cost returns None for a model absent from config.PRICES (the
-    'unavailable' display path): the tokens still report, the cost is null, the
-    row is flagged unpriced, and it is EXCLUDED from total_cost so the labeled
-    total stays honest.
+    """Turn fetch_spend rows into priced per-model dicts plus the section total. Cost
+    is already computed in SQL (per invocation, against its effective model_prices
+    window) — this only shapes display fields, the single source of truth so the
+    frontend never re-does cost math. A row whose cost is NULL (no window covered any
+    of its invocations) is the 'unavailable' path: tokens still report, cost is null,
+    it is EXCLUDED from total_cost so the labeled total stays honest. has_unpriced is
+    set whenever ANY invocation in the section went unpriced (fetch_spend's
+    unpriced_invocations), even if a model was only partially priced.
 
-    Each priced row also carries two derived values, computed HERE once so the
-    frontend never re-does cost math (single source of truth):
+    Each priced row also carries two derived values:
       share_pct        = cost / total_cost  (this model's slice of the scope spend)
       cost_per_million = cost / (in + out) * 1e6  (blended $/M, the efficiency key)
     Both are null when cost is null; share_pct is also null when total_cost is 0
@@ -521,12 +563,10 @@ def _price_models(rows: list[sqlite3.Row]) -> dict:
     zero). share_pct needs the scope total, so it is filled in a second pass."""
     per_model, total, has_unpriced = [], 0.0, False
     for r in rows:
-        cost = llm.estimate_cost(
-            r["model"], r["input_tokens"], r["output_tokens"], config.PRICES
-        )
-        if cost is None:
+        cost = r["cost"]  # summed in SQL; None when no window covered the model
+        if r["unpriced_invocations"]:
             has_unpriced = True
-        else:
+        if cost is not None:
             total += cost
         tokens = r["input_tokens"] + r["output_tokens"]
         cost_per_million = (
@@ -558,10 +598,10 @@ def api_spend(
     `month_to_date` filters by generated_at's Eastern month (when the spend was
     incurred) — so a run re-interpreted today shows under its old run AND under this
     month. Do not collapse them. Tokens are exact (from llm_invocations); dollar cost
-    is an estimate computed HERE from config.PRICES (never stored), null for any
-    model not in the price map. An empty log returns zeroed sections, not an error.
-    run_date is optional: absent -> the run section is empty (month-to-date still
-    computes)."""
+    is computed per invocation against its effective model_prices window (in
+    fetch_spend, never stored), null for any invocation no price window covers. An
+    empty log returns zeroed sections, not an error. run_date is optional: absent ->
+    the run section is empty (month-to-date still computes)."""
     month = config.now_local_iso()[:7]
     run_rows = (
         db.run_with_db_retry(lambda: db.fetch_spend(conn, run_date=run_date))
@@ -579,6 +619,300 @@ def api_spend(
         # live in settings.toml, never hardcoded in the JS/CSS (single source).
         "viz": config.SPEND_VIZ,
     }
+
+
+# --- /models registry editor (Phase 2) --------------------------------------
+# Edit the models + model_prices tables. Forward-use writes (insert/update/delete)
+# HONOR the soft-delete flag; pricing is unaffected by it (spend ignores deleted),
+# so soft-delete is non-destructive. Price rows are immutable data: the only writes
+# to an existing price row are the soft-delete/restore flip and add-price's
+# auto-close. All wrapped in run_with_db_retry + transaction.
+
+def _rows(rows) -> list[dict]:
+    return [{k: r[k] for k in r.keys()} for r in rows]
+
+
+class ModelUpdate(BaseModel):
+    enabled: bool
+    supports_temperature: bool
+    supports_seed: bool
+    is_reasoning: bool
+    notes: str | None = None
+
+
+class ModelInsert(BaseModel):
+    model: str
+    supports_temperature: bool
+    supports_seed: bool
+    is_reasoning: bool
+    enabled: bool = True
+    notes: str | None = None
+
+
+class PriceInsert(BaseModel):
+    valid_from: str
+    input_per_1m: float
+    output_per_1m: float
+
+
+@app.get("/api/models")
+def api_list_models(
+    include_deleted: bool = Query(default=False),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Every model row for the editor (optionally including soft-deleted). UNLIKE
+    the generate dropdown this does not require a current price. Also returns the
+    supported-provider list so the add-model picker has ONE source of truth (the
+    backend constant), never a hardcoded JS list that drifts."""
+    rows = db.run_with_db_retry(
+        lambda: db.fetch_models(conn, include_deleted=include_deleted)
+    )
+    return {"models": _rows(rows), "providers": list(llm.SUPPORTED_PROVIDERS)}
+
+
+@app.put("/api/models/{model}")
+def api_update_model(
+    model: str, body: ModelUpdate,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Edit one model's flags + notes. PK-locked: `model` comes only from the path
+    and is never written, so a `model` in the body is ignored (the doc's PK edit
+    rejection)."""
+    def write():
+        with db.transaction(conn):
+            return db.update_model(
+                conn, model=model, enabled=body.enabled,
+                supports_temperature=body.supports_temperature,
+                supports_seed=body.supports_seed,
+                is_reasoning=body.is_reasoning, notes=body.notes)
+    if db.run_with_db_retry(write) == 0:
+        raise HTTPException(status_code=404, detail=f"no model {model!r}")
+    return {"model": model, **body.model_dump()}
+
+
+@app.post("/api/models")
+def api_insert_model(
+    body: ModelInsert, conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Add a model. The provider is DERIVED from the canonical string via the one
+    splitter (never trusted from the client) and must be supported. A duplicate PK
+    is a 409 (insert-if-absent never overwrites)."""
+    if not body.model.strip():
+        raise HTTPException(status_code=422, detail="model must be non-empty")
+    try:
+        provider, _ = llm.split_model(body.model)
+    except llm.LLMError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if provider not in llm.SUPPORTED_PROVIDERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"provider must be one of {list(llm.SUPPORTED_PROVIDERS)}")
+    now = config.now_local_iso()
+
+    def write():
+        with db.transaction(conn):
+            return db.insert_model(
+                conn, model=body.model, provider=provider, enabled=body.enabled,
+                supports_temperature=body.supports_temperature,
+                supports_seed=body.supports_seed,
+                is_reasoning=body.is_reasoning, notes=body.notes, now=now)
+    if db.run_with_db_retry(write) == 0:
+        raise HTTPException(status_code=409,
+                            detail=f"model {body.model!r} already exists")
+    return {"model": body.model, "provider": provider, **body.model_dump(exclude={"model"})}
+
+
+@app.post("/api/models/{model}/delete")
+def api_delete_model(model: str, conn: sqlite3.Connection = Depends(get_conn)):
+    """Soft-delete a model (hides it from the dropdown; spend still prices history)."""
+    def write():
+        with db.transaction(conn):
+            return db.set_model_deleted(conn, model=model, deleted=True)
+    if db.run_with_db_retry(write) == 0:
+        raise HTTPException(status_code=404, detail=f"no model {model!r}")
+    return {"model": model, "deleted": True}
+
+
+@app.post("/api/models/{model}/restore")
+def api_restore_model(model: str, conn: sqlite3.Connection = Depends(get_conn)):
+    def write():
+        with db.transaction(conn):
+            return db.set_model_deleted(conn, model=model, deleted=False)
+    if db.run_with_db_retry(write) == 0:
+        raise HTTPException(status_code=404, detail=f"no model {model!r}")
+    return {"model": model, "deleted": False}
+
+
+@app.get("/api/models/{model}/prices")
+def api_list_prices(
+    model: str, include_deleted: bool = Query(default=False),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    rows = db.run_with_db_retry(
+        lambda: db.fetch_prices(conn, model, include_deleted=include_deleted)
+    )
+    return {"model": model, "prices": _rows(rows)}
+
+
+@app.post("/api/models/{model}/prices")
+def api_insert_price(
+    model: str, body: PriceInsert,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Add a price window: auto-close the prior open window(s) and insert a new open
+    one, in one transaction. Validation fail-closed: well-formed date, non-negative
+    prices, and valid_from strictly after the latest existing window's start (across
+    ALL windows incl. soft-deleted — spend ignores deleted, so the non-overlap
+    invariant must hold over deleted windows too, or the spend JOIN double-counts)."""
+    try:
+        date.fromisoformat(body.valid_from)
+    except ValueError:
+        raise HTTPException(status_code=422,
+                            detail="valid_from must be a YYYY-MM-DD date")
+    if body.input_per_1m < 0 or body.output_per_1m < 0:
+        raise HTTPException(status_code=422, detail="prices must be non-negative")
+    if db.fetch_model(conn, model) is None:
+        raise HTTPException(status_code=404, detail=f"no model {model!r}")
+    now = config.now_local_iso()
+
+    def write():
+        with db.transaction(conn):
+            latest = db.latest_price_window(conn, model)
+            if latest is not None and body.valid_from <= latest["valid_from"]:
+                raise HTTPException(
+                    status_code=422,
+                    detail="valid_from must be after the latest price window's "
+                           f"start ({latest['valid_from']})")
+            prior_id = (latest["id"]
+                        if latest is not None and latest["valid_to"] is None
+                        else None)
+            new_id = db.insert_price_window(
+                conn, model=model, input_per_1m=body.input_per_1m,
+                output_per_1m=body.output_per_1m, valid_from=body.valid_from, now=now)
+            return new_id, prior_id
+    new_id, prior_id = db.run_with_db_retry(write)
+    return {"id": new_id, "model": model, "valid_from": body.valid_from,
+            "input_per_1m": body.input_per_1m, "output_per_1m": body.output_per_1m,
+            "auto_closed": prior_id}
+
+
+@app.post("/api/prices/{price_id}/delete")
+def api_delete_price(price_id: int, conn: sqlite3.Connection = Depends(get_conn)):
+    """Soft-delete a price window. Spend ignores the flag, so this only affects the
+    dropdown's current-price check and the editor view."""
+    def write():
+        with db.transaction(conn):
+            return db.set_price_deleted(conn, price_id=price_id, deleted=True)
+    if db.run_with_db_retry(write) == 0:
+        raise HTTPException(status_code=404,
+                            detail=f"no price window {price_id}")
+    return {"id": price_id, "deleted": True}
+
+
+@app.post("/api/prices/{price_id}/restore")
+def api_restore_price(price_id: int, conn: sqlite3.Connection = Depends(get_conn)):
+    def write():
+        with db.transaction(conn):
+            return db.set_price_deleted(conn, price_id=price_id, deleted=False)
+    if db.run_with_db_retry(write) == 0:
+        raise HTTPException(status_code=404,
+                            detail=f"no price window {price_id}")
+    return {"id": price_id, "deleted": False}
+
+
+@app.get("/api/models/{model}/invocation-count")
+def api_model_invocation_count(
+    model: str, conn: sqlite3.Connection = Depends(get_conn),
+):
+    """The delete-warning count for a model: how many logged runs reference it."""
+    count = db.run_with_db_retry(
+        lambda: db.count_invocations_for_model(conn, model))
+    return {"model": model, "count": count}
+
+
+@app.get("/api/prices/{price_id}/invocation-count")
+def api_price_invocation_count(
+    price_id: int, conn: sqlite3.Connection = Depends(get_conn),
+):
+    """The delete-warning count for a price window: invocations whose Eastern date
+    falls in it (the shared half-open predicate, so it matches what spend prices)."""
+    row = conn.execute(
+        "SELECT model, valid_from, valid_to FROM model_prices WHERE id = ?",
+        (price_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no price window {price_id}")
+    count = db.count_invocations_in_window(
+        conn, row["model"], row["valid_from"], row["valid_to"])
+    return {"id": price_id, "model": row["model"], "valid_from": row["valid_from"],
+            "valid_to": row["valid_to"], "count": count}
+
+
+# --- Documentation page: filesystem-discovered docs (read-only) -------------
+#
+# Registered BEFORE the static mounts / catch-all so these /api paths keep their
+# specificity. The server only scans the tree and serves bytes; all document parsing
+# is client-side, so no parsing dependency enters this path. Not /api/docs (that is
+# the OpenAPI UI, docs_url above).
+
+# Media type per format, so a direct hit on the raw URL is labeled correctly. md/html
+# are fetched inline by the client; no Content-Disposition is set, so navigating to a
+# raw URL renders rather than force-downloads (the attachment disposition returns with
+# the Phase 2/3 download fallback).
+_DOC_MEDIA_TYPES = {
+    "md": "text/markdown; charset=utf-8",
+    "html": "text/html; charset=utf-8",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pdf": "application/pdf",
+}
+
+
+def get_publish_root() -> str:
+    """Absolute publish root. Honors DASHBOARD_PUBLISH_PATH (used to point a smoke or
+    test at a throwaway tree); otherwise resolves config.PUBLISH_ROOT against the repo
+    root so it is independent of the process CWD. Mirrors get_db_path. Tests override
+    this via app.dependency_overrides."""
+    override = os.environ.get("DASHBOARD_PUBLISH_PATH")
+    base = override if override else str(_REPO_ROOT / config.PUBLISH_ROOT)
+    return os.path.realpath(base)
+
+
+@app.get("/api/documentation")
+def get_documentation(root: str = Depends(get_publish_root)):
+    """The freshly scanned registry: tabs in display order, each with its documents.
+    relPath is an internal serving detail and is stripped from the response."""
+    tabs = discovery.scan_publish(root)
+    return {"tabs": [
+        {"tabId": t["tabId"], "tabLabel": t["tabLabel"], "order": t["order"],
+         "docs": [{"docId": d["docId"], "title": d["title"],
+                   "format": d["format"], "mode": d["mode"]} for d in t["docs"]]}
+        for t in tabs
+    ]}
+
+
+@app.get("/api/documentation/raw")
+def get_documentation_raw(tab: str, doc: str,
+                          root: str = Depends(get_publish_root)):
+    """Serve one document's bytes. The (tab, doc) pair must match an entry in the
+    freshly scanned registry (a dynamic whitelist), and the resolved file must stay
+    inside the publish root (rejecting path traversal and symlink escape). The path
+    served comes from the matched entry, never built from the raw params."""
+    entry = next(
+        (d for t in discovery.scan_publish(root) if t["tabId"] == tab
+         for d in t["docs"] if d["docId"] == doc),
+        None,
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail="unknown document")
+
+    root_real = os.path.realpath(root)
+    file_real = os.path.realpath(os.path.join(root_real, entry["relPath"]))
+    if os.path.commonpath([root_real, file_real]) != root_real or not os.path.isfile(file_real):
+        # The entry's real path escapes the root (symlink) or vanished between scan
+        # and serve. Refuse rather than read outside the published tree.
+        raise HTTPException(status_code=404, detail="unknown document")
+
+    return FileResponse(file_real, media_type=_DOC_MEDIA_TYPES.get(entry["format"]))
 
 
 # Static assets + SPA shell. Registered AFTER every /api route above.

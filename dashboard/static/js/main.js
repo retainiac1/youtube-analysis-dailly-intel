@@ -11,6 +11,8 @@ import * as trends from "./trends.js";
 import * as interpretation from "./interpretation.js";
 import * as interpRail from "./interpretation-rail.js";
 import * as spend from "./spend.js";
+import * as models from "./models.js";
+import * as documentation from "./documentation.js";
 import * as router from "./router.js";
 import "./sticky-header.js"; // side-effect: publishes --header-h for the pinned strip
 
@@ -19,9 +21,12 @@ const runSelect = document.getElementById("run-select");
 const boardEl = document.getElementById("board");
 const trendsEl = document.getElementById("trends");
 const interpretationEl = document.getElementById("interpretation");
+const modelsEl = document.getElementById("models");
+const documentationEl = document.getElementById("documentation");
 const railGroups = document.getElementById("filter-groups");
 const rail = document.getElementById("filter-rail");
 const drawerToggle = document.getElementById("filter-drawer-toggle");
+const laneRow = document.querySelector(".lane-row");
 const tabs = [...document.querySelectorAll(".lane-tab")];
 const pageNav = [...document.querySelectorAll(".page-nav-link")];
 
@@ -101,6 +106,9 @@ function enterBoard() {
   drawerToggle.hidden = false;
   trendsEl.hidden = true;
   interpretationEl.hidden = true;
+  modelsEl.hidden = true;
+  documentationEl.hidden = true;
+  laneRow.hidden = false;
 }
 
 function enterTrends() {
@@ -109,6 +117,9 @@ function enterTrends() {
   drawerToggle.hidden = true;
   trendsEl.hidden = false;
   interpretationEl.hidden = true;
+  modelsEl.hidden = true;
+  documentationEl.hidden = true;
+  laneRow.hidden = false;
   // Render the charts on entry: an ECharts instance on a hidden element cannot
   // size itself, so charts are only rendered while Trends is visible.
   trends.refreshAll(state);
@@ -122,10 +133,42 @@ function enterInterpretation() {
   drawerToggle.hidden = true;
   trendsEl.hidden = true;
   interpretationEl.hidden = false;
+  modelsEl.hidden = true;
+  documentationEl.hidden = true;
+  laneRow.hidden = false;
   // Fetch + render the interpretation for the current run + lane on entry.
   interpretation.refresh(state);
   // The spend panel beside it (run section + month-to-date), refreshed on entry.
   spend.refresh(state);
+}
+
+// The registry editor: a global admin page (not run/lane scoped). Hide every other
+// region + the filter rail/drawer, then load the models grid.
+function enterModels() {
+  boardEl.hidden = true;
+  rail.hidden = true;
+  drawerToggle.hidden = true;
+  trendsEl.hidden = true;
+  interpretationEl.hidden = true;
+  modelsEl.hidden = false;
+  documentationEl.hidden = true;
+  laneRow.hidden = false;
+  models.refresh();
+}
+
+// The documentation browser: a read-only, filesystem-discovered docs page. Not
+// run/lane scoped, so (like Models) it hides the filter rail/drawer and ignores the
+// lane. documentation.js fetches the registry and renders into the region on entry.
+function enterDocumentation() {
+  boardEl.hidden = true;
+  rail.hidden = true;
+  drawerToggle.hidden = true;
+  trendsEl.hidden = true;
+  interpretationEl.hidden = true;
+  modelsEl.hidden = true;
+  documentationEl.hidden = false;
+  laneRow.hidden = true; // the page is not lane-scoped; hide the lane tabs here
+  documentation.refresh();
 }
 
 // Arrow-key roving focus for a segmented tablist.
@@ -295,6 +338,8 @@ async function init() {
   interpretation.init(document.getElementById("interpretation-main"));
   spend.init(document.getElementById("spend-panel"));
   interpRail.init(document.getElementById("trends-interp-rail"));
+  models.init(modelsEl);
+  documentation.init(documentationEl);
   board.setActiveTab(app, tabs, state.lane);
 
   // A successful generation changes the spend totals; refresh the panel. The event
@@ -308,6 +353,8 @@ async function init() {
       "/board": enterBoard,
       "/trends": enterTrends,
       "/interpretation": enterInterpretation,
+      "/models": enterModels,
+      "/documentation": enterDocumentation,
     },
     links: pageNav,
     fallback: "/board",

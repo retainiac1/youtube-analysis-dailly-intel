@@ -1,0 +1,1357 @@
+{% extends "layouts/glass.html" %}
+
+{% block title %}User Guide — Hey Habit Tracker{% endblock %}
+
+{% block navbar %}
+{% set hht_active_page = 'user-guide' %}
+{% include 'components/hht-navbar.html' %}
+{% endblock %}
+
+{% block extra_head %}
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+    --hht-cyan: #00BFFF;
+    --hht-teal: #4AEADC;
+}
+
+/* Page wrapper */
+.hht-page {
+    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-base);
+    color: var(--text-primary);
+    min-height: 100vh;
+}
+.hht-page * { box-sizing: border-box; }
+::selection { background: rgba(0, 242, 169, 0.3); }
+
+/* Guide body */
+.guide-body { font-family: 'Outfit', sans-serif; font-size: 1rem; line-height: 1.7; color: var(--text-secondary); }
+.guide-content { background: transparent; position: relative; z-index: 1; }
+
+/* Hero */
+.guide-hero {
+    background: transparent; position: relative; overflow: hidden; padding: 6rem 1.5rem 4rem;
+}
+.guide-hero h1 { font-family: 'Outfit', sans-serif; font-size: clamp(2.5rem, 5vw, 3.5rem); font-weight: 800; letter-spacing: -0.02em; display: inline; background: linear-gradient(135deg, #00F2A9 0%, #2D7CFF 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.guide-hero p { font-family: 'Outfit', sans-serif; font-style: italic; color: var(--text-secondary); }
+
+/* Mobile TOC */
+#mobile-toc { background: transparent; border-color: var(--glass-border); }
+#mobile-toc-toggle { font-family: 'Outfit', sans-serif; color: var(--text-secondary); background: transparent; border: 0; cursor: pointer; }
+#mobile-toc-menu { background: var(--bg-elevated); border-color: var(--glass-border); }
+.mobile-toc-link { color: var(--text-muted); font-family: 'Outfit', sans-serif; transition: all 0.2s ease; }
+.mobile-toc-link:hover { background: rgba(255,255,255,0.05); color: var(--accent-cyan); }
+
+/* Desktop TOC */
+.toc-link { color: var(--text-muted); font-family: 'Outfit', sans-serif; font-size: 0.875rem; transition: all 0.2s ease; }
+.toc-link:hover { color: var(--accent-cyan); border-left-color: var(--accent-cyan); }
+.toc-link.active { color: var(--accent-cyan); font-weight: 600; border-left-color: var(--accent-cyan); }
+
+/* Section headings */
+.guide-section h2 {
+    font-family: 'Outfit', sans-serif; font-size: clamp(1.375rem, 4vw, 1.75rem); font-weight: 700;
+    color: var(--text-primary); scroll-margin-top: 8rem; position: relative; padding-bottom: 0.75rem;
+}
+.guide-section h2::after {
+    content: ''; position: absolute; bottom: 0; left: 0; width: 100%; height: 3px;
+    background: var(--hht-cta-gradient); border-radius: 2px;
+}
+.guide-section h3 { font-family: 'Outfit', sans-serif; font-size: clamp(1.125rem, 3.5vw, 1.375rem); font-weight: 600; color: var(--text-primary); scroll-margin-top: 8rem; }
+.guide-section p { color: var(--text-secondary); }
+
+/* Step numbers */
+.step-number {
+    width: 2rem; height: 2rem; min-width: 2rem; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 50%; font-family: 'Outfit', sans-serif; font-weight: 700; font-size: 0.8rem;
+    background: var(--hht-cta-gradient);
+    color: var(--bg-base); box-shadow: 0 0 12px var(--hht-cta-glow); position: relative; flex-shrink: 0;
+}
+.timeline-steps { position: relative; padding-left: 1rem; }
+.timeline-steps::before { content: ''; position: absolute; left: calc(1rem + 1rem - 1px); top: 2.5rem; bottom: 1rem; width: 2px; background: var(--glass-border); }
+.timeline-steps > li { position: relative; }
+
+/* Feature cards */
+.feature-card {
+    background: var(--glass-bg); backdrop-filter: blur(var(--glass-blur)); -webkit-backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid var(--glass-border); border-left: 4px solid var(--accent-cyan);
+    border-radius: 12px; padding: 1.25rem; transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.feature-card:hover { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(0,0,0,0.3), 0 0 20px rgba(0,242,169,0.08); }
+.feature-card h4 { font-family: 'Outfit', sans-serif; font-weight: 600; color: var(--text-primary); }
+.feature-card p { color: var(--text-muted); }
+
+/* Callout boxes */
+.callout { border-radius: 12px; padding: 1rem 1.25rem; margin: 1rem 0; border-left: 4px solid; }
+.callout-tip { background: rgba(0, 242, 169, 0.08); border-left-color: var(--accent-cyan); color: var(--text-secondary); }
+.callout-info { background: rgba(45, 124, 255, 0.1); border-left-color: var(--accent-blue); color: var(--text-secondary); }
+.callout-warning { background: rgba(232, 196, 156, 0.12); border-left-color: #E8C49C; color: var(--text-secondary); }
+.callout-danger { background: rgba(239, 68, 68, 0.1); border-left-color: #ef4444; color: var(--text-secondary); }
+.callout strong { color: var(--text-primary); }
+
+/* Build/Break habit cards */
+.habit-card-build { background: rgba(0, 242, 169, 0.08); border: 2px solid rgba(0, 242, 169, 0.3); border-radius: 12px; padding: 1.25rem; }
+.habit-card-build h4 { color: var(--accent-cyan); font-family: 'Outfit', sans-serif; font-weight: 700; }
+.habit-card-break { background: rgba(232, 196, 156, 0.1); border: 2px solid rgba(232, 196, 156, 0.4); border-radius: 12px; padding: 1.25rem; }
+.habit-card-break h4 { color: #E8C49C; font-family: 'Outfit', sans-serif; font-weight: 700; }
+
+/* FAQ accordion */
+.faq-item { border: 1px solid var(--glass-border); border-radius: 12px; overflow: hidden; margin-bottom: 0.5rem; background: var(--glass-bg); backdrop-filter: blur(var(--glass-blur)); -webkit-backdrop-filter: blur(var(--glass-blur)); }
+.faq-question { font-family: 'Outfit', sans-serif; font-weight: 600; color: var(--text-primary); background: transparent; transition: background-color 0.2s ease; }
+.faq-question:hover { background: var(--bg-elevated); }
+.faq-question span { color: var(--text-primary); }
+.faq-answer { color: var(--text-secondary); }
+.faq-icon { color: var(--text-muted); transition: transform 0.3s ease; }
+details.faq-item[open] .faq-icon { transform: rotate(180deg); }
+
+/* Tables */
+table { background: var(--glass-bg); border-radius: 12px; overflow: hidden; }
+table thead tr { background: var(--bg-elevated); }
+table th { font-family: 'Outfit', sans-serif; font-weight: 600; color: var(--text-primary); }
+table td { color: var(--text-secondary); border-bottom: 1px solid var(--glass-border); }
+table tbody tr:last-child td { border-bottom: none; }
+
+/* Category cards */
+.category-card { background: var(--bg-elevated); border-radius: 12px; padding: 1rem; }
+.category-card h4 { font-family: 'Outfit', sans-serif; font-weight: 600; color: var(--text-primary); }
+.category-card li { color: var(--text-muted); }
+
+/* Progress feature cards */
+.progress-feature { background: var(--glass-bg); backdrop-filter: blur(var(--glass-blur)); -webkit-backdrop-filter: blur(var(--glass-blur)); border: 1px solid var(--glass-border); border-radius: 12px; padding: 1rem; }
+.progress-feature h4 { font-family: 'Outfit', sans-serif; font-weight: 600; color: var(--text-primary); }
+.progress-feature p { color: var(--text-muted); }
+
+/* Archive/Delete cards */
+.action-card-archive { background: rgba(45, 124, 255, 0.1); border: 1px solid rgba(45, 124, 255, 0.3); border-radius: 12px; padding: 1.25rem; }
+.action-card-archive h4 { color: var(--accent-blue); font-family: 'Outfit', sans-serif; font-weight: 700; }
+.action-card-delete { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; padding: 1.25rem; }
+.action-card-delete h4 { color: #ef4444; font-family: 'Outfit', sans-serif; font-weight: 700; }
+
+/* Tip cards */
+.tip-card { background: var(--glass-bg); backdrop-filter: blur(var(--glass-blur)); -webkit-backdrop-filter: blur(var(--glass-blur)); border: 1px solid var(--glass-border); border-radius: 12px; padding: 1.25rem; transition: transform 0.2s ease, box-shadow 0.2s ease; }
+.tip-card:hover { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(0,0,0,0.3), 0 0 20px rgba(0,242,169,0.08); }
+.tip-card h4 { font-family: 'Outfit', sans-serif; font-weight: 600; color: var(--text-primary); }
+.tip-card p { color: var(--text-muted); }
+
+/* Privacy box */
+.privacy-box { background: rgba(0, 242, 169, 0.08); border: 1px solid rgba(0, 242, 169, 0.3); border-radius: 12px; padding: 1.5rem; }
+.privacy-box h3 { color: var(--text-primary); font-family: 'Outfit', sans-serif; }
+.privacy-box p { color: var(--text-secondary); }
+
+/* Export cards */
+.export-card { background: var(--bg-elevated); border-radius: 12px; padding: 1rem; text-align: center; }
+.export-card p:first-child { font-family: 'Outfit', sans-serif; font-weight: 600; color: var(--text-primary); }
+
+/* Closing CTA */
+.closing-cta { background: var(--glass-bg); backdrop-filter: blur(var(--glass-blur)); -webkit-backdrop-filter: blur(var(--glass-blur)); border: 1px solid var(--glass-border); border-radius: 1rem; padding: 2rem; text-align: center; position: relative; overflow: hidden; }
+.closing-cta::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent); }
+.closing-cta h2 { font-family: 'Outfit', sans-serif; color: var(--text-primary); }
+.closing-cta p { color: var(--text-secondary); }
+
+/* Guide footer */
+.guide-footer { background: var(--bg-elevated); border-top: 1px solid var(--border-subtle); position: relative; z-index: 1; }
+.guide-footer h2 { font-family: 'Outfit', sans-serif; color: var(--text-primary); }
+.guide-footer p { color: var(--text-secondary); }
+
+/* Buttons */
+.hht-page .btn-primary { display: inline-block; background: var(--hht-cta-gradient); color: var(--hht-cta-color); font-family: 'Outfit', sans-serif; font-weight: 600; padding: 0.75rem 1.5rem; border-radius: 8px; transition: all 0.2s ease; text-decoration: none; }
+.hht-page .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 0 30px var(--hht-cta-glow); }
+.hht-page .btn-secondary { display: inline-block; background: transparent; color: var(--text-secondary); font-family: 'Outfit', sans-serif; font-weight: 600; padding: 0.75rem 1.5rem; border: 1px solid var(--glass-border); border-radius: 8px; transition: all 0.2s ease; text-decoration: none; }
+.hht-page .btn-secondary:hover { background: var(--glass-bg); border-color: var(--accent-cyan); color: var(--accent-cyan); }
+
+/* Links */
+a.guide-link { color: var(--accent-cyan); text-decoration: none; transition: all 0.2s ease; }
+a.guide-link:hover { text-decoration: underline; }
+
+/* Lists */
+.check-list li { color: var(--text-secondary); }
+.check-list .check-icon { color: var(--accent-cyan); }
+.x-list .x-icon { color: #ef4444; }
+
+/* Utility classes */
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-muted { color: var(--text-muted); }
+
+/* Reading progress bar */
+.reading-progress { position: fixed; top: 0; left: 0; height: 3px; background: linear-gradient(90deg, var(--accent-cyan), var(--accent-blue)); z-index: 200; transition: width 0.1s ease; }
+
+/* Scroll animations */
+.fade-in-up { opacity: 0; transform: translateY(20px); transition: opacity 0.6s ease, transform 0.6s ease; }
+.fade-in-up.visible { opacity: 1; transform: translateY(0); }
+
+/* ============================================
+   Layout utilities (replacing Tailwind)
+   ============================================ */
+.max-w-7xl { max-width: 80rem; }
+.max-w-3xl { max-width: 48rem; }
+.max-w-2xl { max-width: 42rem; }
+.max-w-xl { max-width: 36rem; }
+.max-w-lg { max-width: 32rem; }
+.max-w-xs { max-width: 20rem; }
+.max-w-none { max-width: none; }
+.mx-auto { margin-left: auto; margin-right: auto; }
+.min-w-full { min-width: 100%; }
+
+/* Display */
+.flex { display: flex; }
+.inline-flex { display: inline-flex; }
+.block { display: block; }
+.hidden { display: none; }
+.grid { display: grid; }
+
+/* Flex */
+.flex-col { flex-direction: column; }
+.flex-wrap { flex-wrap: wrap; }
+.items-center { align-items: center; }
+.items-start { align-items: flex-start; }
+.justify-center { justify-content: center; }
+.justify-between { justify-content: space-between; }
+.flex-shrink-0, .shrink-0 { flex-shrink: 0; }
+
+/* Grid */
+.grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+
+/* Gap */
+.gap-2 { gap: 0.5rem; }
+.gap-3 { gap: 0.75rem; }
+.gap-4 { gap: 1rem; }
+
+/* Padding */
+.px-4 { padding-left: 1rem; padding-right: 1rem; }
+.px-5 { padding-left: 1.25rem; padding-right: 1.25rem; }
+.px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+.py-1\.5 { padding-top: 0.375rem; padding-bottom: 0.375rem; }
+.py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+.py-3 { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+.py-4 { padding-top: 1rem; padding-bottom: 1rem; }
+.py-6 { padding-top: 1.5rem; padding-bottom: 1.5rem; }
+.py-8 { padding-top: 2rem; padding-bottom: 2rem; }
+.py-10 { padding-top: 2.5rem; padding-bottom: 2.5rem; }
+.pl-4 { padding-left: 1rem; }
+.pl-5 { padding-left: 1.25rem; }
+.pl-6 { padding-left: 1.5rem; }
+.pb-3 { padding-bottom: 0.75rem; }
+.pb-4 { padding-bottom: 1rem; }
+.p-4 { padding: 1rem; }
+.p-5 { padding: 1.25rem; }
+
+/* Margin */
+.mb-1 { margin-bottom: 0.25rem; }
+.mb-2 { margin-bottom: 0.5rem; }
+.mb-3 { margin-bottom: 0.75rem; }
+.mb-4 { margin-bottom: 1rem; }
+.mb-5 { margin-bottom: 1.25rem; }
+.mb-6 { margin-bottom: 1.5rem; }
+.mb-8 { margin-bottom: 2rem; }
+.mb-10 { margin-bottom: 2.5rem; }
+.mt-1 { margin-top: 0.25rem; }
+.mt-6 { margin-top: 1.5rem; }
+.mt-8 { margin-top: 2rem; }
+.mt-10 { margin-top: 2.5rem; }
+.ml-2 { margin-left: 0.5rem; }
+.-mx-4 { margin-left: -1rem; margin-right: -1rem; }
+.-ml-\[2px\] { margin-left: -2px; }
+
+/* Sizing */
+.w-full { width: 100%; }
+.w-4 { width: 1rem; }
+.w-5 { width: 1.25rem; }
+.h-4 { height: 1rem; }
+.h-5 { height: 1.25rem; }
+.max-h-72 { max-height: 18rem; }
+
+/* Position */
+.relative { position: relative; }
+.sticky { position: sticky; }
+.top-16 { top: 4rem; }
+.top-24 { top: 6rem; }
+
+/* Overflow */
+.overflow-hidden { overflow: hidden; }
+.overflow-x-auto { overflow-x: auto; }
+.overflow-y-auto { overflow-y: auto; }
+
+/* Typography */
+.text-center { text-align: center; }
+.text-left { text-align: left; }
+.text-xs { font-size: 0.75rem; line-height: 1rem; }
+.text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+.text-lg { font-size: 1.125rem; line-height: 1.75rem; }
+.text-xl { font-size: 1.25rem; line-height: 1.75rem; }
+.text-2xl { font-size: 1.5rem; line-height: 2rem; }
+.text-3xl { font-size: 1.875rem; line-height: 2.25rem; }
+.font-bold { font-weight: 700; }
+.font-semibold { font-weight: 600; }
+.font-medium { font-weight: 500; }
+.font-normal { font-weight: 400; }
+.uppercase { text-transform: uppercase; }
+.tracking-widest { letter-spacing: 0.1em; }
+.leading-relaxed { line-height: 1.625; }
+
+/* Border */
+.border { border-width: 1px; border-style: solid; border-color: var(--glass-border); }
+.border-transparent { border-color: transparent; }
+.border-l-2 { border-left-width: 2px; border-left-style: solid; }
+.rounded-lg { border-radius: 0.5rem; }
+.rounded-xl { border-radius: 0.75rem; }
+.rounded-tl-lg { border-top-left-radius: 0.5rem; }
+.rounded-tr-lg { border-top-right-radius: 0.5rem; }
+.divide-y > * + * { border-top: 1px solid var(--glass-border); }
+
+/* Shadow */
+.shadow-sm { box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.2); }
+
+/* Z-index */
+.z-10 { z-index: 10; }
+.z-40 { z-index: 40; }
+
+/* Scroll */
+.scroll-mt-32 { scroll-margin-top: 8rem; }
+
+/* Transition */
+.transition-colors { transition-property: color, background-color, border-color; transition-duration: 150ms; }
+.transition-transform { transition-property: transform; transition-duration: 150ms; }
+.duration-200 { transition-duration: 200ms; }
+
+/* Space-y */
+.space-y-0\.5 > * + * { margin-top: 0.125rem; }
+.space-y-1 > * + * { margin-top: 0.25rem; }
+.space-y-2 > * + * { margin-top: 0.5rem; }
+.space-y-3 > * + * { margin-top: 0.75rem; }
+.space-y-4 > * + * { margin-top: 1rem; }
+
+/* List styles */
+.list-disc { list-style-type: disc; }
+.list-decimal { list-style-type: decimal; }
+
+/* Responsive: sm (640px+) */
+@media (min-width: 640px) {
+    .sm\:px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+    .sm\:mx-0 { margin-left: 0; margin-right: 0; }
+    .sm\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .sm\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .sm\:flex-row { flex-direction: row; }
+    .sm\:w-auto { width: auto; }
+}
+
+/* Responsive: md (768px+) */
+@media (min-width: 768px) {
+    .md\:py-10 { padding-top: 2.5rem; padding-bottom: 2.5rem; }
+    .md\:py-20 { padding-top: 5rem; padding-bottom: 5rem; }
+    .md\:px-8 { padding-left: 2rem; padding-right: 2rem; }
+    .md\:text-xl { font-size: 1.25rem; line-height: 1.75rem; }
+    .md\:text-3xl { font-size: 1.875rem; line-height: 2.25rem; }
+    .md\:mb-16 { margin-bottom: 4rem; }
+    .md\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .md\:col-span-2 { grid-column: span 2 / span 2; }
+}
+
+/* Responsive: lg (1024px+) */
+@media (min-width: 1024px) {
+    .lg\:px-8 { padding-left: 2rem; padding-right: 2rem; }
+    .lg\:py-16 { padding-top: 4rem; padding-bottom: 4rem; }
+    .lg\:grid { display: grid; }
+    .lg\:grid-cols-\[260px_1fr\] { grid-template-columns: 260px 1fr; }
+    .lg\:gap-14 { gap: 3.5rem; }
+    .lg\:block { display: block; }
+    .lg\:hidden { display: none; }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<style>html { scroll-behavior: smooth; }</style>
+<div class="hht-page">
+
+<!-- Reading Progress Bar -->
+<div class="reading-progress" id="reading-progress" style="width: 0%;"></div>
+
+<!-- Hero -->
+<section class="guide-hero px-4 md:px-8 relative overflow-hidden">
+    <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 text-center relative z-10">
+        <h1 class="mb-6" data-content="hht-user-guide.hero.title">User Guide</h1>
+        <p class="text-lg md:text-xl max-w-xl mx-auto" data-content="hht-user-guide.hero.subtitle">"Everything you need to build lasting habits, one day at a time."</p>
+
+        <!-- Decorative line -->
+        <div class="flex justify-center mt-8">
+            <div style="width: 80px; height: 2px; background: var(--accent-cyan); opacity: 0.5;"></div>
+        </div>
+    </div>
+</section>
+
+<!-- Mobile TOC -->
+<div id="mobile-toc" class="lg:hidden sticky top-16 z-40">
+    <button id="mobile-toc-toggle" class="w-full px-4 py-3 flex items-center justify-between text-sm font-medium">
+        <span class="flex items-center gap-2">
+            <svg class="w-4 h-4" style="color: var(--accent-cyan);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+            <span id="mobile-toc-current">Table of Contents</span>
+        </span>
+        <svg class="w-4 h-4 transition-transform duration-200" style="color: var(--text-muted);" id="mobile-toc-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+    </button>
+    <div id="mobile-toc-menu" class="hidden max-h-72 overflow-y-auto" style="border-top: 1px solid var(--glass-border);">
+        <ul class="py-2">
+            <li><a href="#welcome" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Welcome</a></li>
+            <li><a href="#getting-started" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Getting Started</a></li>
+            <li><a href="#core-concepts" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Core Concepts</a></li>
+            <li><a href="#creating-habits" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Creating Habits</a></li>
+            <li><a href="#tracking-progress" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Tracking Your Progress</a></li>
+            <li><a href="#viewing-progress" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Viewing Your Progress</a></li>
+            <li><a href="#managing-habits" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Managing Habits</a></li>
+            <li><a href="#settings" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Settings &amp; Preferences</a></li>
+            <li><a href="#tips" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Tips for Success</a></li>
+            <li><a href="#troubleshooting" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Troubleshooting</a></li>
+            <li><a href="#privacy" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">Privacy &amp; Your Data</a></li>
+            <li><a href="#faq" class="mobile-toc-link block px-6 py-3 text-sm transition-colors">FAQ</a></li>
+        </ul>
+    </div>
+</div>
+
+<!-- Main body -->
+<section class="guide-content guide-body">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-16">
+        <div class="lg:grid lg:grid-cols-[260px_1fr] lg:gap-14">
+
+            <!-- Desktop sidebar TOC -->
+            <aside class="hidden lg:block">
+                <nav class="sticky top-24">
+                    <p class="text-xs font-bold uppercase tracking-widest mb-4" style="color: var(--text-muted); font-family: 'Outfit', sans-serif;">On this page</p>
+                    <ul class="space-y-0.5" style="border-left: 2px solid var(--glass-border);">
+                        <li><a href="#welcome" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Welcome</a></li>
+                        <li><a href="#getting-started" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Getting Started</a></li>
+                        <li><a href="#core-concepts" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Core Concepts</a></li>
+                        <li><a href="#creating-habits" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Creating Habits</a></li>
+                        <li><a href="#tracking-progress" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Tracking Your Progress</a></li>
+                        <li><a href="#viewing-progress" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Viewing Your Progress</a></li>
+                        <li><a href="#managing-habits" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Managing Habits</a></li>
+                        <li><a href="#settings" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Settings &amp; Preferences</a></li>
+                        <li><a href="#tips" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Tips for Success</a></li>
+                        <li><a href="#troubleshooting" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Troubleshooting</a></li>
+                        <li><a href="#privacy" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">Privacy &amp; Your Data</a></li>
+                        <li><a href="#faq" class="toc-link block pl-4 py-1.5 border-l-2 border-transparent -ml-[2px] transition-colors">FAQ</a></li>
+                    </ul>
+                </nav>
+            </aside>
+
+            <!-- Main content -->
+            <article class="max-w-none">
+
+                <!-- ============================================================ -->
+                <!-- SECTION 1: Welcome -->
+                <!-- ============================================================ -->
+                <section id="welcome" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.welcome.heading">Welcome</h2>
+
+                    <h3 class="mt-8 mb-3" data-content="hht-user-guide.welcome.h3_what_is">What is Hey Habit Tracker?</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.welcome.p1">Hey Habit Tracker is your personal habit companion. It helps you build good habits and break bad ones through simple, visual tracking.</p>
+                    <p class="leading-relaxed mb-6" data-content="hht-user-guide.welcome.p2">Whether you want to drink more water, exercise regularly, read more books, or cut back on coffee &mdash; this app makes it easy to see your progress and stay motivated.</p>
+
+                    <h3 class="mt-10 mb-5" data-content="hht-user-guide.welcome.h3_what_makes">What Makes It Different?</h3>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+                        <div class="feature-card">
+                            <div class="text-2xl mb-2">🎙️</div>
+                            <h4 class="mb-1" data-content="hht-user-guide.welcome.card1_title">Voice-First</h4>
+                            <p class="text-sm" data-content="hht-user-guide.welcome.card1_desc">On iPhone, log habits just by talking. Say &ldquo;8 glasses of water&rdquo; and you&rsquo;re done.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="text-2xl mb-2">✨</div>
+                            <h4 class="mb-1" data-content="hht-user-guide.welcome.card2_title">Simple &amp; Beautiful</h4>
+                            <p class="text-sm" data-content="hht-user-guide.welcome.card2_desc">No complicated features. Just clear progress rings that show exactly how you&rsquo;re doing.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="text-2xl mb-2">🔒</div>
+                            <h4 class="mb-1" data-content="hht-user-guide.welcome.card3_title">Your Data Stays Yours</h4>
+                            <p class="text-sm" data-content="hht-user-guide.welcome.card3_desc">Everything is stored on your device. We don&rsquo;t collect, sync, or share your habit data.</p>
+                        </div>
+                    </div>
+
+                    <h3 class="mt-8 mb-3" data-content="hht-user-guide.welcome.h3_who_is">Who Is This For?</h3>
+                    <p class="leading-relaxed mb-3" data-content="hht-user-guide.welcome.p3">Hey Habit Tracker is perfect if you:</p>
+                    <ul class="check-list space-y-2 mb-4">
+                        <li class="flex items-start gap-2"><span class="check-icon mt-1 shrink-0">&#10003;</span> <span data-content="hht-user-guide.welcome.list_item1">Want to build positive daily routines</span></li>
+                        <li class="flex items-start gap-2"><span class="check-icon mt-1 shrink-0">&#10003;</span> <span data-content="hht-user-guide.welcome.list_item2">Prefer visual progress over complicated spreadsheets</span></li>
+                        <li class="flex items-start gap-2"><span class="check-icon mt-1 shrink-0">&#10003;</span> <span data-content="hht-user-guide.welcome.list_item3">Value your privacy</span></li>
+                        <li class="flex items-start gap-2"><span class="check-icon mt-1 shrink-0">&#10003;</span> <span data-content="hht-user-guide.welcome.list_item4">Like the idea of hands-free voice logging (iPhone users)</span></li>
+                        <li class="flex items-start gap-2"><span class="check-icon mt-1 shrink-0">&#10003;</span> <span data-content="hht-user-guide.welcome.list_item5">Want something simple that actually works</span></li>
+                    </ul>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 2: Getting Started -->
+                <!-- ============================================================ -->
+                <section id="getting-started" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.getting-started.heading">Getting Started</h2>
+
+                    <h3 class="mt-8 mb-4" data-content="hht-user-guide.getting-started.h3_download">Download &amp; Installation</h3>
+                    <p class="leading-relaxed mb-3" data-content="hht-user-guide.getting-started.p1">Hey Habit Tracker is available on the App Store for iPhone.</p>
+                    <div class="flex items-center gap-3 px-4 py-3 mb-6 max-w-xs" style="border-radius: 12px; border: 1px solid var(--glass-border); background: var(--glass-bg);">
+                        <span class="text-xl">📱</span>
+                        <div><p class="font-semibold text-sm text-primary" data-content="hht-user-guide.getting-started.platform_iphone">iPhone</p><p class="text-xs text-muted">App Store</p></div>
+                    </div>
+                    <p class="leading-relaxed mb-6" data-content="hht-user-guide.getting-started.p2">Just search for &ldquo;Hey Habit Tracker&rdquo; and download it for free.</p>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.getting-started.h3_first_launch">Your First Launch</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.getting-started.p3">When you open the app for the first time, you&rsquo;ll see a friendly welcome that walks you through:</p>
+                    <ol class="space-y-3 mb-6">
+                        <li class="flex items-start gap-3"><span class="step-number">1</span><div><strong class="text-primary" data-content="hht-user-guide.getting-started.launch_step1_title">&ldquo;You just took the hardest step&rdquo;</strong><span data-content="hht-user-guide.getting-started.launch_step1_desc"> &mdash; A reminder that deciding to change is the biggest hurdle</span></div></li>
+                        <li class="flex items-start gap-3"><span class="step-number">2</span><div><strong class="text-primary" data-content="hht-user-guide.getting-started.launch_step2_title">&ldquo;Who will you become?&rdquo;</strong><span data-content="hht-user-guide.getting-started.launch_step2_desc"> &mdash; Think about the person you want to be</span></div></li>
+                        <li class="flex items-start gap-3"><span class="step-number">3</span><div><strong class="text-primary" data-content="hht-user-guide.getting-started.launch_step3_title">&ldquo;Effortless Accountability&rdquo;</strong><span data-content="hht-user-guide.getting-started.launch_step3_desc"> &mdash; No streak pressure, no perfection required</span></div></li>
+                        <li class="flex items-start gap-3"><span class="step-number">4</span><div><strong class="text-primary" data-content="hht-user-guide.getting-started.launch_step4_title">&ldquo;Privacy by Design&rdquo;</strong><span data-content="hht-user-guide.getting-started.launch_step4_desc"> &mdash; Your habits, your business &mdash; data stays on your device</span></div></li>
+                        <li class="flex items-start gap-3"><span class="step-number">5</span><div><strong class="text-primary" data-content="hht-user-guide.getting-started.launch_step5_title">Subscription options</strong><span data-content="hht-user-guide.getting-started.launch_step5_desc"> &mdash; Choose your plan (free or premium)</span></div></li>
+                        <li class="flex items-start gap-3"><span class="step-number">6</span><div><strong class="text-primary" data-content="hht-user-guide.getting-started.launch_step6_title">&ldquo;How Hey Habit Tracker Works&rdquo;</strong><span data-content="hht-user-guide.getting-started.launch_step6_desc"> &mdash; A quick overview, then tap Get Started!</span></div></li>
+                    </ol>
+                    <p class="leading-relaxed mb-6" data-content="hht-user-guide.getting-started.p4">Swipe through these screens or tap the buttons to continue.</p>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.getting-started.h3_first_habit">Creating Your First Habit</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.getting-started.p5">After the welcome screens, you&rsquo;ll land on the home screen. Here&rsquo;s how to create your first habit:</p>
+                    <ol class="space-y-3 mb-4">
+                        <li class="flex items-start gap-3"><span class="step-number">1</span><span data-content="hht-user-guide.getting-started.habit_step1">Tap <strong class="text-primary">&ldquo;Get Started&rdquo;</strong> or the <strong class="text-primary">+</strong> button</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">2</span><span data-content="hht-user-guide.getting-started.habit_step2">Enter a name (like &ldquo;Water&rdquo; or &ldquo;Exercise&rdquo;)</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">3</span><span data-content="hht-user-guide.getting-started.habit_step3">Choose whether this is something you want to <strong class="text-primary">build</strong> (do more of) or <strong class="text-primary">break</strong> (do less of)</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">4</span><span data-content="hht-user-guide.getting-started.habit_step4">Set your target and unit (like &ldquo;64 ounces&rdquo; or &ldquo;30 minutes&rdquo;)</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">5</span><span data-content="hht-user-guide.getting-started.habit_step5">Pick a fun icon and color</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">6</span><span data-content="hht-user-guide.getting-started.habit_step6">Tap <strong class="text-primary">Save</strong></span></li>
+                    </ol>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.getting-started.p6">That&rsquo;s it! Your first habit is ready to track.</p>
+
+                    <div class="callout callout-warning text-sm" data-content="hht-user-guide.getting-started.hint">
+                        <strong>Helpful hints:</strong> The first time you create a habit, you&rsquo;ll see helpful tooltips explaining each option. These only appear once, but you can see them again by going to Settings and tapping &ldquo;Re-run Onboarding.&rdquo;
+                    </div>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 3: Core Concepts -->
+                <!-- ============================================================ -->
+                <section id="core-concepts" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.core-concepts.heading">Core Concepts</h2>
+
+                    <h3 class="mt-8 mb-3" data-content="hht-user-guide.core-concepts.h3_what_is_habit">What is a &ldquo;Habit&rdquo; in This App?</h3>
+                    <p class="leading-relaxed mb-3" data-content="hht-user-guide.core-concepts.p1">A habit is anything you want to track regularly. It could be:</p>
+                    <ul class="list-disc pl-6 space-y-1 mb-4">
+                        <li data-content="hht-user-guide.core-concepts.list1">Something you <strong class="text-primary">do</strong> (exercise, meditation, reading)</li>
+                        <li data-content="hht-user-guide.core-concepts.list2">Something you <strong class="text-primary">consume</strong> (water, coffee, calories)</li>
+                        <li data-content="hht-user-guide.core-concepts.list3">Something you <strong class="text-primary">avoid</strong> (smoking, screen time, junk food)</li>
+                    </ul>
+                    <p class="leading-relaxed mb-6" data-content="hht-user-guide.core-concepts.p2">Each habit has a <strong class="text-primary">target</strong> &mdash; the amount you&rsquo;re aiming for each day, week, or month.</p>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.core-concepts.h3_build_vs_break">Build Habits vs. Break Habits</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                        <div class="habit-card-build">
+                            <h4 class="mb-2 flex items-center gap-2"><span class="text-lg">📈</span> <span data-content="hht-user-guide.core-concepts.build_title">Build Habits</span></h4>
+                            <p class="text-sm" data-content="hht-user-guide.core-concepts.build_desc">Things you want to do <strong>MORE</strong> of. Your goal is to reach or exceed your target.</p>
+                        </div>
+                        <div class="habit-card-break">
+                            <h4 class="mb-2 flex items-center gap-2"><span class="text-lg">📉</span> <span data-content="hht-user-guide.core-concepts.break_title">Break Habits</span></h4>
+                            <p class="text-sm" data-content="hht-user-guide.core-concepts.break_desc">Things you want to do <strong>LESS</strong> of. Your goal is to stay under your limit.</p>
+                        </div>
+                    </div>
+                    <p class="leading-relaxed mb-6" data-content="hht-user-guide.core-concepts.p3">The app shows your progress differently for each type, so you always know if you&rsquo;re on track.</p>
+
+                    <h3 class="mt-10 mb-3" data-content="hht-user-guide.core-concepts.h3_understanding">Understanding Your Progress</h3>
+                    <p class="leading-relaxed mb-3" data-content="hht-user-guide.core-concepts.p4">Your progress is shown as a percentage:</p>
+                    <ul class="space-y-2 mb-4">
+                        <li class="flex items-start gap-2"><span class="font-bold shrink-0" style="color: var(--accent-cyan);">100%</span> <span data-content="hht-user-guide.core-concepts.progress_100">= You hit your target!</span></li>
+                        <li class="flex items-start gap-2"><span class="font-bold shrink-0" style="color: var(--accent-blue);">Over 100%</span> <span data-content="hht-user-guide.core-concepts.progress_over">= You exceeded your goal (great for build habits!)</span></li>
+                        <li class="flex items-start gap-2"><span class="font-bold shrink-0" style="color: var(--text-muted);">Under 100%</span> <span data-content="hht-user-guide.core-concepts.progress_under">= You still have room to go</span></li>
+                    </ul>
+                    <div class="callout callout-tip text-sm" data-content="hht-user-guide.core-concepts.example">
+                        <strong>Example:</strong> If your water target is 8 glasses and you&rsquo;ve had 6: Progress = 6 &divide; 8 = <strong>75%</strong>. The progress ring fills to 75%.
+                    </div>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.core-concepts.h3_daily_flow">Daily Tracking Flow</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.core-concepts.p5">A typical day looks like this:</p>
+                    <ol class="space-y-3 mb-4">
+                        <li class="flex items-start gap-3"><span class="step-number">1</span><div><strong class="text-primary" data-content="hht-user-guide.core-concepts.flow_step1_title">Morning</strong><span data-content="hht-user-guide.core-concepts.flow_step1_desc"> &mdash; Open the app and see yesterday&rsquo;s results</span></div></li>
+                        <li class="flex items-start gap-3"><span class="step-number">2</span><div><strong class="text-primary" data-content="hht-user-guide.core-concepts.flow_step2_title">Throughout the day</strong><span data-content="hht-user-guide.core-concepts.flow_step2_desc"> &mdash; Log entries as you go (voice or manual)</span></div></li>
+                        <li class="flex items-start gap-3"><span class="step-number">3</span><div><strong class="text-primary" data-content="hht-user-guide.core-concepts.flow_step3_title">Evening</strong><span data-content="hht-user-guide.core-concepts.flow_step3_desc"> &mdash; Check your progress and see if you hit your targets</span></div></li>
+                        <li class="flex items-start gap-3"><span class="step-number">4</span><div><strong class="text-primary" data-content="hht-user-guide.core-concepts.flow_step4_title">Repeat</strong><span data-content="hht-user-guide.core-concepts.flow_step4_desc"> &mdash; Build momentum day by day</span></div></li>
+                    </ol>
+                    <p class="leading-relaxed" data-content="hht-user-guide.core-concepts.p6">No pressure to be perfect. Just show up and track honestly.</p>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 4: Creating Habits -->
+                <!-- ============================================================ -->
+                <section id="creating-habits" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.creating-habits.heading">Creating Habits</h2>
+
+                    <h3 class="mt-8 mb-4" data-content="hht-user-guide.creating-habits.h3_step_by_step">Step-by-Step Guide</h3>
+
+                    <div class="space-y-4 mb-8">
+                        <div class="flex items-start gap-3">
+                            <span class="step-number">1</span>
+                            <div><strong data-content="hht-user-guide.creating-habits.step1_title">Open the habit creator</strong><p class="text-sm mt-1" data-content="hht-user-guide.creating-habits.step1_desc">From the home screen, tap <strong>+</strong> in the Quick Actions area, or go to <strong>Settings &rarr; My Habits &rarr; Add New</strong></p></div>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <span class="step-number">2</span>
+                            <div><strong data-content="hht-user-guide.creating-habits.step2_title">Name your habit</strong><p class="text-sm mt-1" data-content="hht-user-guide.creating-habits.step2_desc">Type something short and clear: &ldquo;Water&rdquo;, &ldquo;Exercise&rdquo;, &ldquo;Reading&rdquo;. The app will suggest an icon based on the name.</p></div>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <span class="step-number">3</span>
+                            <div><strong data-content="hht-user-guide.creating-habits.step3_title">Choose your habit type</strong><p class="text-sm mt-1" data-content="hht-user-guide.creating-habits.step3_desc"><strong>Build:</strong> Things you want to do more of. <strong>Break:</strong> Things you want to limit.</p></div>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <span class="step-number">4</span>
+                            <div><strong data-content="hht-user-guide.creating-habits.step4_title">Set your target</strong><p class="text-sm mt-1" data-content="hht-user-guide.creating-habits.step4_desc">Enter the number you&rsquo;re aiming for. For build habits, this is your goal to reach. For break habits, this is your maximum limit.</p></div>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <span class="step-number">5</span>
+                            <div><strong data-content="hht-user-guide.creating-habits.step5_title">Set a default value</strong> <span class="text-xs font-medium text-muted">(optional)</span><p class="text-sm mt-1" data-content="hht-user-guide.creating-habits.step5_desc">A quick-log amount for one-tap logging. Example: Set &ldquo;1&rdquo; for water so each tap logs 1 glass.</p></div>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <span class="step-number">6</span>
+                            <div><strong data-content="hht-user-guide.creating-habits.step6_title">Choose your unit</strong><p class="text-sm mt-1" data-content="hht-user-guide.creating-habits.step6_desc">What are you measuring? Glasses, minutes, steps, pages, cups &mdash; type any unit that makes sense to you. <em>Note: on the Home screen only the first 3 letters of the unit will be displayed.</em></p></div>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <span class="step-number">7</span>
+                            <div><strong data-content="hht-user-guide.creating-habits.step7_title">Pick your timeframe</strong><p class="text-sm mt-1" data-content="hht-user-guide.creating-habits.step7_desc"><strong>Daily:</strong> Resets every day at midnight. <strong>Weekly:</strong> Sunday to Saturday. <strong>Monthly:</strong> Calendar month.</p></div>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <span class="step-number">8</span>
+                            <div><strong data-content="hht-user-guide.creating-habits.step8_title">Choose a color and icon</strong><p class="text-sm mt-1" data-content="hht-user-guide.creating-habits.step8_desc">Pick a color that feels right and choose an emoji icon (or keep the suggested one).</p></div>
+                        </div>
+                        <div class="flex items-start gap-3">
+                            <span class="step-number">9</span>
+                            <div><strong data-content="hht-user-guide.creating-habits.step9_title">Save!</strong><p class="text-sm mt-1" data-content="hht-user-guide.creating-habits.step9_desc">Tap <strong>Save</strong> and your habit is ready to track.</p></div>
+                        </div>
+                    </div>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.creating-habits.h3_your_why">Record Your Why <span class="text-sm font-normal text-muted">(Optional)</span></h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.creating-habits.your_why_p1">After you save a habit, you can record a short voice memo explaining <em>why</em> it matters to you. When motivation dips, hearing your own reason in your own voice is a powerful nudge to keep going.</p>
+                    <ol class="space-y-2 mb-6">
+                        <li class="flex items-start gap-3"><span class="step-number">1</span><span data-content="hht-user-guide.creating-habits.your_why_step1">Open a habit for editing and tap <strong>Record Your Why</strong> under the <strong>Your Why</strong> section</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">2</span><span data-content="hht-user-guide.creating-habits.your_why_step2">Tap record and speak for up to 30 seconds &mdash; say why this habit is important to you</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">3</span><span data-content="hht-user-guide.creating-habits.your_why_step3">Play it back, optionally transcribe it to text, then save. You can re-record or delete it anytime.</span></li>
+                    </ol>
+                    <div class="callout callout-info text-sm mb-4" data-content="hht-user-guide.creating-habits.your_why_remind"><strong>Remind Me Why:</strong> Turn this on for a habit and the app will surface your recording as a gentle nudge on the home screen when the habit needs attention.</div>
+                    <p class="text-sm text-muted mb-8" data-content="hht-user-guide.creating-habits.your_why_privacy">Your recording and its transcription stay on your device &mdash; like the rest of your data, they are never uploaded.</p>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.creating-habits.h3_advanced">Advanced Options</h3>
+                    <div class="space-y-3 mb-8">
+                        <div class="category-card">
+                            <h4 class="font-semibold text-sm mb-1" data-content="hht-user-guide.creating-habits.advanced_aliases_title">Custom Synonyms (for Siri)</h4>
+                            <p class="text-xs" data-content="hht-user-guide.creating-habits.advanced_aliases_desc">Add alternate names so Siri recognizes a habit by what you naturally say. For example, add &ldquo;espresso&rdquo; or &ldquo;latte&rdquo; as synonyms for a habit named &ldquo;Coffee.&rdquo; You will find this in the Personalize section when creating or editing a habit.</p>
+                        </div>
+                        <div class="category-card">
+                            <h4 class="font-semibold text-sm mb-1" data-content="hht-user-guide.creating-habits.advanced_baseline_title">Baseline (Break habits only)</h4>
+                            <p class="text-xs" data-content="hht-user-guide.creating-habits.advanced_baseline_desc">For Break habits you can set an optional baseline &mdash; the starting amount you are reducing from &mdash; so the app can show how much you have cut back. Leave it blank and the app uses your highest recorded day as the baseline automatically.</p>
+                        </div>
+                    </div>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.creating-habits.h3_common_targets">Common Targets</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.creating-habits.p1">Here are some common targets to get you started:</p>
+                    <div class="overflow-x-auto -mx-4 sm:mx-0 mb-6">
+                        <table class="min-w-full text-sm">
+                            <thead>
+                                <tr class="text-left">
+                                    <th class="px-4 py-3 font-semibold rounded-tl-lg" data-content="hht-user-guide.creating-habits.table_col1">Habit</th>
+                                    <th class="px-4 py-3 font-semibold text-center" data-content="hht-user-guide.creating-habits.table_col2">Good Target</th>
+                                    <th class="px-4 py-3 font-semibold rounded-tr-lg" data-content="hht-user-guide.creating-habits.table_col3">Unit</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y" style="border-color: var(--glass-border);" data-content="hht-user-guide.creating-habits.table_rows">
+                                <tr><td class="px-4 py-3">Water</td><td class="px-4 py-3 text-center font-medium">64</td><td class="px-4 py-3">ounces</td></tr>
+                                <tr><td class="px-4 py-3">Exercise</td><td class="px-4 py-3 text-center font-medium">30</td><td class="px-4 py-3">minutes</td></tr>
+                                <tr><td class="px-4 py-3">Reading</td><td class="px-4 py-3 text-center font-medium">20</td><td class="px-4 py-3">minutes</td></tr>
+                                <tr><td class="px-4 py-3">Meditation</td><td class="px-4 py-3 text-center font-medium">10</td><td class="px-4 py-3">minutes</td></tr>
+                                <tr><td class="px-4 py-3">Coffee <span class="text-xs" style="color: #ef4444;">(break)</span></td><td class="px-4 py-3 text-center font-medium">3</td><td class="px-4 py-3">cups</td></tr>
+                                <tr><td class="px-4 py-3">Screen time <span class="text-xs" style="color: #ef4444;">(break)</span></td><td class="px-4 py-3 text-center font-medium">2</td><td class="px-4 py-3">hours</td></tr>
+                                <tr><td class="px-4 py-3">Zone 2 workout</td><td class="px-4 py-3 text-center font-medium">2</td><td class="px-4 py-3">times (per week)</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p class="leading-relaxed mb-6" data-content="hht-user-guide.creating-habits.p2">Start with targets that feel achievable. You can always adjust later!</p>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.creating-habits.h3_examples">Examples of Good Habits to Track</h3>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div class="category-card">
+                            <h4 class="font-semibold mb-2 text-sm" data-content="hht-user-guide.creating-habits.cat1_title">Health &amp; Fitness</h4>
+                            <ul class="text-sm space-y-1" data-content="hht-user-guide.creating-habits.cat1_items">
+                                <li>• Water intake</li><li>• Exercise minutes</li><li>• Steps walked</li><li>• Hours of sleep</li><li>• Fruits &amp; vegetables eaten</li>
+                            </ul>
+                        </div>
+                        <div class="category-card">
+                            <h4 class="font-semibold mb-2 text-sm" data-content="hht-user-guide.creating-habits.cat2_title">Personal Growth</h4>
+                            <ul class="text-sm space-y-1" data-content="hht-user-guide.creating-habits.cat2_items">
+                                <li>• Pages read</li><li>• Minutes of meditation</li><li>• Journal entries</li><li>• Learning time</li>
+                            </ul>
+                        </div>
+                        <div class="category-card">
+                            <h4 class="font-semibold mb-2 text-sm" data-content="hht-user-guide.creating-habits.cat3_title">Productivity</h4>
+                            <ul class="text-sm space-y-1" data-content="hht-user-guide.creating-habits.cat3_items">
+                                <li>• Deep work hours</li><li>• Tasks completed</li><li>• Meetings attended</li>
+                            </ul>
+                        </div>
+                        <div class="category-card">
+                            <h4 class="font-semibold mb-2 text-sm" data-content="hht-user-guide.creating-habits.cat4_title">Things to Limit</h4>
+                            <ul class="text-sm space-y-1" data-content="hht-user-guide.creating-habits.cat4_items">
+                                <li>• Coffee cups</li><li>• Alcoholic drinks</li><li>• Cigarettes</li><li>• Vaping</li><li>• Social media minutes</li><li>• Snacks eaten</li>
+                            </ul>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 5: Tracking Your Progress -->
+                <!-- ============================================================ -->
+                <section id="tracking-progress" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.tracking-progress.heading">Tracking Your Progress</h2>
+
+                    <h3 class="mt-8 mb-3" data-content="hht-user-guide.tracking-progress.h3_voice">Logging with Voice <span class="text-sm font-normal" style="color: var(--accent-blue);">(iPhone Only)</span></h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.tracking-progress.p1">This is the magic of Hey Habit Tracker on iPhone! Instead of typing, just talk.</p>
+
+                    <p class="leading-relaxed mb-3" data-content="hht-user-guide.tracking-progress.p2"><strong>How it works:</strong></p>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.tracking-progress.p3">You don&rsquo;t even need to have the app open &mdash;</p>
+                    <ol class="space-y-2 mb-6">
+                        <li class="flex items-start gap-3"><span class="step-number">1</span><span  data-content="hht-user-guide.tracking-progress.voice_step1">Just say <strong>&ldquo;Hey Siri, log habit in Hey Habit Tracker&rdquo;</strong></span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">2</span><span  data-content="hht-user-guide.tracking-progress.voice_step2">Siri will respond: &ldquo;What would you like to log?&rdquo;</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">3</span><span  data-content="hht-user-guide.tracking-progress.voice_step3">Then say the amount and habit name. For example: <strong>&ldquo;10 grams of protein&rdquo;</strong></span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">4</span><span  data-content="hht-user-guide.tracking-progress.voice_step4">Siri will confirm by saying &ldquo;Logged 10 grams of protein&rdquo;</span></li>
+                    </ol>
+                    <p class="leading-relaxed mb-6" data-content="hht-user-guide.tracking-progress.p4">That&rsquo;s it &mdash; two steps, completely hands-free.</p>
+
+                    <p class="text-sm font-semibold mb-3" data-content="hht-user-guide.tracking-progress.p5">Other supported phrases to engage Siri:</p>
+                    <ul class="list-disc pl-6 space-y-1 text-sm mb-6">
+                        <li>&ldquo;Hey Siri, track habit in Hey Habit Tracker&rdquo;</li>
+                        <li>&ldquo;Hey Siri, record habit in Hey Habit Tracker&rdquo;</li>
+                        <li>&ldquo;Hey Siri, add habit in Hey Habit Tracker&rdquo;</li>
+                    </ul>
+
+                    <div class="callout callout-info text-sm mb-6" data-content="hht-user-guide.tracking-progress.setup_note">
+                        <strong>Setup:</strong> Siri Shortcuts are registered automatically when you create habits. No extra setup needed. You can find more details in the app under <strong>Settings &rarr; Siri Help</strong>.
+                    </div>
+
+                    <p class="text-sm font-semibold mb-2" data-content="hht-user-guide.tracking-progress.p6">Tips for voice logging:</p>
+                    <ul class="list-disc pl-6 space-y-1 text-sm mb-8">
+                        <li>Speak clearly and naturally</li>
+                        <li>If Siri doesn&rsquo;t understand, it will ask you to repeat</li>
+                        <li>You can always switch to manual entry (see below)</li>
+                    </ul>
+
+                    <h3 class="mt-10 mb-3" data-content="hht-user-guide.tracking-progress.h3_manual">Manual Entry <span class="text-sm font-normal text-muted">(All Platforms)</span></h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.tracking-progress.p7">When you prefer typing:</p>
+                    <ol class="space-y-2 mb-8">
+                        <li class="flex items-start gap-3"><span class="step-number">1</span><span  data-content="hht-user-guide.tracking-progress.manual_step1">Tap the <strong>Log</strong> tab or tap the habit&rsquo;s button under Quick Actions on the Home Page</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">2</span><span  data-content="hht-user-guide.tracking-progress.manual_step2">Select your habit from the dropdown if your navigation path was through <strong>Log</strong></span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">3</span><span  data-content="hht-user-guide.tracking-progress.manual_step3">Enter the amount</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">4</span><span  data-content="hht-user-guide.tracking-progress.manual_step4">Add a note if you want (optional)</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">5</span><span  data-content="hht-user-guide.tracking-progress.manual_step5">Adjust the date/time if needed</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">6</span><span  data-content="hht-user-guide.tracking-progress.manual_step6">Tap <strong>Save</strong></span></li>
+                    </ol>
+
+                    <h3 class="mt-10 mb-3" data-content="hht-user-guide.tracking-progress.h3_quick_actions">Quick Actions from Home Screen</h3>
+                    <p class="leading-relaxed mb-3" data-content="hht-user-guide.tracking-progress.p8">The fastest way to log habits:</p>
+                    <ol class="space-y-2 mb-4">
+                        <li class="flex items-start gap-3"><span class="step-number">1</span><span  data-content="hht-user-guide.tracking-progress.quick_step1">Look at the <strong>Quick Actions</strong> section on the home screen</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">2</span><span  data-content="hht-user-guide.tracking-progress.quick_step2">Each habit has its own button</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">3</span><span  data-content="hht-user-guide.tracking-progress.quick_step3">Tap once to log your <strong>default value</strong></span></li>
+                    </ol>
+                    <p class="text-sm mb-4" data-content="hht-user-guide.tracking-progress.p9">Example: If your Water habit has a default of 1, each tap logs 1 glass.</p>
+                    <p class="text-sm" data-content="hht-user-guide.tracking-progress.p10">Set up default values when creating habits to make this super quick!</p>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 6: Viewing Your Progress -->
+                <!-- ============================================================ -->
+                <section id="viewing-progress" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.viewing-progress.heading">Viewing Your Progress</h2>
+
+                    <h3 class="mt-8 mb-4" data-content="hht-user-guide.viewing-progress.h3_home">Home Screen</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.viewing-progress.p1">Your home screen is command central. Here&rsquo;s what you&rsquo;ll see:</p>
+
+                    <div class="space-y-4 mb-8">
+                        <div class="progress-feature flex items-start gap-3">
+                            <span class="text-xl shrink-0">🎯</span>
+                            <div>
+                                <h4 class="text-sm" data-content="hht-user-guide.viewing-progress.feature1_title">Progress Visualization</h4>
+                                <p class="text-sm" data-content="hht-user-guide.viewing-progress.feature1_desc">Concentric progress rings showing all your habits at once. Each ring fills based on your percentage toward the target.</p>
+                            </div>
+                        </div>
+                        <div class="progress-feature flex items-start gap-3">
+                            <span class="text-xl shrink-0">⚡</span>
+                            <div>
+                                <h4 class="text-sm" data-content="hht-user-guide.viewing-progress.feature2_title">Quick Actions</h4>
+                                <p class="text-sm" data-content="hht-user-guide.viewing-progress.feature2_desc">Buttons for your habits. Tap to log with your default value. The <strong>+</strong> button adds new habits.</p>
+                            </div>
+                        </div>
+                        <div class="progress-feature flex items-start gap-3">
+                            <span class="text-xl shrink-0">📋</span>
+                            <div>
+                                <h4 class="text-sm" data-content="hht-user-guide.viewing-progress.feature3_title">Recent Activity</h4>
+                                <p class="text-sm" data-content="hht-user-guide.viewing-progress.feature3_desc">Your last 5 logged entries. Shows what, when, and how much. Tap &ldquo;See All&rdquo; for the full history.</p>
+                            </div>
+                        </div>
+                        <div class="progress-feature flex items-start gap-3">
+                            <span class="text-xl shrink-0">📤</span>
+                            <div>
+                                <h4 class="text-sm" data-content="hht-user-guide.viewing-progress.feature4_title">Share Your Progress</h4>
+                                <p class="text-sm" data-content="hht-user-guide.viewing-progress.feature4_desc">Tap the share button to save or send your progress rings as an image &mdash; great for sharing a win or keeping a snapshot.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.viewing-progress.h3_progress_tab">Progress Tab</h3>
+                    <p class="leading-relaxed mb-3" data-content="hht-user-guide.viewing-progress.p2">Tap the <strong class="text-primary">Progress</strong> tab for deeper insights.</p>
+                    <p class="mb-2" data-content="hht-user-guide.viewing-progress.p3"><strong class="text-primary">Overview Mode:</strong> Summary cards showing Goals Met, Needs Work, and Average Progress, plus your progress visualization and actual vs. target numbers.</p>
+                    <p class="mb-2" data-content="hht-user-guide.viewing-progress.p4"><strong class="text-primary">Time Periods:</strong></p>
+                    <ul class="list-disc pl-6 space-y-1 mb-8" data-content="hht-user-guide.viewing-progress.time_periods">
+                        <li><strong>Today</strong> &mdash; Just today&rsquo;s progress</li>
+                        <li><strong>Week</strong> &mdash; Last 7 days</li>
+                        <li><strong>Month</strong> &mdash; This month so far</li>
+                        <li><strong>All</strong> &mdash; Your complete history</li>
+                    </ul>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.viewing-progress.h3_charts">Charts</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.viewing-progress.p5">Tap &ldquo;Charts&rdquo; in the Progress tab to see trends:</p>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+                        <div class="category-card">
+                            <h4 class="text-sm mb-2" data-content="hht-user-guide.viewing-progress.chart1_title">Bar Chart</h4>
+                            <p class="text-xs" data-content="hht-user-guide.viewing-progress.chart1_desc">Daily totals as vertical bars with a target line. Scroll left to see past days.</p>
+                        </div>
+                        <div class="category-card">
+                            <h4 class="text-sm mb-2" data-content="hht-user-guide.viewing-progress.chart2_title">Line Chart</h4>
+                            <p class="text-xs" data-content="hht-user-guide.viewing-progress.chart2_desc">Your progress as a flowing line. Great for spotting trends over time.</p>
+                        </div>
+                        <div class="category-card">
+                            <h4 class="text-sm mb-2" data-content="hht-user-guide.viewing-progress.chart3_title">Heatmap</h4>
+                            <p class="text-xs" data-content="hht-user-guide.viewing-progress.chart3_desc">A calendar-style grid. Darker colors = better performance. Shows all habits at once.</p>
+                        </div>
+                    </div>
+
+                    <div class="callout callout-info text-sm" data-content="hht-user-guide.viewing-progress.heatmap_info">
+                        <strong>Understanding the Heatmap:</strong> The heatmap uses color intensity to show your daily performance at a glance. Darker cells mean you were closer to (or exceeded) your target. Lighter cells mean you fell short. This makes it easy to spot patterns &mdash; your best days of the week, consistent stretches, and days you missed.
+                    </div>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 8: Managing Habits -->
+                <!-- ============================================================ -->
+                <section id="managing-habits" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.managing-habits.heading">Managing Habits</h2>
+
+                    <h3 class="mt-8 mb-4" data-content="hht-user-guide.managing-habits.h3_editing">Editing Existing Habits</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.managing-habits.p1">Made a mistake or want to change your target?</p>
+                    <ol class="space-y-2 mb-4">
+                        <li class="flex items-start gap-3"><span class="step-number">1</span><span data-content="hht-user-guide.managing-habits.edit_step1">Go to <strong class="text-primary">Settings &rarr; My Habits</strong></span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">2</span><span data-content="hht-user-guide.managing-habits.edit_step2">Find the habit you want to change</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">3</span><span data-content="hht-user-guide.managing-habits.edit_step3">Tap the <strong class="text-primary">Edit</strong> button</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">4</span><span data-content="hht-user-guide.managing-habits.edit_step4">Make your changes</span></li>
+                        <li class="flex items-start gap-3"><span class="step-number">5</span><span data-content="hht-user-guide.managing-habits.edit_step5">Tap <strong class="text-primary">Save</strong></span></li>
+                    </ol>
+                    <p class="text-sm mb-8" data-content="hht-user-guide.managing-habits.p2">You can change anything: name, target, icon, color, habit type.</p>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.managing-habits.h3_archive_delete">Archiving vs. Deleting</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                        <div class="action-card-archive">
+                            <h4 class="mb-2" data-content="hht-user-guide.managing-habits.archive_title">Archive</h4>
+                            <p class="text-sm mb-3" data-content="hht-user-guide.managing-habits.archive_desc">Hides a habit but keeps all your history. Great for seasonal habits. You can restore it anytime.</p>
+                            <p class="text-xs text-muted" data-content="hht-user-guide.managing-habits.archive_how">Edit the habit &rarr; Tap &ldquo;Archive&rdquo; in the Danger Zone section &rarr; Confirm</p>
+                        </div>
+                        <div class="action-card-delete">
+                            <h4 class="mb-2" data-content="hht-user-guide.managing-habits.delete_title">Delete</h4>
+                            <p class="text-sm mb-3" data-content="hht-user-guide.managing-habits.delete_desc">Removes the habit completely. All history for that habit is gone. Use only if you&rsquo;re sure.</p>
+                            <p class="text-xs text-muted" data-content="hht-user-guide.managing-habits.restore_how">To restore archived: Settings &rarr; My Habits &rarr; Archived Habits &rarr; Restore</p>
+                        </div>
+                    </div>
+
+                    <h3 class="mt-10 mb-3" data-content="hht-user-guide.managing-habits.h3_editing_entries">Editing &amp; Deleting Entries</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.managing-habits.p3">Made a logging mistake? No problem.</p>
+                    <p class="mb-2" data-content="hht-user-guide.managing-habits.edit_entry"><strong class="text-primary">To edit an entry:</strong> Go to the <strong>Data</strong> tab &rarr; Find the entry &rarr; Tap <strong>Edit</strong> &rarr; Change the amount, date, time, or notes &rarr; Tap <strong>Save</strong></p>
+                    <p class="mb-4" data-content="hht-user-guide.managing-habits.delete_entry"><strong class="text-primary">To delete an entry:</strong> Go to the <strong>Data</strong> tab &rarr; Find the entry &rarr; Tap <strong>Delete</strong> &rarr; Confirm deletion</p>
+                    <div class="callout callout-tip text-sm" data-content="hht-user-guide.managing-habits.undo_note">
+                        <strong>Undo!</strong> After deleting, you have 5 seconds to tap &ldquo;Undo&rdquo; and get it back.
+                    </div>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 9: Settings & Preferences -->
+                <!-- ============================================================ -->
+                <section id="settings" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.settings.heading">Settings &amp; Preferences</h2>
+
+                    <h3 class="mt-8 mb-4" data-content="hht-user-guide.settings.h3_appearance">Appearance</h3>
+                    <div class="flex flex-wrap gap-3 mb-8" data-content="hht-user-guide.settings.appearance_modes">
+                        <div class="rounded-lg border px-4 py-3 text-sm" style="border-color: var(--glass-border);"><strong>Auto</strong> <span >&mdash; Follows your phone&rsquo;s setting</span></div>
+                        <div class="rounded-lg border px-4 py-3 text-sm" style="border-color: var(--glass-border);"><strong>Light</strong> <span >&mdash; Always light mode</span></div>
+                        <div class="rounded-lg border px-4 py-3 text-sm" style="border-color: var(--glass-border);"><strong>Dark</strong> <span >&mdash; Always dark mode</span></div>
+                    </div>
+
+                    <h3 class="mt-10 mb-3" data-content="hht-user-guide.settings.h3_reminders">Reminders</h3>
+                    <p class="leading-relaxed mb-3" data-content="hht-user-guide.settings.reminders_desc">Set a daily reminder notification to log your habits. Choose your preferred time. Great for building the tracking habit itself!</p>
+                    <p class="leading-relaxed mb-8 text-sm text-muted" data-content="hht-user-guide.settings.reminders_live_note">On iPhone (iOS 16.1+), your daily progress can also appear as a Live Activity on your lock screen, so you can check in without opening the app.</p>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.settings.h3_data_mgmt">Data Management</h3>
+                    <div class="space-y-3">
+                        <div class="category-card">
+                            <h4 class="font-semibold text-sm mb-1" data-content="hht-user-guide.settings.data1_title">View Storage</h4>
+                            <p class="text-xs" data-content="hht-user-guide.settings.data1_desc">See how much space your data uses and check when you last backed up.</p>
+                        </div>
+                        <div class="category-card">
+                            <h4 class="font-semibold text-sm mb-1" data-content="hht-user-guide.settings.data2_title">Export Options</h4>
+                            <p class="text-xs" data-content="hht-user-guide.settings.data2_desc"><strong>Download Database:</strong> Save a full backup file to your device or another app. <strong>Import Database:</strong> Restore your habits and history from a backup file you saved earlier.</p>
+                        </div>
+                        <div class="callout callout-danger">
+                            <h4 class="font-semibold text-sm mb-1" style="color: #ef4444;" data-content="hht-user-guide.settings.data3_title">Danger Zone</h4>
+                            <p class="text-xs" data-content="hht-user-guide.settings.data3_desc"><strong>Clear All Data:</strong> Permanently delete everything. Requires double confirmation. Cannot be undone!</p>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 10: Tips for Success -->
+                <!-- ============================================================ -->
+                <section id="tips" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.tips.heading">Tips for Success</h2>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="tip-card">
+                            <div class="flex items-start gap-3">
+                                <span class="step-number shrink-0">1</span>
+                                <div>
+                                    <h4 class="font-semibold mb-1" data-content="hht-user-guide.tips.tip1_title">Start Small</h4>
+                                    <p class="text-sm" data-content="hht-user-guide.tips.tip1_desc">Research shows that more than 7 habits is too difficult for most people to track, so Hey Habit Tracker has a 7 habit limit. <strong>Track just 2&ndash;3 habits at first.</strong> Pick your top priorities and nail those first. You can always add more later.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tip-card">
+                            <div class="flex items-start gap-3">
+                                <span class="step-number shrink-0">2</span>
+                                <div>
+                                    <h4 class="font-semibold mb-1" data-content="hht-user-guide.tips.tip2_title">Use Default Values</h4>
+                                    <p class="text-sm" data-content="hht-user-guide.tips.tip2_desc">Set up default values for one-tap logging: Water = 1 glass, Exercise = 15 minutes, Reading = 10 pages. Makes logging so fast you&rsquo;ll actually do it.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tip-card">
+                            <div class="flex items-start gap-3">
+                                <span class="step-number shrink-0">3</span>
+                                <div>
+                                    <h4 class="font-semibold mb-1" data-content="hht-user-guide.tips.tip3_title">Don&rsquo;t Chase Perfection</h4>
+                                    <p class="text-sm" data-content="hht-user-guide.tips.tip3_desc">Missing a day doesn&rsquo;t erase your progress. The app shows averages and trends, not just streaks. A few missed days in a great month is still a great month!</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tip-card">
+                            <div class="flex items-start gap-3">
+                                <span class="step-number shrink-0">4</span>
+                                <div>
+                                    <h4 class="font-semibold mb-1" data-content="hht-user-guide.tips.tip4_title">Review Weekly</h4>
+                                    <p class="text-sm" data-content="hht-user-guide.tips.tip4_desc">Take 5 minutes each week to check the Week view, celebrate what went well, notice patterns, and adjust targets if needed.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tip-card">
+                            <div class="flex items-start gap-3">
+                                <span class="step-number shrink-0">5</span>
+                                <div>
+                                    <h4 class="font-semibold mb-1" data-content="hht-user-guide.tips.tip5_title">Make It Visible</h4>
+                                    <p class="text-sm" data-content="hht-user-guide.tips.tip5_desc">Keep the app on your phone&rsquo;s home screen. The more you see it, the more you&rsquo;ll use it.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tip-card">
+                            <div class="flex items-start gap-3">
+                                <span class="step-number shrink-0">6</span>
+                                <div>
+                                    <h4 class="font-semibold mb-1" data-content="hht-user-guide.tips.tip6_title">Pair Habits with Triggers</h4>
+                                    <p class="text-sm" data-content="hht-user-guide.tips.tip6_desc">Attach habits to things you already do: &ldquo;After my morning coffee, I&rsquo;ll log my water goal.&rdquo; &ldquo;Before bed, I&rsquo;ll review my day.&rdquo;</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="tip-card md:col-span-2">
+                            <div class="flex items-start gap-3">
+                                <span class="step-number shrink-0">7</span>
+                                <div>
+                                    <h4 class="font-semibold mb-1" data-content="hht-user-guide.tips.tip7_title">Be Honest</h4>
+                                    <p class="text-sm" data-content="hht-user-guide.tips.tip7_desc">Log what actually happened, not what you wish happened. The data is for YOU. Honest tracking leads to real insights.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 11: Troubleshooting -->
+                <!-- ============================================================ -->
+                <section id="troubleshooting" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.troubleshooting.heading">Troubleshooting</h2>
+
+                    <div class="space-y-3">
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.troubleshooting.faq1_q">Voice Not Working?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4">
+                                <div class="text-sm space-y-3" data-content="hht-user-guide.troubleshooting.faq1_a">
+                                    <p><strong>Check microphone permission:</strong> Go to your phone&rsquo;s Settings &rarr; Find Hey Habit Tracker &rarr; Make sure Microphone is enabled.</p>
+                                    <p><strong>Check Siri is enabled:</strong> Go to your phone&rsquo;s Settings &rarr; Siri &rarr; Talk to Siri &rarr; Enable Siri or Hey Siri.</p>
+                                    <p><strong>Try these fixes:</strong></p>
+                                    <ul class="list-disc pl-5 space-y-1">
+                                        <li>Speak more clearly</li>
+                                        <li>Reduce background noise</li>
+                                    </ul>
+                                    <p><strong>Still not working?</strong> Use manual entry instead. Voice features require iOS Siri.</p>
+                                </div>
+                            </div>
+                        </details>
+
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.troubleshooting.faq2_q">Data Not Saving?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4">
+                                <div class="text-sm space-y-3" data-content="hht-user-guide.troubleshooting.faq2_a">
+                                    <p><strong>Check if the session paused:</strong> The app pauses your session after 5 minutes of inactivity to save battery. You&rsquo;ll see a paused overlay &mdash; just tap to resume.</p>
+                                    <p><strong>Make sure you tapped Save:</strong> Entries aren&rsquo;t saved until you confirm. Look for the Save button after entering data.</p>
+                                    <p><strong>Force close and reopen:</strong> Swipe the app away completely, then open it again fresh.</p>
+                                </div>
+                            </div>
+                        </details>
+
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.troubleshooting.faq3_q">App Running Slow?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4">
+                                <div class="text-sm space-y-2" data-content="hht-user-guide.troubleshooting.faq3_a">
+                                    <p>Try these steps:</p>
+                                    <ol class="list-decimal pl-5 space-y-1">
+                                        <li>Close other apps running in the background</li>
+                                        <li>Restart your device</li>
+                                        <li>Make sure you have enough storage space</li>
+                                        <li>Delete old test data if you generated any</li>
+                                    </ol>
+                                </div>
+                            </div>
+                        </details>
+
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.troubleshooting.faq4_q">Contact Support</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4">
+                                <div class="text-sm space-y-2" data-content="hht-user-guide.troubleshooting.faq4_a">
+                                    <p>Still having issues? We want to help!</p>
+                                    <ul class="list-disc pl-5 space-y-1">
+                                        <li><strong>Report a bug:</strong> Visit the app&rsquo;s support page</li>
+                                        <li><strong>Request a feature:</strong> We love hearing your ideas</li>
+                                        <li><strong>General questions:</strong> Check the FAQ below first</li>
+                                    </ul>
+                                    <p class="mt-2"><a href="/contact?from=hht" class="text-[var(--accent-cyan)] underline hover:brightness-125">Contact us here &rarr;</a></p>
+                                </div>
+                            </div>
+                        </details>
+                    </div>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 12: Privacy & Your Data -->
+                <!-- ============================================================ -->
+                <section id="privacy" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.privacy.heading">Privacy &amp; Your Data</h2>
+
+                    <div class="privacy-box mb-8">
+                        <h3 class="font-bold mb-2 flex items-center gap-2"><span>🔒</span> <span data-content="hht-user-guide.privacy.box_title">Your data stays on your device. Period.</span></h3>
+                        <p class="text-sm" data-content="hht-user-guide.privacy.box_desc">Your habit data is stored locally on your phone, tablet, or computer. It never leaves your device unless YOU choose to export it.</p>
+                    </div>
+
+                    <h3 class="mt-8 mb-3" data-content="hht-user-guide.privacy.h3_crash">Crash Reporting &amp; Analytics</h3>
+                    <p class="leading-relaxed mb-2" data-content="hht-user-guide.privacy.p1">To improve app stability, we use Sentry for crash reporting. This collects:</p>
+                    <ul class="list-disc pl-6 space-y-1 mb-2" data-content="hht-user-guide.privacy.crash_items">
+                        <li>Anonymous session data (app opens, crashes)</li>
+                        <li>Error reports with device platform info</li>
+                        <li>No habit data, names, or logged entries are ever sent</li>
+                    </ul>
+                    <p class="text-sm mb-6" data-content="hht-user-guide.privacy.p2">Emails and IP addresses are stripped before any data is transmitted.</p>
+
+                    <h3 class="mt-10 mb-3" data-content="hht-user-guide.privacy.h3_not_collect">What We Don&rsquo;t Collect</h3>
+                    <ul class="x-list space-y-2 mb-8">
+                        <li class="flex items-start gap-2"><span class="x-icon shrink-0">&#10007;</span> <span data-content="hht-user-guide.privacy.not_collect1">We don&rsquo;t track what habits you create</span></li>
+                        <li class="flex items-start gap-2"><span class="x-icon shrink-0">&#10007;</span> <span data-content="hht-user-guide.privacy.not_collect2">We don&rsquo;t collect personal information (name, email, location)</span></li>
+                        <li class="flex items-start gap-2"><span class="x-icon shrink-0">&#10007;</span> <span data-content="hht-user-guide.privacy.not_collect3">We don&rsquo;t have accounts or logins</span></li>
+                        <li class="flex items-start gap-2"><span class="x-icon shrink-0">&#10007;</span> <span data-content="hht-user-guide.privacy.not_collect4">We don&rsquo;t sync your habit data to any cloud servers</span></li>
+                    </ul>
+
+                    <h3 class="mt-10 mb-4" data-content="hht-user-guide.privacy.h3_export">Exporting Your Data</h3>
+                    <p class="leading-relaxed mb-4" data-content="hht-user-guide.privacy.p3">Want a backup or to analyze your data elsewhere?</p>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                        <div class="export-card">
+                            <p class="text-sm mb-1" data-content="hht-user-guide.privacy.export1_title">JSON Export</p>
+                            <p class="text-xs" data-content="hht-user-guide.privacy.export1_desc">Full backup. Contains everything: habits, entries, settings. Can be imported back.</p>
+                        </div>
+                        <div class="export-card">
+                            <p class="text-sm mb-1" data-content="hht-user-guide.privacy.export2_title">CSV Export</p>
+                            <p class="text-xs" data-content="hht-user-guide.privacy.export2_desc">Opens in Excel, Google Sheets, Numbers. Perfect for custom charts.</p>
+                        </div>
+                        <div class="export-card">
+                            <p class="text-sm mb-1" data-content="hht-user-guide.privacy.export3_title">Database Export</p>
+                            <p class="text-xs" data-content="hht-user-guide.privacy.export3_desc">Raw SQLite .db file. For advanced users or full backups.</p>
+                        </div>
+                    </div>
+                    <p class="text-sm mb-8" data-content="hht-user-guide.privacy.p4"><strong class="text-primary">How to export:</strong> Go to the <strong>Data</strong> tab &rarr; Tap the export button &rarr; Choose your format &rarr; Share or save the file.</p>
+
+                    <h3 class="mt-10 mb-3" data-content="hht-user-guide.privacy.h3_deleting">Deleting Your Data</h3>
+                    <ul class="space-y-2 mb-4">
+                        <li data-content="hht-user-guide.privacy.delete1"><strong class="text-primary">Delete individual entries:</strong> Data tab &rarr; Find entry &rarr; Delete</li>
+                        <li data-content="hht-user-guide.privacy.delete2"><strong class="text-primary">Delete a habit and its history:</strong> Settings &rarr; My Habits &rarr; Edit &rarr; Delete</li>
+                        <li data-content="hht-user-guide.privacy.delete3"><strong class="text-primary">Delete EVERYTHING:</strong> Settings &rarr; Clear All Data (requires confirmation, cannot be undone)</li>
+                    </ul>
+
+                    <div class="mt-6">
+                        <a href="/hey-habit-tracker/privacy-policy" class="guide-link font-medium text-sm" data-content="hht-user-guide.privacy.link">Read our full Privacy Policy &rarr;</a>
+                    </div>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- SECTION 13: FAQ -->
+                <!-- ============================================================ -->
+                <section id="faq" class="guide-section mb-10 md:mb-16 scroll-mt-32 fade-in-up">
+                    <h2 class="mb-6 pb-3" style="border-bottom: 1px solid var(--glass-border);" data-content="hht-user-guide.faq.heading">FAQ</h2>
+
+                    <!-- General Questions -->
+                    <h3 class="text-lg font-semibold mt-8 mb-3" data-content="hht-user-guide.faq.general_heading">General Questions</h3>
+                    <div class="space-y-3 mb-8">
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.general_q1">Is Hey Habit Tracker free?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.general_a1">Hey Habit Tracker offers a 3-day free trial so you can explore everything the app has to offer.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.general_q2">Do I need an account?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.general_a2">No account needed. Just download and start tracking.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.general_q3">Does it work offline?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.general_a3">Yes! Everything works without internet. Your data is stored locally.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.general_q4">Can I use it on multiple devices?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.general_a4">The app works on each device independently. There&rsquo;s no automatic sync between devices, but you can export from one and import to another.</p></div>
+                        </details>
+                    </div>
+
+                    <!-- Habits & Tracking -->
+                    <h3 class="text-lg font-semibold mt-8 mb-3" data-content="hht-user-guide.faq.habits_heading">Habits &amp; Tracking</h3>
+                    <div class="space-y-3 mb-8">
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.habits_q1">How many habits can I track?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.habits_a1">You can track up to 7 habits at a time. If you need to add more, archive an existing habit to make room.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.habits_q2">Can I track the same habit multiple times a day?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.habits_a2">Absolutely! Each log entry is separate. Log water in the morning, afternoon, and evening &mdash; they all add up.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.habits_q3">What&rsquo;s the difference between Daily, Weekly, and Monthly targets?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.habits_a3">Daily targets reset at midnight. Weekly targets span Sunday through Saturday. Monthly targets span the calendar month. Weekly and monthly give you flexibility on which days you do what.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.habits_q4">Can I backdate an entry?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.habits_a4">Yes! When logging, you can change the date and time to any point in the past. You can change any field in the Log screen or the Data tab.</p></div>
+                        </details>
+                    </div>
+
+                    <!-- Voice Features -->
+                    <h3 class="text-lg font-semibold mt-8 mb-3" data-content="hht-user-guide.faq.voice_heading">Voice Features</h3>
+                    <div class="space-y-3 mb-8">
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.voice_q1">What is &ldquo;Your Why&rdquo;?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.voice_a1">&ldquo;Your Why&rdquo; is an optional voice memo you can record for any habit, explaining why it matters to you. The app keeps it on your device and can play it back as a &ldquo;Remind Me Why&rdquo; nudge when you need motivation. Record it from the Your Why section when creating or editing a habit.</p></div>
+                        </details>
+                    </div>
+
+                    <!-- Data & Privacy -->
+                    <h3 class="text-lg font-semibold mt-8 mb-3" data-content="hht-user-guide.faq.data_heading">Data &amp; Privacy</h3>
+                    <div class="space-y-3 mb-8">
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.data_q1">Will I lose my data if I delete the app?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.data_a1">Yes. Since data is stored locally, uninstalling removes everything. Export a backup first if you want to keep your history.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.data_q2">Can I transfer data to a new phone?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.data_a2">Export your data as .db, transfer the file to your new phone, then import it in the app.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.data_q3">Is my data encrypted?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.data_a3">Your data is stored in a local file on your device. Export files are not encrypted, so store them securely.</p></div>
+                        </details>
+                    </div>
+
+                    <!-- Troubleshooting -->
+                    <h3 class="text-lg font-semibold mt-8 mb-3" data-content="hht-user-guide.faq.ts_heading">Troubleshooting</h3>
+                    <div class="space-y-3">
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.ts_q1">What do the heatmap colors mean?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.ts_a1">Darker colors mean you were closer to your target that day. Lighter colors mean you fell short. Gaps in color mean no data was logged.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.ts_q2">Why does the app show a paused screen?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.ts_a2">The app pauses your session after 5 minutes of inactivity to save battery. Just tap to resume where you left off.</p></div>
+                        </details>
+                        <details class="faq-item">
+                            <summary class="faq-question w-full px-5 py-4 text-left flex justify-between items-center transition-colors">
+                                <span class="font-semibold text-sm" data-content="hht-user-guide.faq.ts_q3">I logged something wrong. Can I fix it?</span>
+                                <svg class="faq-icon w-5 h-5 transition-transform shrink-0 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                            </summary>
+                            <div class="faq-answer px-5 pb-4"><p class="text-sm" data-content="hht-user-guide.faq.ts_a3">Yes! Go to the Data tab, find the entry, and tap Edit to change it or Delete to remove it.</p></div>
+                        </details>
+                    </div>
+                </section>
+
+                <!-- ============================================================ -->
+                <!-- You've Got This! -->
+                <!-- ============================================================ -->
+                <section class="mb-8 scroll-mt-32 fade-in-up">
+                    <div class="closing-cta">
+                        <h2 class="text-2xl md:text-3xl font-bold mb-3" data-content="hht-user-guide.closing.heading">You&rsquo;ve Got This!</h2>
+                        <p class="leading-relaxed max-w-lg mx-auto mb-2" data-content="hht-user-guide.closing.p1">Building habits isn&rsquo;t about being perfect. It&rsquo;s about showing up, tracking honestly, and making small improvements over time.</p>
+                        <p class="leading-relaxed max-w-lg mx-auto mb-4" data-content="hht-user-guide.closing.p2">Hey Habit Tracker is here to support you on that journey. One day at a time, one log at a time.</p>
+                        <p class="font-semibold text-lg text-primary" data-content="hht-user-guide.closing.p3">Now go track something!</p>
+                    </div>
+                </section>
+
+            </article>
+        </div>
+    </div>
+</section>
+
+<!-- Footer CTA -->
+<section class="guide-footer py-10 md:py-20 px-4 md:px-8">
+    <div class="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+        <h2 class="text-2xl font-bold mb-4" data-content="hht-user-guide.cta.heading">Need More Help?</h2>
+        <p class="mb-6" data-content="hht-user-guide.cta.description">If you have questions not covered in this guide, we&rsquo;d love to hear from you.</p>
+        <div class="flex flex-col sm:flex-row gap-4 justify-center">
+            <a href="/contact?from=hht" class="btn-primary w-full sm:w-auto text-center">Contact Support</a>
+        </div>
+    </div>
+</section>
+
+</div><!-- /.hht-page -->
+
+<!-- Page-scoped JavaScript -->
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // --- Reading Progress Bar ---
+    const progressBar = document.getElementById('reading-progress');
+    if (progressBar) {
+        window.addEventListener('scroll', function() {
+            const scrollTop = window.scrollY;
+            const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+            const progress = (scrollTop / docHeight) * 100;
+            progressBar.style.width = Math.min(progress, 100) + '%';
+        });
+    }
+
+    // --- Scroll Animation (Fade In Up) ---
+    const fadeElements = document.querySelectorAll('.fade-in-up');
+    const fadeObserver = new IntersectionObserver(function(entries) {
+        entries.forEach(function(entry) {
+            if (entry.isIntersecting) {
+                entry.target.classList.add('visible');
+                fadeObserver.unobserve(entry.target);
+            }
+        });
+    }, {
+        rootMargin: '0px 0px -50px 0px',
+        threshold: 0.1
+    });
+    fadeElements.forEach(function(el) { fadeObserver.observe(el); });
+
+    // --- TOC scroll tracking ---
+    var sections = document.querySelectorAll('.guide-section[id]');
+    var tocLinks = document.querySelectorAll('.toc-link');
+    var linkMap = {};
+    tocLinks.forEach(function(link) {
+        var id = link.getAttribute('href').substring(1);
+        linkMap[id] = link;
+    });
+
+    var observer = new IntersectionObserver(function(entries) {
+        entries.forEach(function(entry) {
+            if (entry.isIntersecting) {
+                tocLinks.forEach(function(link) {
+                    link.classList.remove('active');
+                });
+                var activeLink = linkMap[entry.target.id];
+                if (activeLink) {
+                    activeLink.classList.add('active');
+                }
+            }
+        });
+    }, {
+        rootMargin: '-80px 0px -60% 0px',
+        threshold: 0
+    });
+
+    sections.forEach(function(section) { observer.observe(section); });
+
+    // --- Mobile TOC toggle ---
+    var toggle = document.getElementById('mobile-toc-toggle');
+    var menu = document.getElementById('mobile-toc-menu');
+    var chevron = document.getElementById('mobile-toc-chevron');
+
+    if (toggle && menu) {
+        toggle.addEventListener('click', function() {
+            menu.classList.toggle('hidden');
+            if (chevron) chevron.classList.toggle('rotate-180');
+        });
+        menu.querySelectorAll('a').forEach(function(link) {
+            link.addEventListener('click', function() {
+                menu.classList.add('hidden');
+                if (chevron) chevron.classList.remove('rotate-180');
+            });
+        });
+    }
+    // FAQ accordion uses native <details>/<summary> — no JS needed
+});
+</script>
+{% endblock %}
+
+{% block footer %}
+{% include 'components/hht-footer.html' %}
+{% endblock %}

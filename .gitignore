@@ -9,6 +9,11 @@ data/database/swipefile.db
 data/database/swipefile.db-wal
 data/database/swipefile.db-shm
 
+# Any SQLite DB under data/database (live, backups, repro/smoke copies) and a stray
+# root copy — DB binaries are never committed.
+data/database/*.db
+/swipefile.db
+
 # Database backups
 data/database/backups/
 

@@ -22,7 +22,21 @@ import config
 # generator's selected prompt fields). Additive IF NOT EXISTS path; the seed gains
 # the empty table on next init. The v5 ADD COLUMN branch is guarded, so re-running
 # init_db for this bump skips it.
-SCHEMA_VERSION = 6
+# v7: added the `models` + `model_prices` registry tables (the single source of
+# truth for the dropdown, capability flags, and effective-dated prices) and two
+# `interpretations` columns (temperature, seed = the applied values). New tables
+# are additive IF NOT EXISTS; the two columns are a guarded ALTER in the atomic
+# block (like v5's duration_ms). init_db also OFFLINE-seeds the baseline
+# models (insert-if-empty) so a freshly-migrated DB is never broken — see
+# _seed_models.
+# v8: added interpretations.think (the applied think value per run; NULL when the
+# model is not reasoning-capable / its adapter does not honor think, 0/1 when it
+# does — same nullable-applied-value semantics as temperature and seed). Guarded
+# ALTER in the same atomic block. The offline seed gate widens to current_version
+# < 8 so an existing v7 DB picks up the newly-added local Ollama model; the seed is
+# insert-if-empty (ON CONFLICT DO NOTHING) and soft-deleted rows conflict to a
+# no-op, so re-running never resurrects an operator-removed model.
+SCHEMA_VERSION = 8
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -130,6 +144,9 @@ SCHEMA_STATEMENTS: list[str] = [
         text TEXT,
         model TEXT,
         generated_at TEXT,
+        temperature REAL,      -- v7: the applied temperature (NULL if omitted)
+        seed INTEGER,          -- v7: the applied seed (NULL if the provider omitted)
+        think INTEGER,         -- v8: the applied think value (NULL = not applicable)
         PRIMARY KEY (run_date, scope)
     )
     """,
@@ -153,6 +170,31 @@ SCHEMA_STATEMENTS: list[str] = [
         key TEXT PRIMARY KEY,
         value TEXT,
         updated_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS models (
+        model TEXT PRIMARY KEY,         -- canonical "provider:model"
+        provider TEXT,
+        enabled INTEGER DEFAULT 1,      -- dropdown flag (hide without deleting)
+        supports_temperature INTEGER,   -- pass temperature only if 1
+        supports_seed INTEGER,          -- pass seed only if 1
+        is_reasoning INTEGER,           -- informational / UI
+        deleted INTEGER DEFAULT 0,      -- soft-delete flag
+        added_at TEXT,
+        notes TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS model_prices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        model TEXT,                     -- joins models.model
+        input_per_1m REAL,
+        output_per_1m REAL,
+        valid_from TEXT,                -- inclusive, YYYY-MM-DD
+        valid_to TEXT,                  -- exclusive; NULL = current open window
+        deleted INTEGER DEFAULT 0,      -- soft-delete flag
+        recorded_at TEXT
     )
     """,
 ]
@@ -186,6 +228,50 @@ def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _seed_models(conn: sqlite3.Connection) -> None:
+    """Offline-seed the baseline model registry from config.SEED_MODELS:
+    insert-if-empty one `models` row per model and one OPEN `model_prices` window
+    per model that has none. Deterministic and network-free — the live xAI string
+    correction is seed_models.py's job, run after migration.
+
+    The single window's valid_from is the earliest existing invocation's Eastern
+    date (so every already-logged invocation is covered and priced under the
+    unchanged seed prices, no unpriced regression), or today on an empty log. Note
+    this backdates ALL history to today's price — correct only because the rates
+    have not changed over the log's life; a differing past price would need real
+    historical windows (out of scope). ON CONFLICT(model) DO NOTHING and the
+    per-model price-existence guard make this idempotent: it never clobbers an
+    operator's later edits (a soft-deleted model stays deleted; no duplicate
+    window is added)."""
+    now = config.now_local_iso()
+    earliest = conn.execute(
+        "SELECT MIN(substr(generated_at, 1, 10)) AS d FROM llm_invocations"
+    ).fetchone()["d"]
+    valid_from = earliest if earliest else now[:10]
+    for m in config.SEED_MODELS:
+        conn.execute(
+            "INSERT INTO models (model, provider, enabled, supports_temperature, "
+            "supports_seed, is_reasoning, deleted, added_at, notes) "
+            "VALUES (:model, :provider, 1, :st, :ss, :ir, 0, :now, NULL) "
+            "ON CONFLICT(model) DO NOTHING",
+            {"model": m["model"], "provider": m["provider"],
+             "st": m["supports_temperature"], "ss": m["supports_seed"],
+             "ir": m["is_reasoning"], "now": now},
+        )
+        has_window = conn.execute(
+            "SELECT 1 FROM model_prices WHERE model = ? LIMIT 1", (m["model"],)
+        ).fetchone()
+        if has_window is None:
+            price = config.DEFAULT_PRICES[m["model"]]
+            conn.execute(
+                "INSERT INTO model_prices (model, input_per_1m, output_per_1m, "
+                "valid_from, valid_to, deleted, recorded_at) "
+                "VALUES (:model, :inp, :out, :vf, NULL, 0, :now)",
+                {"model": m["model"], "inp": price["input"],
+                 "out": price["output"], "vf": valid_from, "now": now},
+            )
+
+
 def init_db(db_path: str) -> None:
     """Create all tables if they do not exist and stamp the schema version.
 
@@ -194,7 +280,12 @@ def init_db(db_path: str) -> None:
     add a column), so it runs in an EXPLICIT transaction: add the column if
     missing, THEN stamp the version, then commit — so user_version is never ahead
     of the schema, and any interruption leaves a state the idempotent column check
-    heals on the next run."""
+    heals on the next run. v7 extends that block with two interpretations ADD
+    COLUMNs and the offline model seed, so columns + seed + stamp commit as one
+    unit; a partial v7 (new tables created but the block rolled back) re-runs
+    cleanly because every step is IF NOT EXISTS / column-guarded / insert-if-empty.
+    v8 adds interpretations.think the same guarded way and widens the seed gate to
+    current_version < 8 so an existing v7 DB gains the new Ollama model on re-init."""
     # SQLite will not create missing parent directories; ensure they exist.
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(db_path)
@@ -218,6 +309,27 @@ def init_db(db_path: str) -> None:
                 conn.execute(
                     "ALTER TABLE llm_invocations ADD COLUMN duration_ms INTEGER"
                 )
+            # v6 -> v7: add interpretations.temperature/seed. A fresh DB already has
+            # them from the CREATE above, so the guards skip the ALTERs.
+            interp_cols = _column_names(conn, "interpretations")
+            if "temperature" not in interp_cols:
+                conn.execute(
+                    "ALTER TABLE interpretations ADD COLUMN temperature REAL"
+                )
+            if "seed" not in interp_cols:
+                conn.execute("ALTER TABLE interpretations ADD COLUMN seed INTEGER")
+            # v7 -> v8: add interpretations.think. A fresh DB already has it from the
+            # CREATE above, so the guard skips the ALTER.
+            if "think" not in interp_cols:
+                conn.execute("ALTER TABLE interpretations ADD COLUMN think INTEGER")
+            # Offline-seed the baseline model registry, gated to current_version < 8
+            # so the v7->v8 migration re-runs the seed and an existing v7 DB picks up
+            # the new local Ollama model. Insert-if-empty (ON CONFLICT DO NOTHING):
+            # the four prior models are no-ops, soft-deleted rows conflict to a no-op
+            # (never resurrected), so re-running adds only genuinely-absent models.
+            # Inside this block so seed + columns + stamp are atomic.
+            if current_version < 8:
+                _seed_models(conn)
             # Stamp LAST, so the version is never ahead of the schema.
             if current_version != SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -327,24 +439,33 @@ def upsert_category(conn: sqlite3.Connection, record: dict, now: str) -> None:
 
 
 def upsert_interpretation(conn: sqlite3.Connection, run_date: str, scope: str,
-                          text: str, model: str, now: str) -> None:
+                          text: str, model: str, now: str,
+                          temperature: float | None = None,
+                          seed: int | None = None,
+                          think: int | None = None) -> None:
     """Insert or overwrite the single interpretation for (run_date, scope). On
-    conflict the text, model, and generated_at are replaced (re-running a lane
-    overwrites its summary). `model` is the canonical "provider:model" string.
-    Composite-PK shape, so the SQL is written inline rather than via
-    _build_upsert_sql (that helper is shaped for single-key tables). Does not
-    commit — the caller wraps it in `transaction`."""
+    conflict the text, model, generated_at, and the APPLIED temperature/seed/think
+    are replaced (re-running a lane overwrites its summary). `model` is the canonical
+    "provider:model" string; temperature/seed/think are the values that actually
+    governed the run (NULL when not applicable — e.g. Anthropic's seed, or think on a
+    model whose adapter does not honor it). Composite-PK shape, so the SQL is written
+    inline rather than via _build_upsert_sql (that helper is shaped for single-key
+    tables). Does not commit — the caller wraps it in `transaction`."""
     conn.execute(
         """
-        INSERT INTO interpretations (run_date, scope, text, model, generated_at)
-        VALUES (:run_date, :scope, :text, :model, :now)
+        INSERT INTO interpretations
+            (run_date, scope, text, model, generated_at, temperature, seed, think)
+        VALUES (:run_date, :scope, :text, :model, :now, :temperature, :seed, :think)
         ON CONFLICT(run_date, scope) DO UPDATE SET
             text = excluded.text,
             model = excluded.model,
-            generated_at = excluded.generated_at
+            generated_at = excluded.generated_at,
+            temperature = excluded.temperature,
+            seed = excluded.seed,
+            think = excluded.think
         """,
-        {"run_date": run_date, "scope": scope, "text": text,
-         "model": model, "now": now},
+        {"run_date": run_date, "scope": scope, "text": text, "model": model,
+         "now": now, "temperature": temperature, "seed": seed, "think": think},
     )
 
 
@@ -616,9 +737,12 @@ def fetch_interpretation(
     transaction (the pinned write order): the highest invocation id always matches
     the stored text. Do not reorder those writes, or this duration would belong to
     a different run than the displayed text. duration_ms is the LAST selected
-    column (appended), so name-indexed consumers are undisturbed."""
+    column (appended), so name-indexed consumers are undisturbed. The applied
+    temperature/seed/think are also selected for provenance display (NULL when not
+    applicable)."""
     return conn.execute(
         "SELECT i.run_date, i.scope, i.text, i.model, i.generated_at, "
+        "       i.temperature, i.seed, i.think, "
         "       (SELECT li.duration_ms FROM llm_invocations li "
         "        WHERE li.run_date = i.run_date AND li.scope = i.scope "
         "        ORDER BY li.id DESC LIMIT 1) AS duration_ms "
@@ -638,40 +762,270 @@ def fetch_latest_invocation(conn: sqlite3.Connection) -> sqlite3.Row | None:
     ).fetchone()
 
 
+# --- model registry readers -------------------------------------------------
+# Two read disciplines on the same tables, NEVER sharing a WHERE clause:
+# forward-use (fetch_dropdown_models, fetch_model gating left to callers) HONORS
+# enabled/deleted; pricing (fetch_effective_price, fetch_spend) IGNORES them.
+
+def fetch_dropdown_models(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """The models offered in the generate dropdown: enabled, not soft-deleted, and
+    carrying a current price (an OPEN, non-deleted model_prices window). Forward-use
+    discipline — UNLIKE spend, this honors enabled/deleted so a hidden model is
+    never offered. Ordered by model for a stable dropdown."""
+    return conn.execute(
+        "SELECT m.* FROM models m "
+        "WHERE m.enabled = 1 AND m.deleted = 0 "
+        "AND EXISTS (SELECT 1 FROM model_prices p "
+        "            WHERE p.model = m.model AND p.valid_to IS NULL "
+        "            AND p.deleted = 0) "
+        "ORDER BY m.model"
+    ).fetchall()
+
+
+def fetch_model(conn: sqlite3.Connection, model: str) -> sqlite3.Row | None:
+    """All attributes of one model (capability flags, provider, ...) or None. A
+    plain read that IGNORES enabled/deleted: the generation/capability paths want
+    the row regardless of flags, and forward-use gating lives in
+    fetch_dropdown_models, not here."""
+    return conn.execute(
+        "SELECT * FROM models WHERE model = ?", (model,)
+    ).fetchone()
+
+
+def fetch_effective_price(
+    conn: sqlite3.Connection, model: str, on_date: str
+) -> sqlite3.Row | None:
+    """The model_prices window covering `on_date` (an Eastern YYYY-MM-DD date) for
+    `model`, or None when no window covers it.
+
+    THE shared window predicate — the half-open interval
+    `valid_from <= on_date AND (valid_to IS NULL OR on_date < valid_to)` — that the
+    fetch_spend JOIN replicates and must match exactly (a predicate-agreement test
+    guards the two against drift). IGNORES `deleted`: backward pricing prices an
+    invocation against whatever window covered its date, deleted or not. On the
+    non-overlapping windows the design guarantees, at most one matches; if data ever
+    overlaps, the latest valid_from wins here (deterministic), while the JOIN would
+    double-count — that asymmetry is itself covered by the overlap-canary test."""
+    return conn.execute(
+        "SELECT * FROM model_prices "
+        "WHERE model = ? AND valid_from <= ? "
+        "AND (valid_to IS NULL OR ? < valid_to) "
+        "ORDER BY valid_from DESC LIMIT 1",
+        (model, on_date, on_date),
+    ).fetchone()
+
+
+# --- model registry editor writes/reads (Phase 2) ---------------------------
+# House style: named-param dicts, NO commit (caller wraps in transaction), return
+# rowcount / new id, booleans coerced to explicit 1/0, timestamps passed in.
+
+def fetch_models(
+    conn: sqlite3.Connection, *, include_deleted: bool = False
+) -> list[sqlite3.Row]:
+    """Every model row for the editor (all columns), ordered by model. UNLIKE
+    fetch_dropdown_models this does NOT require a current price and optionally
+    surfaces soft-deleted rows (the show-deleted toggle). Read-only."""
+    where = "" if include_deleted else "WHERE deleted = 0"
+    return conn.execute(
+        f"SELECT * FROM models {where} ORDER BY model"
+    ).fetchall()
+
+
+def insert_model(conn: sqlite3.Connection, *, model: str, provider: str,
+                 enabled: bool, supports_temperature: bool, supports_seed: bool,
+                 is_reasoning: bool, notes, now: str) -> int:
+    """Insert a new model (insert-if-absent). ON CONFLICT(model) DO NOTHING, so a
+    duplicate PK returns rowcount 0 (the endpoint maps that to 409) and never
+    overwrites. Booleans coerced to 1/0; added_at = now. Does not commit."""
+    cur = conn.execute(
+        """
+        INSERT INTO models (model, provider, enabled, supports_temperature,
+                            supports_seed, is_reasoning, deleted, added_at, notes)
+        VALUES (:model, :provider, :enabled, :st, :ss, :ir, 0, :now, :notes)
+        ON CONFLICT(model) DO NOTHING
+        """,
+        {"model": model, "provider": provider, "enabled": 1 if enabled else 0,
+         "st": 1 if supports_temperature else 0, "ss": 1 if supports_seed else 0,
+         "ir": 1 if is_reasoning else 0, "now": now, "notes": notes},
+    )
+    return cur.rowcount
+
+
+def update_model(conn: sqlite3.Connection, *, model: str, enabled: bool,
+                 supports_temperature: bool, supports_seed: bool,
+                 is_reasoning: bool, notes) -> int:
+    """Update the five mutable columns of one model. NEVER sets `model` (the PK is
+    taken only from the path and is immutable). Booleans coerced to 1/0. Returns
+    rowcount (0 = unknown model). Does not commit."""
+    cur = conn.execute(
+        """
+        UPDATE models SET enabled = :enabled,
+                          supports_temperature = :st,
+                          supports_seed = :ss,
+                          is_reasoning = :ir,
+                          notes = :notes
+        WHERE model = :model
+        """,
+        {"model": model, "enabled": 1 if enabled else 0,
+         "st": 1 if supports_temperature else 0, "ss": 1 if supports_seed else 0,
+         "ir": 1 if is_reasoning else 0, "notes": notes},
+    )
+    return cur.rowcount
+
+
+def set_model_deleted(conn: sqlite3.Connection, *, model: str,
+                      deleted: bool) -> int:
+    """Flip a model's soft-delete flag (hides it from the dropdown; spend still
+    prices its history). Returns rowcount (0 = unknown model). Does not commit."""
+    cur = conn.execute(
+        "UPDATE models SET deleted = :deleted WHERE model = :model",
+        {"model": model, "deleted": 1 if deleted else 0},
+    )
+    return cur.rowcount
+
+
+def fetch_prices(conn: sqlite3.Connection, model: str, *,
+                 include_deleted: bool = False) -> list[sqlite3.Row]:
+    """All price windows for one model, ordered by valid_from. Optionally surfaces
+    soft-deleted windows (the show-deleted toggle). Read-only."""
+    clause = "" if include_deleted else "AND deleted = 0"
+    return conn.execute(
+        f"SELECT * FROM model_prices WHERE model = ? {clause} ORDER BY valid_from",
+        (model,),
+    ).fetchall()
+
+
+def latest_price_window(
+    conn: sqlite3.Connection, model: str
+) -> sqlite3.Row | None:
+    """The window with the greatest valid_from for `model`, across ALL windows
+    INCLUDING soft-deleted ones — the deleted-agnostic overlap guard. Because spend
+    ignores `deleted`, a soft-deleted-but-open window still prices future spend, so
+    add-price must guard (and auto-close) against it too. Read-only."""
+    return conn.execute(
+        "SELECT * FROM model_prices WHERE model = ? "
+        "ORDER BY valid_from DESC LIMIT 1",
+        (model,),
+    ).fetchone()
+
+
+def insert_price_window(conn: sqlite3.Connection, *, model: str,
+                        input_per_1m: float, output_per_1m: float,
+                        valid_from: str, now: str) -> int:
+    """Auto-close EVERY open window for `model` (deleted or not) at `valid_from`,
+    then insert the new open window. Deleted-agnostic close is load-bearing: a
+    soft-deleted-but-open window left open would overlap the new one and the spend
+    JOIN would double-count (spend ignores deleted). Returns the new row id. SQL
+    only — the endpoint owns validation (date shape, non-negative, the
+    valid_from > latest.valid_from overlap guard). Does not commit."""
+    conn.execute(
+        "UPDATE model_prices SET valid_to = :valid_from "
+        "WHERE model = :model AND valid_to IS NULL",
+        {"model": model, "valid_from": valid_from},
+    )
+    cur = conn.execute(
+        """
+        INSERT INTO model_prices (model, input_per_1m, output_per_1m,
+                                  valid_from, valid_to, deleted, recorded_at)
+        VALUES (:model, :inp, :out, :valid_from, NULL, 0, :now)
+        """,
+        {"model": model, "inp": input_per_1m, "out": output_per_1m,
+         "valid_from": valid_from, "now": now},
+    )
+    return cur.lastrowid
+
+
+def set_price_deleted(conn: sqlite3.Connection, *, price_id: int,
+                      deleted: bool) -> int:
+    """Flip a price window's soft-delete flag (the ONLY write allowed to touch an
+    existing price row besides the auto-close). Spend ignores the flag, so this
+    only affects the dropdown's current-price check and the editor view. Returns
+    rowcount (0 = unknown id). Does not commit."""
+    cur = conn.execute(
+        "UPDATE model_prices SET deleted = :deleted WHERE id = :price_id",
+        {"price_id": price_id, "deleted": 1 if deleted else 0},
+    )
+    return cur.rowcount
+
+
+def count_invocations_for_model(conn: sqlite3.Connection, model: str) -> int:
+    """How many llm_invocations reference `model` — the delete-warning count for a
+    model. Read-only."""
+    return conn.execute(
+        "SELECT COUNT(*) AS c FROM llm_invocations WHERE model = ?", (model,)
+    ).fetchone()["c"]
+
+
+def count_invocations_in_window(conn: sqlite3.Connection, model: str,
+                                valid_from: str, valid_to: str | None) -> int:
+    """How many of `model`'s invocations fall in [valid_from, valid_to) by Eastern
+    date — the delete-warning count for a price window. Uses THE shared half-open
+    predicate (valid_to NULL = open) on substr(generated_at,1,10) so the warning
+    matches what fetch_spend actually prices. Read-only."""
+    return conn.execute(
+        "SELECT COUNT(*) AS c FROM llm_invocations "
+        "WHERE model = :model AND :valid_from <= substr(generated_at, 1, 10) "
+        "AND (:valid_to IS NULL OR substr(generated_at, 1, 10) < :valid_to)",
+        {"model": model, "valid_from": valid_from, "valid_to": valid_to},
+    ).fetchone()["c"]
+
+
 def fetch_spend(
     conn: sqlite3.Connection, *, run_date: str | None = None,
     month_prefix: str | None = None,
 ) -> list[sqlite3.Row]:
-    """Per-model token totals from llm_invocations, optionally scoped to one
-    run_date and/or one Eastern calendar month. Returns one row per model with
-    summed input/output tokens and the invocation COUNT, ordered by model.
+    """Per-model token totals AND dollar cost from llm_invocations, optionally scoped
+    to one run_date and/or one Eastern calendar month. One row per model: summed
+    input/output tokens, the invocation COUNT, the summed `cost` (priced per
+    invocation against its effective price window), and `unpriced_invocations` (rows
+    no window covered). Ordered by model.
 
-    Tokens only — dollar cost is computed at DISPLAY from config.PRICES and never
-    stored, so it is not this reader's job. COALESCE(...,0) so a row with a NULL
-    token count contributes 0 rather than nulling the whole SUM.
+    Pricing is per-invocation then summed: each row LEFT JOINs the model_prices
+    window covering its generated_at Eastern date via THE shared half-open predicate
+    `valid_from <= D AND (valid_to IS NULL OR D < valid_to)`, D =
+    substr(generated_at,1,10) — the same predicate fetch_effective_price uses (a
+    predicate-agreement test guards the two against drift). The JOIN IGNORES
+    deleted/enabled on both tables: backward pricing prices any invocation against
+    whatever window covered its date, deleted or not. A row no window covers gets a
+    NULL price term, so SUM skips its cost (excluded from the total, the display
+    'unavailable' path) and unpriced_invocations counts it.
 
+    Correctness ASSUMES non-overlapping windows (Phase 1 seeds one open window per
+    model; Phase 2's add-price auto-closes the prior). If windows ever overlap, a
+    row matches more than one and its tokens AND cost are DOUBLE-counted here — an
+    overlap-canary test documents that consequence. PERFORMANCE: substr() on the
+    joined column is non-sargable, so this is a full scan of llm_invocations per
+    spend call with no usable index — fine at today's volume, noted for a future
+    100k-row self.
+
+    COALESCE(...,0) so a NULL token count contributes 0 rather than nulling a SUM.
     The two filters use deliberately DIFFERENT time keys (do not collapse them):
-    `run_date` is the pipeline run a generation summarized; `month_prefix` is the
-    Eastern calendar month (YYYY-MM) the spend was actually incurred in. A run
-    re-interpreted today counts under its old run_date AND under this month.
-    `month_prefix` matches substr(generated_at, 1, 7): generated_at is written via
-    now_local_iso() (Eastern, LOCAL_TZ), so its YYYY-MM prefix IS the Eastern
-    month. This is an equality on a derived local-month key, never a lexical
-    ordering of timestamps across offsets."""
+    `run_date` is the pipeline run a generation summarized; `month_prefix` matches
+    substr(generated_at, 1, 7), the Eastern calendar month spend was incurred in
+    (generated_at is Eastern via now_local_iso, so its YYYY-MM prefix IS that month —
+    an equality on a derived local-month key, never a cross-offset lexical compare)."""
     clauses, params = [], []
     if run_date is not None:
-        clauses.append("run_date = ?")
+        clauses.append("i.run_date = ?")
         params.append(run_date)
     if month_prefix is not None:
-        clauses.append("substr(generated_at, 1, 7) = ?")
+        clauses.append("substr(i.generated_at, 1, 7) = ?")
         params.append(month_prefix)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     return conn.execute(
-        "SELECT model, "
-        "SUM(COALESCE(input_tokens, 0))  AS input_tokens, "
-        "SUM(COALESCE(output_tokens, 0)) AS output_tokens, "
-        "COUNT(*) AS invocations "
-        f"FROM llm_invocations {where} GROUP BY model ORDER BY model",
+        "SELECT i.model AS model, "
+        "SUM(COALESCE(i.input_tokens, 0))  AS input_tokens, "
+        "SUM(COALESCE(i.output_tokens, 0)) AS output_tokens, "
+        "COUNT(*) AS invocations, "
+        "SUM(COALESCE(i.input_tokens, 0)  / 1000000.0 * p.input_per_1m "
+        "  + COALESCE(i.output_tokens, 0) / 1000000.0 * p.output_per_1m) AS cost, "
+        "SUM(CASE WHEN p.id IS NULL THEN 1 ELSE 0 END) AS unpriced_invocations "
+        "FROM llm_invocations i "
+        "LEFT JOIN model_prices p "
+        "       ON p.model = i.model "
+        "      AND p.valid_from <= substr(i.generated_at, 1, 10) "
+        "      AND (p.valid_to IS NULL OR substr(i.generated_at, 1, 10) < p.valid_to) "
+        f"{where} GROUP BY i.model ORDER BY i.model",
         params,
     ).fetchall()
 

@@ -25,7 +25,7 @@ import time
 
 import db
 from config import DB_PATH, ConfigError, VALID_BUCKETS, now_local_iso, validate_config
-from llm import generate
+from llm import generate, LLMError
 
 # Lane order matches compute_rankings keys: "overall" plus VALID_BUCKETS. Derived
 # from the single source of truth (config.VALID_BUCKETS) so adding a bucket does not
@@ -186,26 +186,42 @@ def build_prompt(run_date: str, scope: str, rows: list, fields=None) -> str:
 
 
 def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
-                    temperature: float, seed, filter=None, fields=None) -> dict:
+                    temperature: float, seed, think=None, filter=None,
+                    fields=None) -> dict:
     """Synthesize one lane: fetch it, and if non-empty call generate() then
     persist. An empty lane skips the LLM call and writes no rows.
 
-    `model` is the canonical "provider:model" string, passed straight to
-    generate(). `fields` selects which per-video signals the prompt carries
-    (normalized in build_prompt; None → the default set). Network happens BEFORE
-    the transaction opens. The two writes run in ONE transaction in the pinned
-    order (log_invocation, then upsert_interpretation), wrapped in run_with_db_retry
-    for the dashboard-lock case."""
+    `model` is the canonical "provider:model" string. Its capability flags
+    (supports_temperature / supports_seed / is_reasoning) are read from the `models`
+    table here — the one place holding a connection — and threaded into generate(),
+    keeping llm.py DB-free. An unregistered model raises LLMError (the dashboard turns
+    it into a clean 400), since its capabilities are unknown. `think` is the per-run
+    reasoning toggle; generate() forwards it only for a reasoning-capable model on a
+    think-honoring provider, otherwise the applied value (result.think_applied) is
+    None. `fields` selects which per-video signals the prompt carries (normalized in
+    build_prompt; None → the default set). Network happens BEFORE the transaction
+    opens. The two writes run in ONE transaction in the pinned order (log_invocation,
+    then upsert_interpretation), wrapped in run_with_db_retry for the lock case."""
     rows = db.fetch_lane(conn, run_date, scope)
     if not rows:
         return {"scope": scope, "skipped": True}
+
+    model_row = db.fetch_model(conn, model)
+    if model_row is None:
+        raise LLMError(
+            f"model {model!r} is not in the registry; add it on the /models page"
+        )
 
     prompt = build_prompt(run_date, scope, rows, fields)
     # Time the network call: this is the generator "run time" we persist and show.
     # monotonic() is immune to wall-clock adjustments. The DB write below is trivial
     # and deliberately excluded so the figure reflects the model, not SQLite.
     start = time.monotonic()
-    result = generate(model, prompt, temperature=temperature, seed=seed)
+    result = generate(model, prompt, temperature=temperature, seed=seed,
+                      supports_temperature=bool(model_row["supports_temperature"]),
+                      supports_seed=bool(model_row["supports_seed"]),
+                      think=think,
+                      is_reasoning=bool(model_row["is_reasoning"]))
     duration_ms = int((time.monotonic() - start) * 1000)
     now = now_local_iso()
 
@@ -214,8 +230,14 @@ def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
             db.log_invocation(conn, run_date, scope, model, temperature,
                               result.seed_applied, filter, result.input_tokens,
                               result.output_tokens, now, duration_ms=duration_ms)
+            # Persist the APPLIED parameters: the requested temperature, the seed that
+            # actually governed (result.seed_applied), and the applied think value
+            # (result.think_applied — NULL when think did not apply, 0/1 when it did),
+            # mirroring what log_invocation records.
             db.upsert_interpretation(conn, run_date, scope, result.text, model,
-                                     now)
+                                     now, temperature=temperature,
+                                     seed=result.seed_applied,
+                                     think=result.think_applied)
 
     db.run_with_db_retry(_write)
 
@@ -226,6 +248,8 @@ def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
         "input_tokens": result.input_tokens,
         "output_tokens": result.output_tokens,
         "seed_applied": result.seed_applied,
+        "think_applied": result.think_applied,
+        "thinking": result.thinking,
         "duration_ms": duration_ms,
     }
 

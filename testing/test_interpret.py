@@ -59,14 +59,22 @@ def _make_fake_generate(rec, *, text="One. Two. Three.", input_tokens=120,
     """A stand-in for llm.generate that records its call and returns a real
     GenerateResult. seed_applied="echo" returns the seed it was passed (a
     seed-honoring provider); pass an explicit value (e.g. None) to model a
-    provider that drops the seed."""
-    def fake(model, prompt, *, temperature, seed):
+    provider that drops the seed. `think`/`is_reasoning` are recorded; the applied
+    think mirrors the adapter contract (None when think did not apply, else int)."""
+    def fake(model, prompt, *, temperature, seed, supports_temperature=None,
+             supports_seed=None, think=None, is_reasoning=False):
         rec.append({"model": model, "prompt": prompt,
-                    "temperature": temperature, "seed": seed})
+                    "temperature": temperature, "seed": seed,
+                    "supports_temperature": supports_temperature,
+                    "supports_seed": supports_seed,
+                    "think": think, "is_reasoning": is_reasoning})
         applied = seed if seed_applied == "echo" else seed_applied
+        think_applied = None if think is None else int(think)
+        thinking = "[reasoning]" if think else None
         return llm.GenerateResult(text=text, input_tokens=input_tokens,
                                   output_tokens=output_tokens,
-                                  seed_applied=applied)
+                                  seed_applied=applied, thinking=thinking,
+                                  think_applied=think_applied)
     return fake
 
 
@@ -186,11 +194,14 @@ def test_synthesize_lane_writes_interpretation_and_logs(conn, monkeypatch):
     assert rec[0]["model"] == "openai:gpt-5.4-nano"
 
     interp = conn.execute(
-        "SELECT scope, text, model FROM interpretations"
+        "SELECT scope, text, model, temperature, seed FROM interpretations"
     ).fetchall()
     assert len(interp) == 1
     assert interp[0]["model"] == "openai:gpt-5.4-nano"
     assert interp[0]["text"] == "A summary."
+    # The applied parameters are persisted on the interpretation row too.
+    assert interp[0]["temperature"] == 0.7
+    assert interp[0]["seed"] == 42
 
     inv = conn.execute(
         "SELECT model, temperature, seed, filter, input_tokens, "
@@ -219,6 +230,49 @@ def test_synthesize_lane_logs_seed_applied_not_user_seed(conn, monkeypatch):
                               temperature=0.5, seed=42)
     seed = conn.execute("SELECT seed FROM llm_invocations").fetchone()["seed"]
     assert seed is None
+
+
+def test_synthesize_lane_persists_applied_think(conn, monkeypatch):
+    # The applied think (result.think_applied) is what gets persisted to
+    # interpretations.think, threaded through the same way as seed. think on -> 1,
+    # off -> 0 (NOT NULL), and a model where think did not apply -> NULL. The fresh
+    # result also carries the transient thinking content for immediate display.
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate([]))
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+
+    def run(think):
+        interpret.synthesize_lane(conn, "2026-06-09", "overall",
+                                  "ollama:qwen3.5:9b", temperature=0.5, seed=7,
+                                  think=think)
+        return conn.execute(
+            "SELECT think FROM interpretations WHERE scope = 'overall'"
+        ).fetchone()["think"]
+
+    assert run(True) == 1
+    assert run(False) == 0          # honored-off persists 0, never NULL
+    assert run(None) is None        # not applicable persists NULL
+
+    # The fresh result dict exposes the (transient) thinking content for display.
+    result = interpret.synthesize_lane(conn, "2026-06-09", "overall",
+                                       "ollama:qwen3.5:9b", temperature=0.5,
+                                       seed=7, think=True)
+    assert result["thinking"] == "[reasoning]"
+    assert result["think_applied"] == 1
+
+
+def test_synthesize_lane_passes_is_reasoning_to_generate(conn, monkeypatch):
+    # synthesize_lane reads is_reasoning from the model row and threads it into
+    # generate() (the gate for think), keeping llm.py DB-free.
+    rec = []
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate(rec))
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    interpret.synthesize_lane(conn, "2026-06-09", "overall", "ollama:qwen3.5:9b",
+                              temperature=0.5, seed=7, think=True)
+    # ollama:qwen3.5:9b is seeded is_reasoning=1.
+    assert rec[0]["is_reasoning"] is True
+    assert rec[0]["think"] is True
 
 
 def test_synthesize_lane_empty_skips_llm_and_writes_nothing(conn, monkeypatch):

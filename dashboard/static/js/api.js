@@ -142,14 +142,87 @@ export function getInterpretDefaults() {
 
 // Trigger synthesis for one lane (run_date, scope=lane) with the chosen model +
 // parameters. Resolves to {scope, skipped, ...} — on success also text, tokens,
-// seed_applied, model; on an empty lane just {scope, skipped:true}.
-export function runInterpret({ runDate, scope, model, temperature, seed, fields }) {
+// seed_applied, think_applied, thinking, model; on an empty lane just
+// {scope, skipped:true}. `think` is true/false for an honoring model, or null when
+// the toggle did not apply (the server normalizes either way).
+export function runInterpret({ runDate, scope, model, temperature, seed, think, fields }) {
   return postJSON("/api/interpret", {
     run_date: runDate,
     scope,
     model,
     temperature,
     seed,
+    think,
     fields,
   });
+}
+
+// --- Phase 5: the /models registry editor -----------------------------------
+// model strings carry ':' and '.', so every path segment is encodeURIComponent'd.
+// Writes go through postJSON/putJSON so a server `detail` (e.g. "valid_from must be
+// after ...") surfaces inline. Delete/restore are bodyless POSTs.
+
+const seg = encodeURIComponent;
+
+export function getModels(includeDeleted = false) {
+  const qs = includeDeleted ? "?include_deleted=true" : "";
+  return getJSON(`/api/models${qs}`);
+}
+
+export function insertModel(body) {
+  return postJSON("/api/models", body);
+}
+
+export function updateModel(model, body) {
+  return putJSON(`/api/models/${seg(model)}`, body);
+}
+
+export function deleteModel(model) {
+  return postJSON(`/api/models/${seg(model)}/delete`, {});
+}
+
+export function restoreModel(model) {
+  return postJSON(`/api/models/${seg(model)}/restore`, {});
+}
+
+export function getModelInvocationCount(model) {
+  return getJSON(`/api/models/${seg(model)}/invocation-count`);
+}
+
+export function getPrices(model, includeDeleted = false) {
+  const qs = includeDeleted ? "?include_deleted=true" : "";
+  return getJSON(`/api/models/${seg(model)}/prices${qs}`);
+}
+
+export function insertPrice(model, body) {
+  return postJSON(`/api/models/${seg(model)}/prices`, body);
+}
+
+export function deletePrice(priceId) {
+  return postJSON(`/api/prices/${priceId}/delete`, {});
+}
+
+export function restorePrice(priceId) {
+  return postJSON(`/api/prices/${priceId}/restore`, {});
+}
+
+export function getPriceInvocationCount(priceId) {
+  return getJSON(`/api/prices/${priceId}/invocation-count`);
+}
+
+// --- Documentation page: filesystem-discovered docs -------------------------
+// The registry (tabs + documents) and a raw document fetch. Documents are parsed
+// client-side by the per-format adapters, so the raw fetch returns text/bytes.
+
+export function getDocumentationRegistry() {
+  return getJSON("/api/documentation");
+}
+
+export async function getDocumentRaw(tabId, docId) {
+  const qs = buildQuery({ tab: tabId, doc: docId }, null);
+  const resp = await fetch(`/api/documentation/raw?${qs}`);
+  if (!resp.ok) {
+    throw new Error(`${resp.status} ${resp.statusText}`);
+  }
+  return resp.text();
 }

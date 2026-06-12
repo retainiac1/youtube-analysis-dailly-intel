@@ -22,6 +22,13 @@ DEFAULT_SHORT_MAX_SECONDS = 180
 DEFAULT_SEARCH_RELEVANCE_LANGUAGE = "en"
 DEFAULT_DAILY_QUOTA_LIMIT = 10000
 DEFAULT_SAFETY_BUFFER = 500
+# Local Ollama HTTP endpoint the adapter calls. Loopback only (never 0.0.0.0): the
+# model server is a local single-user process. No URL literal lives in the adapter.
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+# Per-request timeout (seconds) for the Ollama call. Generous because a local
+# thinking run can take many seconds; bounded so a not-running/hung server surfaces
+# a clean error instead of hanging the request forever.
+DEFAULT_OLLAMA_TIMEOUT_SECONDS = 600
 # ISO-3166 region whose category titles seed the `categories` table. Category IDs
 # are effectively global, so any English region yields the same titles.
 DEFAULT_CATEGORY_REGION = "US"
@@ -40,16 +47,46 @@ DEFAULT_SEARCH_QUERIES = [
     {"q": "sleep routine", "bucket": "health"},
 ]
 
-# Display-time cost map for the interpretation generator, keyed by the canonical
-# "provider:model" string. Each value is USD per 1M tokens. Estimates only (no
-# provider returns dollar cost, and stored figures rot when prices change); used
-# at display time to label spend an estimate. Verified 2026-06-09; will drift.
+# SEED literal for the model_prices table, keyed by the canonical "provider:model"
+# string; each value is USD per 1M tokens. As of v7 this is NO LONGER read at
+# display time — db.init_db's offline seed copies these into model_prices, and spend
+# prices each invocation against its effective window there. Kept here only as the
+# seed source (consumed by _seed_models / seed_models.py) and validate_config's
+# subject. Verified 2026-06-09; the DB windows are now the live source of truth.
 DEFAULT_PRICES = {
     "anthropic:claude-haiku-4-5": {"input": 1.00, "output": 5.00},
     "openai:gpt-5.4-nano": {"input": 0.20, "output": 1.25},
     "xai:grok-4-fast": {"input": 0.20, "output": 0.50},
     "google:gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
+    # Local Ollama inference is free: a $0/$0 window so spend prices it to exactly 0.
+    "ollama:qwen3.5:9b": {"input": 0.0, "output": 0.0},
 }
+
+# The baseline model registry that db.init_db offline-seeds into the `models`
+# table (insert-if-empty) so a freshly-migrated DB is never broken: a populated
+# dropdown, working validation, priceable spend. The capability flags are captured
+# here as DATA — the one-time snapshot of the old name-pattern logic that the
+# tables replace: Anthropic's Messages API has no seed (supports_seed=0); the
+# gpt-5 reasoning model rejects a non-default temperature (supports_temperature=0)
+# and is flagged is_reasoning; xAI and Gemini honor both. Prices are NOT duplicated
+# here — the seed reads them from DEFAULT_PRICES so prices keep one home. The xAI
+# string is the retired `grok-4-fast`; seed_models.py live-corrects it post-migrate.
+SEED_MODELS = [
+    {"model": "anthropic:claude-haiku-4-5", "provider": "anthropic",
+     "supports_temperature": 1, "supports_seed": 0, "is_reasoning": 0},
+    {"model": "openai:gpt-5.4-nano", "provider": "openai",
+     "supports_temperature": 0, "supports_seed": 1, "is_reasoning": 1},
+    {"model": "xai:grok-4-fast", "provider": "xai",
+     "supports_temperature": 1, "supports_seed": 1, "is_reasoning": 0},
+    {"model": "google:gemini-2.5-flash-lite", "provider": "google",
+     "supports_temperature": 1, "supports_seed": 1, "is_reasoning": 0},
+    # Local Ollama thinking model. Phase 0/Step 0 verified live: temperature and
+    # seed are honored (seed proven byte-identical on a high-entropy run), and the
+    # model advertises a `thinking` capability (is_reasoning=1 drives the per-run
+    # think toggle). Provider `ollama` honors think; see llm.THINK_PROVIDERS.
+    {"model": "ollama:qwen3.5:9b", "provider": "ollama",
+     "supports_temperature": 1, "supports_seed": 1, "is_reasoning": 1},
+]
 
 # Colors, thresholds, and donut radii for the dashboard's LLM-spend visual (the
 # spend-share donut + token/cost leaderboard). Kept here, not hardcoded in JS/CSS,
@@ -89,6 +126,8 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "SEARCH_RELEVANCE_LANGUAGE": DEFAULT_SEARCH_RELEVANCE_LANGUAGE,
     "DAILY_QUOTA_LIMIT": DEFAULT_DAILY_QUOTA_LIMIT,
     "SAFETY_BUFFER": DEFAULT_SAFETY_BUFFER,
+    "OLLAMA_BASE_URL": DEFAULT_OLLAMA_BASE_URL,
+    "OLLAMA_TIMEOUT_SECONDS": DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     "CATEGORY_REGION": DEFAULT_CATEGORY_REGION,
     "SEARCH_QUERIES": DEFAULT_SEARCH_QUERIES,
     "PRICES": DEFAULT_PRICES,
@@ -130,6 +169,8 @@ SHORT_MAX_SECONDS = _settings["SHORT_MAX_SECONDS"]
 SEARCH_RELEVANCE_LANGUAGE = _settings["SEARCH_RELEVANCE_LANGUAGE"]
 DAILY_QUOTA_LIMIT = _settings["DAILY_QUOTA_LIMIT"]
 SAFETY_BUFFER = _settings["SAFETY_BUFFER"]
+OLLAMA_BASE_URL = _settings["OLLAMA_BASE_URL"]
+OLLAMA_TIMEOUT_SECONDS = _settings["OLLAMA_TIMEOUT_SECONDS"]
 CATEGORY_REGION = _settings["CATEGORY_REGION"]
 SEARCH_QUERIES = _settings["SEARCH_QUERIES"]
 PRICES = _settings["PRICES"]
@@ -143,6 +184,12 @@ PUBLISHED_BEFORE = None
 # intentionally not wired into swipefile.py yet.
 DB_PATH = "data/database/swipefile.db"
 QUOTA_RESET_TZ = "America/Los_Angeles"
+
+# Root folder for the dashboard Documentation page. Its immediate subfolders are
+# tabs and the supported files inside them are documents (see dashboard/discovery.py).
+# Resolved against the repo root like DB_PATH. This is the ONLY hardcoded value of
+# that feature; tab names, document names, order, and counts are all discovered.
+PUBLISH_ROOT = "docs/publish"
 
 # All stored DB timestamps are Eastern, ISO-8601 with offset (never UTC, never
 # naive) — see now_local_iso(). The YouTube API param in get_published_after()
@@ -264,6 +311,8 @@ REQUIRED_KEYS: dict[str, type] = {
     "SHORT_MAX_SECONDS": int,
     "SEARCH_RELEVANCE_LANGUAGE": str,
     "CATEGORY_REGION": str,
+    "OLLAMA_BASE_URL": str,
+    "OLLAMA_TIMEOUT_SECONDS": int,
     "SEARCH_QUERIES": list,
     "PRICES": dict,
 }
@@ -271,7 +320,7 @@ REQUIRED_KEYS: dict[str, type] = {
 # Keys that must be strictly positive ints (type is checked via REQUIRED_KEYS).
 POSITIVE_INT_KEYS: frozenset[str] = frozenset(
     {"MIN_VIEWS", "WINDOW_DAYS", "TOP_N", "SHORT_MAX_SECONDS",
-     "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER"}
+     "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER", "OLLAMA_TIMEOUT_SECONDS"}
 )
 
 
@@ -356,6 +405,11 @@ def validate_config(cfg: object | None = None) -> None:
     # would silently break the fetch, so reject it even though it types as str.
     if not getattr(cfg, "CATEGORY_REGION").strip():
         raise ConfigError("Config key CATEGORY_REGION must be a non-empty string")
+
+    # OLLAMA_BASE_URL is the local model endpoint; an empty string would make the
+    # adapter build a malformed request, so reject it even though it types as str.
+    if not getattr(cfg, "OLLAMA_BASE_URL").strip():
+        raise ConfigError("Config key OLLAMA_BASE_URL must be a non-empty string")
 
     queries = getattr(cfg, "SEARCH_QUERIES")
     if not queries:

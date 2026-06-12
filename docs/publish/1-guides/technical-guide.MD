@@ -3,9 +3,9 @@
 A single onboarding + support reference for the daily-intel system. It has two
 halves:
 
-- **Reference** (§1–§4) — *how does it work?* Data model, YouTube API, the
+- **Reference** (sections 2–5) — *how does it work?* Data model, YouTube API, the
   LLM/spend layer, and a code map.
-- **Support runbook** (§5–§9) — *how do I run, operate, and fix it?* Setup,
+- **Support runbook** (sections 6–10) — *how do I run, operate, and fix it?* Setup,
   configuration & secrets, operations, troubleshooting, and the load-bearing
   invariants.
 
@@ -18,7 +18,7 @@ schema **v7**.
 
 ---
 
-## 0. Overview & orientation
+## 1. Overview & orientation
 
 daily-intel is a YouTube Shorts discovery-and-ranking pipeline plus a read-only
 dashboard. A CLI pipeline (`swipefile.py`) searches the YouTube Data API for
@@ -48,11 +48,11 @@ flowchart LR
 
 > **Data safety first.** `swipefile.db` holds hand-entered, irreplaceable columns
 > (notes, stars, hooks). It runs in WAL mode, so **never** back it up with a bare
-> `cp` of the `.db` file. See `../CLAUDE.md` and §7.
+> `cp` of the `.db` file. See `../CLAUDE.md` and section 8.
 
 ---
 
-## 1. The data model
+## 2. The data model
 
 The schema is defined once in `SCHEMA_STATEMENTS` (`db.py:34-192`) and applied by
 `init_db()` (`db.py:267-325`). Connections are opened by `get_connection()`
@@ -179,11 +179,11 @@ calling out:
    `llm_invocations.duration_ms`; v7 `interpretations.temperature`/`seed`) and the
    v7 offline model seed run inside one explicit `BEGIN…COMMIT` so the schema and
    the version stamp move atomically — the stamp is written **last**
-   (`db.py:294-320`). See §10 for the full version history.
+   (`db.py:294-320`). See section 11 for the full version history.
 
 ---
 
-## 2. YouTube API implementation
+## 3. YouTube API implementation
 
 All API code is in `swipefile.py`. The client is built by `build_youtube_client()`
 (`swipefile.py:65-66`): `build("youtube", "v3", developerKey=api_key)`.
@@ -241,7 +241,7 @@ perturb the drop counts.
 spent today, Pacific), `cap = DAILY_QUOTA_LIMIT - SAFETY_BUFFER`, `run_units`,
 `flushed_units`. `api_call_with_retry` (`swipefile.py:548-592`) checks
 `can_afford` **before** each call (a proactive guard), then handles errors (see
-§8). The expensive 100-unit `search.list` charge is **flushed eagerly** to
+section 9). The expensive 100-unit `search.list` charge is **flushed eagerly** to
 `quota_ledger` in its own committed transaction so a crash can't lose it
 (`add_quota_units`, `db.py:634+`); cheaper calls are flushed once at run end
 (`swipefile.py:1308-1315`).
@@ -273,11 +273,11 @@ Tunables that shape discovery (all in `settings.toml` unless noted): `MIN_VIEWS`
 `WINDOW_DAYS`, `SHORT_MAX_SECONDS`, `SEARCH_RELEVANCE_LANGUAGE`, `CATEGORY_REGION`,
 `DAILY_QUOTA_LIMIT`, `SAFETY_BUFFER`, `TOP_N`, `SEARCH_QUERIES`.
 `RESULTS_PER_QUERY` (50) is a hardcoded constant (`config.py:218`), **not** a
-settings.toml knob. See §6.
+settings.toml knob. See section 7.
 
 ---
 
-## 3. Interpretations, LLM calls, and spend
+## 4. Interpretations, LLM calls, and spend
 
 The interpretation generator turns a ranked lane into a 3–4 sentence summary. The
 core is `interpret.py`; the provider seam is `llm.py`; the dashboard exposes it at
@@ -395,7 +395,7 @@ fresh migration, `db._seed_models()` (`db.py:223-264`) seeds one open window per
 model from `config.DEFAULT_PRICES` (`config.py:49-54`). New prices go through
 `insert_price_window()` (`db.py:891-914`), which **auto-closes every open window
 for that model** (deleted or not) at the new `valid_from`, then inserts the new
-open window — this is what preserves the non-overlap invariant (see §9). Windows
+open window — this is what preserves the non-overlap invariant (see section 10). Windows
 and models are soft-deleted (`set_price_deleted`, `set_model_deleted`); **spend
 ignores the deleted flag** (it prices history against whatever window covered the
 date), while the dropdown honors it.
@@ -412,7 +412,7 @@ price windows, and invocation-count warnings before a delete.
 
 ---
 
-## 4. Code map — files a supporter needs to know
+## 5. Code map — files a supporter needs to know
 
 ### Core pipeline & data (top-level `.py`)
 
@@ -462,14 +462,14 @@ price windows, and invocation-count warnings before a delete.
 
 ---
 
-## 5. Runbook — setting up and running
+## 6. Runbook — setting up and running
 
 ### First-time setup
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt          # add -r requirements-dev.txt for tests
-cp .env.example .env                               # then fill in keys (see §6)
+cp .env.example .env                               # then fill in keys (see section 7)
 ```
 
 Python 3.11+ (uses stdlib `tomllib`). Runtime deps (`requirements.txt`):
@@ -521,7 +521,7 @@ DASHBOARD_DB_PATH=/tmp/smoke.db scripts/start-dashboard.sh --dev
 
 ---
 
-## 6. Configuration & secrets
+## 7. Configuration & secrets
 
 ### `.env` (gitignored; `.env.example` is the template)
 
@@ -581,7 +581,7 @@ non-empty slice list, numeric `efficiency_good <= efficiency_warn`).
 
 ---
 
-## 7. Operations & lifecycle
+## 8. Operations & lifecycle
 
 ### `run_log` status vocabulary
 
@@ -643,7 +643,7 @@ AUTOINCREMENT counters, **keeping the schema**. It backs up first (unless
 
 ---
 
-## 8. Troubleshooting & failure modes
+## 9. Troubleshooting & failure modes
 
 ### Error-handling map
 
@@ -688,7 +688,7 @@ run + quota summary (`[discover] processed N videos … (run R, status: S)` /
 
 ---
 
-## 9. Invariants & gotchas (quick reference)
+## 10. Invariants & gotchas (quick reference)
 
 | Invariant | Where enforced |
 |-----------|----------------|
@@ -707,7 +707,7 @@ run + quota summary (`[discover] processed N videos … (run R, status: S)` /
 
 ---
 
-## 10. Appendix
+## 11. Appendix
 
 ### Glossary
 

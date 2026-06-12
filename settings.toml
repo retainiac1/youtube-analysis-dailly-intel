@@ -11,6 +11,8 @@ SEARCH_RELEVANCE_LANGUAGE = "en"   # YouTube relevanceLanguage hint; ISO-639-1 s
 DAILY_QUOTA_LIMIT = 10000          # YouTube Data API daily quota units; positive int (Google grants 10000 by default).
 SAFETY_BUFFER = 500                # units held back below the limit; positive int, MUST be < DAILY_QUOTA_LIMIT.
 CATEGORY_REGION = "US"             # ISO-3166 region whose titles seed the categories table; non-empty string. IDs are global, so any English region matches.
+OLLAMA_BASE_URL = "http://127.0.0.1:11434"  # local Ollama HTTP endpoint the adapter calls; non-empty string. Loopback only (never 0.0.0.0).
+OLLAMA_TIMEOUT_SECONDS = 600       # per-request timeout for the Ollama call; positive int. Generous (local thinking runs are slow) but bounded so a dead server fails clean, not hangs.
 
 # Search queries, each tagged with a bucket. bucket must be "health" or "habit".
 [[SEARCH_QUERIES]]
@@ -70,6 +72,7 @@ bucket = "health"
 "openai:gpt-5.4-nano"          = { input = 0.20, output = 1.25 }
 "xai:grok-4-fast"              = { input = 0.20, output = 0.50 }
 "google:gemini-2.5-flash-lite" = { input = 0.10, output = 0.40 }
+"ollama:qwen3.5:9b"            = { input = 0.00, output = 0.00 }  # local inference is free
 
 # Palette, thresholds, and donut radii for the dashboard's LLM-spend visual (the
 # spend-share donut + token/cost leaderboard). None of these are hardcoded in JS or

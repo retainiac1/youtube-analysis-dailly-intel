@@ -1,3 +1,4 @@
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -52,7 +53,8 @@ def test_estimate_cost_uses_real_price_map():
 
 def test_generate_unknown_provider_lists_supported_set():
     with pytest.raises(llm.LLMError) as exc:
-        llm.generate("nope:model", "hi", temperature=0.5, seed=None)
+        llm.generate("nope:model", "hi", temperature=0.5, seed=None,
+                     supports_temperature=True, supports_seed=True)
     msg = str(exc.value)
     for provider in ("anthropic", "openai", "xai", "google"):
         assert provider in msg
@@ -107,6 +109,19 @@ def _fake_google(rec, *, text="ok", prompt_token_count=11, candidates_token_coun
     return SimpleNamespace(models=_Models())
 
 
+def _fake_ollama(rec, payload, *, response="ok", thinking=None,
+                 prompt_eval_count=11, eval_count=7):
+    # The Ollama seam is _ollama_request(payload) -> dict, not a client factory:
+    # record the POSTed payload and return a canned /api/generate body. `thinking`
+    # is present only when the run requested think (mirrors the real API).
+    rec.update(payload)
+    body = {"response": response, "prompt_eval_count": prompt_eval_count,
+            "eval_count": eval_count}
+    if thinking is not None:
+        body["thinking"] = thinking
+    return body
+
+
 # --- adapter happy paths + parameter forwarding ----------------------------
 
 def test_generate_anthropic(monkeypatch):
@@ -114,7 +129,8 @@ def test_generate_anthropic(monkeypatch):
     monkeypatch.setattr(llm, "_client_anthropic",
                         lambda: _fake_anthropic(rec, text="hi", input_tokens=20,
                                                 output_tokens=5))
-    r = llm.generate("anthropic:claude-haiku-4-5", "p", temperature=0.5, seed=42)
+    r = llm.generate("anthropic:claude-haiku-4-5", "p", temperature=0.5, seed=42,
+                     supports_temperature=True, supports_seed=False)
     assert (r.text, r.input_tokens, r.output_tokens) == ("hi", 20, 5)
     assert r.seed_applied is None             # anthropic never applies a seed
     assert rec["temperature"] == 0.5          # temperature forwarded
@@ -126,11 +142,12 @@ def test_generate_openai(monkeypatch):
     monkeypatch.setattr(llm, "_client_openai",
                         lambda: _fake_openai(rec, content="hi", prompt_tokens=20,
                                              completion_tokens=5))
-    r = llm.generate("openai:gpt-5.4-nano", "p", temperature=0.5, seed=42)
+    r = llm.generate("openai:gpt-5.4-nano", "p", temperature=0.5, seed=42,
+                     supports_temperature=False, supports_seed=True)
     assert (r.text, r.input_tokens, r.output_tokens) == ("hi", 20, 5)
     assert r.seed_applied == 42
     assert rec["seed"] == 42                   # seed forwarded
-    assert "temperature" not in rec            # temperature omitted for openai
+    assert "temperature" not in rec            # temperature omitted (flag False)
     assert "max_completion_tokens" in rec and "max_tokens" not in rec
 
 
@@ -139,7 +156,8 @@ def test_generate_xai(monkeypatch):
     monkeypatch.setattr(llm, "_client_xai",
                         lambda: _fake_openai(rec, content="hi", prompt_tokens=20,
                                              completion_tokens=5))
-    r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=42)
+    r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=42,
+                     supports_temperature=True, supports_seed=True)
     assert (r.text, r.input_tokens, r.output_tokens) == ("hi", 20, 5)
     assert r.seed_applied == 42
     assert rec["seed"] == 42                   # seed honored by x.ai
@@ -152,7 +170,8 @@ def test_generate_google(monkeypatch):
     monkeypatch.setattr(llm, "_client_google",
                         lambda: _fake_google(rec, text="hi", prompt_token_count=20,
                                              candidates_token_count=5))
-    r = llm.generate("google:gemini-2.5-flash-lite", "p", temperature=0.5, seed=42)
+    r = llm.generate("google:gemini-2.5-flash-lite", "p", temperature=0.5, seed=42,
+                     supports_temperature=True, supports_seed=True)
     assert (r.text, r.input_tokens, r.output_tokens) == ("hi", 20, 5)
     assert r.seed_applied == 42
     cfg = rec["config"]
@@ -164,50 +183,62 @@ def test_generate_google(monkeypatch):
 def test_anthropic_temperature_out_of_range(monkeypatch):
     monkeypatch.setattr(llm, "_client_anthropic", lambda: _fake_anthropic({}))
     with pytest.raises(llm.LLMError, match="anthropic"):
-        llm.generate("anthropic:claude-haiku-4-5", "p", temperature=1.5, seed=None)
+        llm.generate("anthropic:claude-haiku-4-5", "p", temperature=1.5, seed=None,
+                     supports_temperature=True, supports_seed=False)
 
 
-def test_openai_reasoning_omits_temperature(monkeypatch):
+def test_supports_temperature_false_omits_temperature(monkeypatch):
     rec = {}
     monkeypatch.setattr(llm, "_client_openai", lambda: _fake_openai(rec))
-    # gpt-5.4-nano is a reasoning model: 1.5 would be out of any nominal range,
-    # but temperature is omitted (not forwarded, not validated) so it is accepted.
-    llm.generate("openai:gpt-5.4-nano", "p", temperature=1.5, seed=None)
+    # supports_temperature=False (the gpt-5 reasoning case): 1.5 would be out of any
+    # nominal range, but temperature is omitted (not forwarded, not validated) so it
+    # is accepted — the flag, not the model id, drives the omission now.
+    llm.generate("openai:gpt-5.4-nano", "p", temperature=1.5, seed=None,
+                 supports_temperature=False, supports_seed=True)
     assert "temperature" not in rec
 
 
-def test_is_openai_reasoning_model():
-    assert llm._is_openai_reasoning_model("gpt-5.4-nano") is True
-    assert llm._is_openai_reasoning_model("o3-mini") is True
-    assert llm._is_openai_reasoning_model("gpt-4o") is False
-
-
-def test_openai_non_reasoning_forwards_temperature(monkeypatch):
+def test_supports_temperature_true_forwards_temperature(monkeypatch):
     rec = {}
     monkeypatch.setattr(llm, "_client_openai", lambda: _fake_openai(rec))
-    # A non-reasoning OpenAI model (gpt-4o class) DOES accept temperature, so the
-    # adapter forwards it (and seed) — the control must keep working for it.
-    llm.generate("openai:gpt-4o", "p", temperature=0.5, seed=42)
+    # A temperature-honoring OpenAI model (gpt-4o class) DOES accept temperature, so
+    # the adapter forwards it (and seed) — the control must keep working for it.
+    llm.generate("openai:gpt-4o", "p", temperature=0.5, seed=42,
+                 supports_temperature=True, supports_seed=True)
     assert rec["temperature"] == 0.5
     assert rec["seed"] == 42
 
 
-def test_openai_non_reasoning_temperature_out_of_range(monkeypatch):
+def test_openai_temperature_out_of_range_when_supported(monkeypatch):
     monkeypatch.setattr(llm, "_client_openai", lambda: _fake_openai({}))
     with pytest.raises(llm.LLMError, match="openai"):
-        llm.generate("openai:gpt-4o", "p", temperature=2.5, seed=None)
+        llm.generate("openai:gpt-4o", "p", temperature=2.5, seed=None,
+                     supports_temperature=True, supports_seed=True)
 
 
 def test_xai_temperature_out_of_range(monkeypatch):
     monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai({}))
     with pytest.raises(llm.LLMError, match="xai"):
-        llm.generate("xai:grok-4-fast", "p", temperature=2.5, seed=None)
+        llm.generate("xai:grok-4-fast", "p", temperature=2.5, seed=None,
+                     supports_temperature=True, supports_seed=True)
+
+
+def test_supports_seed_false_omits_seed(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_openai", lambda: _fake_openai(rec))
+    # A model whose row says no-seed never forwards one, even on a seed-honoring
+    # provider and a positive seed.
+    r = llm.generate("openai:gpt-4o", "p", temperature=0.5, seed=42,
+                     supports_temperature=True, supports_seed=False)
+    assert "seed" not in rec
+    assert r.seed_applied is None
 
 
 def test_gemini_accepts_1_5_temperature(monkeypatch):
     rec = {}
     monkeypatch.setattr(llm, "_client_google", lambda: _fake_google(rec))
-    llm.generate("google:gemini-2.5-flash-lite", "p", temperature=1.5, seed=None)
+    llm.generate("google:gemini-2.5-flash-lite", "p", temperature=1.5, seed=None,
+                 supports_temperature=True, supports_seed=True)
     assert rec["config"].temperature == 1.5
 
 
@@ -218,7 +249,8 @@ def test_missing_key_raises_named_error(monkeypatch):
     # import, surfacing a catchable LLMError (never an ImportError).
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(llm.LLMError, match="OPENAI_API_KEY"):
-        llm.generate("openai:gpt-5.4-nano", "p", temperature=1.0, seed=None)
+        llm.generate("openai:gpt-5.4-nano", "p", temperature=1.0, seed=None,
+                     supports_temperature=False, supports_seed=True)
 
 
 # --- live smoke (excluded by default; hits real provider APIs) --------------
@@ -232,13 +264,20 @@ LIVE_MODELS = [
 ]
 
 
+_SEED_FLAGS = {m["model"]: m for m in config.SEED_MODELS}
+
+
 @pytest.mark.live
 @pytest.mark.parametrize("model", LIVE_MODELS)
 def test_live_generate(model):
-    # A real call per provider. HARD-FAILS (never skips) if the key is missing or
-    # the provider errors — that is the point of the live gate.
+    # A real call per provider, with the model's seeded capability flags. HARD-FAILS
+    # (never skips) if the key is missing or the provider errors — the point of the
+    # live gate.
+    flags = _SEED_FLAGS[model]
     result = llm.generate(model, "Reply with the single word OK",
-                          temperature=1.0, seed=7)
+                          temperature=1.0, seed=7,
+                          supports_temperature=bool(flags["supports_temperature"]),
+                          supports_seed=bool(flags["supports_seed"]))
     assert result.text and result.text.strip(), f"{model}: empty text"
     assert result.input_tokens > 0, f"{model}: no input tokens reported"
 
@@ -251,7 +290,8 @@ def test_generate_drops_non_positive_seed(monkeypatch):
     for bad in (0, -1):
         rec = {}
         monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
-        r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=bad)
+        r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=bad,
+                         supports_temperature=True, supports_seed=True)
         assert "seed" not in rec, f"seed={bad} must not be forwarded"
         assert r.seed_applied is None
 
@@ -259,7 +299,8 @@ def test_generate_drops_non_positive_seed(monkeypatch):
 def test_generate_keeps_positive_seed(monkeypatch):
     rec = {}
     monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
-    r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=7)
+    r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=7,
+                     supports_temperature=True, supports_seed=True)
     assert rec["seed"] == 7 and r.seed_applied == 7
 
 
@@ -289,7 +330,8 @@ def test_generate_wraps_xai_api_error(monkeypatch):
         llm, "_client_xai",
         lambda: _raising_openai(openai.OpenAIError("boom from x.ai")))
     with pytest.raises(llm.LLMError) as exc:
-        llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None)
+        llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None,
+                     supports_temperature=True, supports_seed=True)
     assert "xai" in str(exc.value) and "boom from x.ai" in str(exc.value)
 
 
@@ -299,61 +341,27 @@ def test_generate_wraps_openai_api_error(monkeypatch):
         llm, "_client_openai",
         lambda: _raising_openai(openai.OpenAIError("boom")))
     with pytest.raises(llm.LLMError) as exc:
-        llm.generate("openai:gpt-5.4-nano", "p", temperature=0.5, seed=None)
+        llm.generate("openai:gpt-5.4-nano", "p", temperature=0.5, seed=None,
+                     supports_temperature=False, supports_seed=True)
     assert "openai" in str(exc.value)
 
 
-# --- model_capabilities ----------------------------------------------------
-
-def test_model_capabilities_anthropic_omits_seed():
-    # Anthropic honors temperature but has no seed param.
-    assert llm.model_capabilities("anthropic:claude-haiku-4-5") == {
-        "temperature": True, "seed": False,
-    }
-
-
-def test_model_capabilities_openai_reasoning_omits_temperature():
-    # gpt-5.4-nano is a reasoning model: temperature omitted, seed honored.
-    assert llm.model_capabilities("openai:gpt-5.4-nano") == {
-        "temperature": False, "seed": True,
-    }
-
-
-def test_model_capabilities_openai_non_reasoning_honors_both():
-    assert llm.model_capabilities("openai:gpt-4o") == {
-        "temperature": True, "seed": True,
-    }
-
-
-def test_model_capabilities_xai_and_google_honor_both():
-    assert llm.model_capabilities("xai:grok-4-fast") == {
-        "temperature": True, "seed": True,
-    }
-    assert llm.model_capabilities("google:gemini-2.5-flash-lite") == {
-        "temperature": True, "seed": True,
-    }
-
-
-def test_model_capabilities_unknown_provider_raises():
-    with pytest.raises(llm.LLMError) as exc:
-        llm.model_capabilities("nope:model")
-    for provider in ("anthropic", "openai", "xai", "google"):
-        assert provider in str(exc.value)
-
-
-# --- pin model_capabilities to the adapters (kills drift) ------------------
-# For each shipped price-map model, run generate() against the provider's fake and
-# assert capability AGREES with what the adapter actually did: seed honored iff
-# seed_applied is not None, and temperature honored iff it reached the SDK call.
-# temperature is a top-level kwarg for anthropic/openai/xai but rides inside the
-# `config` object for google, so the forwarding check is per-provider — and it
-# checks ABSENCE (key/attr missing), never "== None", so it cannot pass vacuously.
+# --- pin the seeded capability flags to the adapters (kills drift) ---------
+# For each baseline model in config.SEED_MODELS, run generate() with that model's
+# flags against the provider's fake and assert the adapter ACTUALLY did what the
+# flags say: temperature reached the SDK call iff supports_temperature, and a seed
+# governed the run iff supports_seed. temperature is a top-level kwarg for
+# anthropic/openai/xai but rides inside the `config` object for google, so the
+# forwarding check is per-provider — and it checks ABSENCE (key/attr missing),
+# never "== None", so it cannot pass vacuously. This is the guard that the flags
+# captured as data in SEED_MODELS still match the real adapter behavior.
 
 _FACTORY_AND_FAKE = {
     "anthropic": ("_client_anthropic", _fake_anthropic),
     "openai": ("_client_openai", _fake_openai),
     "xai": ("_client_xai", _fake_openai),
     "google": ("_client_google", _fake_google),
+    "ollama": ("_ollama_request", _fake_ollama),
 }
 
 
@@ -361,25 +369,176 @@ def _temperature_forwarded(provider, rec):
     if provider == "google":
         cfg = rec.get("config")
         return cfg is not None and getattr(cfg, "temperature", None) is not None
+    if provider == "ollama":
+        return "temperature" in rec.get("options", {})
     return "temperature" in rec
 
 
-@pytest.mark.parametrize("model", sorted(config.PRICES))
-def test_capabilities_match_adapter(model, monkeypatch):
+@pytest.mark.parametrize("entry", config.SEED_MODELS,
+                         ids=[m["model"] for m in config.SEED_MODELS])
+def test_seed_flags_match_adapter(entry, monkeypatch):
+    model = entry["model"]
+    st, ss = bool(entry["supports_temperature"]), bool(entry["supports_seed"])
     provider = llm.split_model(model)[0]
     factory_name, fake = _FACTORY_AND_FAKE[provider]
     rec = {}
-    monkeypatch.setattr(llm, factory_name, lambda: fake(rec))
+    if provider == "ollama":
+        # The Ollama seam takes the request payload (not a zero-arg client factory).
+        monkeypatch.setattr(llm, factory_name, lambda payload: fake(rec, payload))
+    else:
+        monkeypatch.setattr(llm, factory_name, lambda: fake(rec))
 
-    caps = llm.model_capabilities(model)
     # temperature 0.5 is valid for every provider's range (anthropic 0-1, others
-    # 0-2); a seed is supplied so seed_applied reflects whether it was honored.
-    result = llm.generate(model, "p", temperature=0.5, seed=42)
+    # 0-2); a positive seed is supplied so seed_applied reflects whether it governed.
+    result = llm.generate(model, "p", temperature=0.5, seed=42,
+                          supports_temperature=st, supports_seed=ss)
 
-    assert (result.seed_applied is not None) == caps["seed"], (
-        f"{model}: seed_applied={result.seed_applied!r} vs caps.seed={caps['seed']}"
+    assert (result.seed_applied is not None) == ss, (
+        f"{model}: seed_applied={result.seed_applied!r} vs supports_seed={ss}"
     )
-    assert _temperature_forwarded(provider, rec) == caps["temperature"], (
+    assert _temperature_forwarded(provider, rec) == st, (
         f"{model}: temperature forwarded={_temperature_forwarded(provider, rec)} "
-        f"vs caps.temperature={caps['temperature']}"
+        f"vs supports_temperature={st}"
     )
+
+
+# --- ollama adapter + the cross-provider think seam -------------------------
+# The Ollama adapter is the one that honors `think`. These pin the seam contract:
+# the bare tag reaches the request, think is gated BOTH directions, the off case
+# persists 0 (not NULL), a non-honoring provider / non-reasoning model drops think,
+# and any transport/parse failure becomes a clean LLMError (Fix A parity), never a
+# raw exception. The network is mocked at llm._ollama_request (no socket).
+
+def test_split_model_ollama_double_colon():
+    # The regression canary for the whole feature: the canonical double-colon tag
+    # must split on the FIRST colon so the model id keeps its own ':'.
+    assert llm.split_model("ollama:qwen3.5:9b") == ("ollama", "qwen3.5:9b")
+
+
+def test_ollama_in_supported_providers():
+    assert "ollama" in llm.SUPPORTED_PROVIDERS
+    assert "ollama" in llm.THINK_PROVIDERS
+
+
+def _patch_ollama(monkeypatch, rec, **fake_kwargs):
+    monkeypatch.setattr(
+        llm, "_ollama_request",
+        lambda payload: _fake_ollama(rec, payload, **fake_kwargs),
+    )
+
+
+def test_ollama_bare_tag_reaches_request(monkeypatch):
+    rec = {}
+    _patch_ollama(monkeypatch, rec)
+    llm.generate("ollama:qwen3.5:9b", "p", temperature=0.5, seed=7,
+                 supports_temperature=True, supports_seed=True)
+    # split_model stripped the 'ollama:' prefix; the bare tag is sent.
+    assert rec["model"] == "qwen3.5:9b"
+
+
+def test_ollama_think_on_captures_thinking_and_applies_one(monkeypatch):
+    rec = {}
+    _patch_ollama(monkeypatch, rec, thinking="step by step")
+    result = llm.generate("ollama:qwen3.5:9b", "p", temperature=0.5, seed=7,
+                          supports_temperature=True, supports_seed=True,
+                          think=True, is_reasoning=True)
+    assert rec["think"] is True                 # top-level toggle sent on
+    assert result.thinking == "step by step"    # reasoning content captured
+    assert result.think_applied == 1
+
+
+def test_ollama_think_off_persists_zero_not_null(monkeypatch):
+    # LOAD-BEARING: an honored model toggled OFF must record think_applied == 0
+    # (applied, chose off), NOT None. A False must survive generate()'s normalization.
+    rec = {}
+    _patch_ollama(monkeypatch, rec)             # fake returns no `thinking` field
+    result = llm.generate("ollama:qwen3.5:9b", "p", temperature=0.5, seed=7,
+                          supports_temperature=True, supports_seed=True,
+                          think=False, is_reasoning=True)
+    assert rec["think"] is False                # the toggle is still sent (off)
+    assert result.thinking is None
+    assert result.think_applied == 0            # 0, never None
+
+
+def test_ollama_non_reasoning_model_drops_think(monkeypatch):
+    # is_reasoning False -> think is normalized to None in generate(); the adapter
+    # never receives it (no `think` key in the payload) and think_applied is None.
+    rec = {}
+    _patch_ollama(monkeypatch, rec)
+    result = llm.generate("ollama:qwen3.5:9b", "p", temperature=0.5, seed=7,
+                          supports_temperature=True, supports_seed=True,
+                          think=True, is_reasoning=False)
+    assert "think" not in rec
+    assert result.think_applied is None
+
+
+def test_think_dropped_for_non_honoring_provider(monkeypatch):
+    # A reasoning-capable model on a provider NOT in THINK_PROVIDERS (openai): think
+    # is dropped, the cloud adapter leaves thinking/think_applied None.
+    rec = {}
+    monkeypatch.setattr(llm, "_client_openai", lambda: _fake_openai(rec))
+    result = llm.generate("openai:gpt-5.4-nano", "p", temperature=0.5, seed=7,
+                          supports_temperature=False, supports_seed=True,
+                          think=True, is_reasoning=True)
+    assert result.thinking is None
+    assert result.think_applied is None
+
+
+def test_cloud_adapter_leaves_think_fields_none(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_anthropic", lambda: _fake_anthropic(rec))
+    result = llm.generate("anthropic:claude-haiku-4-5", "p", temperature=0.5,
+                          seed=None, supports_temperature=True, supports_seed=False)
+    assert result.thinking is None and result.think_applied is None
+
+
+def test_ollama_eval_count_is_output_tokens(monkeypatch):
+    # eval_count (which already includes thinking tokens) maps to output_tokens;
+    # prompt_eval_count maps to input_tokens.
+    rec = {}
+    _patch_ollama(monkeypatch, rec, prompt_eval_count=21, eval_count=476)
+    result = llm.generate("ollama:qwen3.5:9b", "p", temperature=0.5, seed=7,
+                          supports_temperature=True, supports_seed=True)
+    assert result.input_tokens == 21 and result.output_tokens == 476
+
+
+def test_ollama_connection_error_becomes_llmerror(monkeypatch):
+    def boom(payload):
+        raise urllib.error.URLError("Connection refused")
+
+    monkeypatch.setattr(llm, "_ollama_request", boom)
+    with pytest.raises(llm.LLMError, match=r"^ollama: "):
+        llm.generate("ollama:qwen3.5:9b", "p", temperature=0.5, seed=7,
+                     supports_temperature=True, supports_seed=True)
+
+
+def test_ollama_parses_a_real_captured_response(monkeypatch):
+    # Evidence test: feed a REAL captured /api/generate body (testing/fixtures/
+    # ollama_api_generate_response.json, think:true, stream:false) through the adapter
+    # and prove the evidenced key names map correctly. If Ollama renames a key, this
+    # is the regression that catches it.
+    import json as _json
+    from pathlib import Path
+    body = _json.loads(
+        (Path(__file__).parent / "fixtures"
+         / "ollama_api_generate_response.json").read_text()
+    )
+    monkeypatch.setattr(llm, "_ollama_request", lambda payload: body)
+    result = llm.generate("ollama:qwen3.5:9b", "p", temperature=0.1, seed=1,
+                          supports_temperature=True, supports_seed=True,
+                          think=True, is_reasoning=True)
+    assert result.text == body["response"]
+    assert result.thinking == body["thinking"]
+    assert result.input_tokens == body["prompt_eval_count"]
+    assert result.output_tokens == body["eval_count"]
+    assert result.think_applied == 1
+
+
+def test_ollama_malformed_response_becomes_llmerror(monkeypatch):
+    # A body missing eval_count (model-not-running shape, or an API rename) must be a
+    # clean LLMError, never a KeyError 500.
+    monkeypatch.setattr(llm, "_ollama_request",
+                        lambda payload: {"response": "hi", "prompt_eval_count": 5})
+    with pytest.raises(llm.LLMError, match="ollama: malformed response"):
+        llm.generate("ollama:qwen3.5:9b", "p", temperature=0.5, seed=7,
+                     supports_temperature=True, supports_seed=True)

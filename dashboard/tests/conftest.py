@@ -280,6 +280,15 @@ def spend_db_path(tmp_path):
             "output_tokens, generated_at) VALUES (?, ?, ?, ?, ?, ?)",
             _SPEND_INVOCATIONS,
         )
+        # init_db seeded the open price windows with valid_from = today (the log was
+        # empty at init); backdate them to the earliest invocation date, exactly as a
+        # real migration over an existing log would, so the seeded prices cover this
+        # fixture's past-dated invocations. "made:up" has no window and stays unpriced.
+        conn.execute(
+            "UPDATE model_prices SET valid_from = "
+            "(SELECT MIN(substr(generated_at, 1, 10)) FROM llm_invocations) "
+            "WHERE valid_to IS NULL"
+        )
         conn.commit()
     finally:
         conn.close()

@@ -1,0 +1,29 @@
+<!-- A content-only HTML fragment (no <head>, no standalone page chrome) used to
+     exercise the Phase 1 html reading adapter and the per-tab multi-document list.
+     It intentionally carries an inline style, a class, and a <style> block so the
+     adapter's strict sanitize (FORBID_ATTR style/class, FORBID_TAGS style/script)
+     is visibly proven: none of the cream/orange below must reach the dashboard. -->
+<style>
+  .brand { color: #E8C49C; background: #2b1a0f; }
+  h2 { color: #ff8a3d; }
+</style>
+
+<h2 style="color:#E8C49C">Welcome to the guides</h2>
+<p class="brand">
+  This short page demonstrates the HTML reading adapter. Its own colors are
+  stripped on the way in, so it inherits the dashboard's Glass theme instead of
+  the warm palette declared above.
+</p>
+
+<h3>What this proves</h3>
+<ul>
+  <li>An HTML document is discovered and listed alongside the markdown guide.</li>
+  <li>Headings become a generated table of contents with anchor links.</li>
+  <li>Foreign styling never leaks into the dashboard.</li>
+</ul>
+
+<h3>Reading view</h3>
+<p>
+  The same presenter renders this fragment and the markdown guide. Only the
+  per-format adapter differs; everything downstream is shared.
+</p>

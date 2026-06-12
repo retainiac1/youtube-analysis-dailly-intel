@@ -160,8 +160,11 @@ VALID_MODEL = "openai:gpt-5.4-nano"
 
 
 def _fake_generate(text="Synthesized summary.", input_tokens=100, output_tokens=30):
-    def fake(model, prompt, *, temperature, seed):
-        return llm.GenerateResult(text, input_tokens, output_tokens, seed_applied=seed)
+    def fake(model, prompt, *, temperature, seed, supports_temperature=None,
+             supports_seed=None, think=None, is_reasoning=False):
+        return llm.GenerateResult(text, input_tokens, output_tokens, seed_applied=seed,
+                                  thinking=("[reasoning]" if think else None),
+                                  think_applied=(None if think is None else int(think)))
     return fake
 
 
@@ -212,6 +215,53 @@ def test_interpret_persists_and_logs(client, seeded_db_path, monkeypatch):
                       params={"run_date": "2026-06-08", "scope": "health"}).json()
     assert read["text"] == "Synthesized summary."
     assert read["duration_ms"] == body["duration_ms"]
+
+
+def test_interpret_persists_think_and_returns_thinking(client, seeded_db_path,
+                                                       monkeypatch):
+    # End to end: posting think=true for an honoring model persists
+    # interpretations.think == 1 and returns the transient thinking content; the read
+    # endpoint then exposes the think provenance (but not the un-persisted content).
+    monkeypatch.setattr(interpret, "generate", _fake_generate())
+    resp = client.post("/api/interpret", json={
+        "run_date": "2026-06-08", "scope": "health",
+        "model": "ollama:qwen3.5:9b", "temperature": 0.5, "seed": 7, "think": True,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["think_applied"] == 1
+    assert body["thinking"] == "[reasoning]"          # transient, returned once
+    conn = db.get_connection(seeded_db_path)
+    try:
+        think = conn.execute(
+            "SELECT think FROM interpretations WHERE scope='health'"
+        ).fetchone()["think"]
+    finally:
+        conn.close()
+    assert think == 1
+    # The read path exposes the provenance; the content is NOT persisted.
+    read = client.get("/api/interpretation",
+                      params={"run_date": "2026-06-08", "scope": "health"}).json()
+    assert read["think"] == 1 and read["seed"] == 7
+    assert "thinking" not in read
+
+
+def test_interpret_think_off_persists_zero(client, seeded_db_path, monkeypatch):
+    monkeypatch.setattr(interpret, "generate", _fake_generate())
+    resp = client.post("/api/interpret", json={
+        "run_date": "2026-06-08", "scope": "health",
+        "model": "ollama:qwen3.5:9b", "temperature": 0.5, "seed": 7, "think": False,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["think_applied"] == 0          # off, not NULL
+    conn = db.get_connection(seeded_db_path)
+    try:
+        think = conn.execute(
+            "SELECT think FROM interpretations WHERE scope='health'"
+        ).fetchone()["think"]
+    finally:
+        conn.close()
+    assert think == 0
 
 
 def test_interpret_empty_lane_skips(client, seeded_db_path, monkeypatch):
@@ -288,10 +338,66 @@ def test_interpret_defaults_empty_table(client):
     caps = body["capabilities"]
     assert caps["anthropic:claude-haiku-4-5"]["seed"] is False
     assert caps["openai:gpt-5.4-nano"]["temperature"] is False
+    # Think gating, both flags: ollama reasons AND honors think (interactive);
+    # gpt-5.4-nano reasons but openai does not honor think (shown-but-disabled);
+    # anthropic is not a reasoning model (toggle hidden).
+    assert caps["ollama:qwen3.5:9b"]["reasoning"] is True
+    assert caps["ollama:qwen3.5:9b"]["think"] is True
+    assert caps["openai:gpt-5.4-nano"]["reasoning"] is True
+    assert caps["openai:gpt-5.4-nano"]["think"] is False
+    assert caps["anthropic:claude-haiku-4-5"]["reasoning"] is False
+    assert caps["anthropic:claude-haiku-4-5"]["think"] is False
     # Prompt-field options (all) + the selection (default when nothing persisted).
     keys = [f["key"] for f in body["available_fields"]]
     assert "like_count" in keys and "top_comments" in keys
     assert body["selected_fields"] == interpret.DEFAULT_PROMPT_FIELDS
+
+
+def _update_model(db_path, model, **cols):
+    """Flip registry flags on the DB the client points at (the dropdown + validation
+    now read the table, so this is how a test hides a model)."""
+    conn = db.get_connection(db_path)
+    try:
+        sets = ", ".join(f"{k} = ?" for k in cols)
+        conn.execute(f"UPDATE models SET {sets} WHERE model = ?",
+                     (*cols.values(), model))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_disabled_model_absent_from_dropdown_and_rejected(
+        client, seeded_db_path, monkeypatch):
+    """A disabled model leaves the dropdown (:479) AND fails new-run validation
+    (:439) — both call sites read fetch_dropdown_models."""
+    def _fail_if_called(*a, **k):
+        raise AssertionError("generate must not run for a hidden model")
+    monkeypatch.setattr(interpret, "generate", _fail_if_called)
+    _update_model(seeded_db_path, "xai:grok-4-fast", enabled=0)
+
+    models = client.get("/api/interpret-defaults").json()["models"]
+    assert "xai:grok-4-fast" not in models           # :479
+    resp = client.post("/api/interpret", json={
+        "run_date": "2026-06-08", "scope": "health",
+        "model": "xai:grok-4-fast", "temperature": 0.5, "seed": None,
+    })
+    assert resp.status_code == 422                    # :439
+
+
+def test_soft_deleted_model_absent_from_dropdown_and_rejected(
+        client, seeded_db_path, monkeypatch):
+    def _fail_if_called(*a, **k):
+        raise AssertionError("generate must not run for a deleted model")
+    monkeypatch.setattr(interpret, "generate", _fail_if_called)
+    _update_model(seeded_db_path, "openai:gpt-5.4-nano", deleted=1)
+
+    models = client.get("/api/interpret-defaults").json()["models"]
+    assert "openai:gpt-5.4-nano" not in models        # :479
+    resp = client.post("/api/interpret", json={
+        "run_date": "2026-06-08", "scope": "health",
+        "model": "openai:gpt-5.4-nano", "temperature": 0.5, "seed": None,
+    })
+    assert resp.status_code == 422                    # :439
 
 
 def test_interpret_persists_field_selection(client, seeded_db_path, monkeypatch):
@@ -394,24 +500,31 @@ def test_spend_unpriced_model_reports_tokens_null_cost(spend_client, monkeypatch
     assert body["run"]["total_cost"] == pytest.approx(priced)
 
 
-def test_spend_recomputes_on_price_change(spend_client, monkeypatch):
-    """Cost is computed at display, not stored: changing PRICES changes the
-    returned total for the SAME stored rows."""
+def test_spend_recomputes_on_price_change(spend_client, spend_db_path, monkeypatch):
+    """Cost is computed at display from the model_prices table, not stored: changing
+    a model's price changes the returned cost for the SAME stored invocations."""
     monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
-    monkeypatch.setattr(
-        config, "PRICES", {"openai:gpt-5.4-nano": {"input": 1.0, "output": 5.0}}
-    )
-    first = spend_client.get(
-        "/api/spend", params={"run_date": "2026-06-08"}
-    ).json()["run"]["total_cost"]
 
-    monkeypatch.setattr(
-        config, "PRICES", {"openai:gpt-5.4-nano": {"input": 2.0, "output": 10.0}}
-    )
-    second = spend_client.get(
-        "/api/spend", params={"run_date": "2026-06-08"}
-    ).json()["run"]["total_cost"]
+    def _set_openai_price(inp, out):
+        conn = db.get_connection(spend_db_path)
+        try:
+            with db.transaction(conn):
+                conn.execute(
+                    "UPDATE model_prices SET input_per_1m = ?, output_per_1m = ? "
+                    "WHERE model = 'openai:gpt-5.4-nano' AND valid_to IS NULL",
+                    (inp, out),
+                )
+        finally:
+            conn.close()
 
+    def _openai_cost():
+        body = spend_client.get("/api/spend", params={"run_date": "2026-06-08"}).json()
+        return _by_model(body["run"])["openai:gpt-5.4-nano"]["cost"]
+
+    _set_openai_price(1.0, 5.0)
+    first = _openai_cost()
+    _set_openai_price(2.0, 10.0)
+    second = _openai_cost()
     assert second == pytest.approx(first * 2)
 
 
@@ -483,11 +596,16 @@ def test_spend_derived_values_null_for_unpriced(spend_client, monkeypatch):
     assert made_up["cost_per_million"] is None
 
 
-def test_spend_share_pct_null_when_total_zero(spend_client, monkeypatch):
-    """With every model unpriced the scope total is 0; share_pct is null rather
-    than a divide-by-zero."""
+def test_spend_share_pct_null_when_total_zero(spend_client, spend_db_path, monkeypatch):
+    """With no price window covering anything the scope total is 0; share_pct is null
+    rather than a divide-by-zero."""
     monkeypatch.setattr(config, "now_local_iso", lambda: "2026-06-11T09:00:00-04:00")
-    monkeypatch.setattr(config, "PRICES", {})  # nothing is priced
+    conn = db.get_connection(spend_db_path)
+    try:
+        with db.transaction(conn):
+            conn.execute("DELETE FROM model_prices")  # nothing is priced
+    finally:
+        conn.close()
     body = spend_client.get("/api/spend", params={"run_date": "2026-06-08"}).json()
     assert body["run"]["total_cost"] == 0.0
     for m in body["run"]["per_model"]:

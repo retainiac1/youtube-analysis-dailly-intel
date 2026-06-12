@@ -18,6 +18,8 @@ def make_good_config() -> SimpleNamespace:
         SHORT_MAX_SECONDS=180,
         SEARCH_RELEVANCE_LANGUAGE="en",
         CATEGORY_REGION="US",
+        OLLAMA_BASE_URL="http://127.0.0.1:11434",
+        OLLAMA_TIMEOUT_SECONDS=600,
         SEARCH_QUERIES=[
             {"q": "build habits", "bucket": "habit"},
             {"q": "zone 2 cardio", "bucket": "health"},
@@ -137,6 +139,20 @@ def test_empty_category_region_raises_named_error():
     cfg = make_good_config()
     cfg.CATEGORY_REGION = "  "  # whitespace-only would silently break the fetch
     with pytest.raises(config.ConfigError, match="CATEGORY_REGION"):
+        config.validate_config(cfg)
+
+
+def test_empty_ollama_base_url_raises_named_error():
+    cfg = make_good_config()
+    cfg.OLLAMA_BASE_URL = "  "  # whitespace-only would build a malformed request
+    with pytest.raises(config.ConfigError, match="OLLAMA_BASE_URL"):
+        config.validate_config(cfg)
+
+
+def test_non_positive_ollama_timeout_raises_named_error():
+    cfg = make_good_config()
+    cfg.OLLAMA_TIMEOUT_SECONDS = 0  # a zero/negative timeout would hang or error
+    with pytest.raises(config.ConfigError, match="OLLAMA_TIMEOUT_SECONDS"):
         config.validate_config(cfg)
 
 

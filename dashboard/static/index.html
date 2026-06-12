@@ -42,6 +42,10 @@
                tabindex="-1">Trends</a>
             <a class="page-nav-link" data-route href="/interpretation"
                id="nav-interpretation" tabindex="-1">Interpretation</a>
+            <a class="page-nav-link" data-route href="/models"
+               id="nav-models" tabindex="-1">Models</a>
+            <a class="page-nav-link" data-route href="/documentation"
+               id="nav-documentation" tabindex="-1">Documentation</a>
           </nav>
         </div>
         <div class="topbar-controls">
@@ -115,12 +119,23 @@
         <div id="interpretation-main"></div>
         <aside class="glass-panel spend-panel" id="spend-panel" aria-label="LLM spend"></aside>
       </main>
+
+      <!-- The model + price registry editor (models.js owns this region; it
+           replaceChildren's it). A global admin surface, not run/lane scoped. -->
+      <main class="models" id="models" aria-live="polite" hidden></main>
+
+      <!-- Documentation: a filesystem-discovered docs browser (documentation.js owns
+           this region; it replaceChildren's it). Read-only, not run/lane scoped. -->
+      <main class="documentation" id="documentation" aria-live="polite" hidden></main>
     </div>
   </div>
 
-  <!-- Vendored offline; pinned to ECharts 5.5.1. Loaded before the ES module so
-       the `echarts` global exists when charts.js runs. -->
+  <!-- Vendored offline; pinned. Loaded before the ES module so their globals
+       (echarts, marked, DOMPurify) exist when the modules run. marked + DOMPurify
+       back the Documentation page's markdown/html reading adapters. -->
   <script src="/vendor/echarts-5.5.1.min.js"></script>
+  <script src="/vendor/marked-12.0.2.min.js"></script>
+  <script src="/vendor/dompurify-3.1.7.min.js"></script>
   <script type="module" src="/js/main.js"></script>
 </body>
 </html>

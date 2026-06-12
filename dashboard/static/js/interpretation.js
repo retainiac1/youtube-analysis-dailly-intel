@@ -13,8 +13,8 @@ import * as api from "./api.js";
 
 let el = null;            // the page mount (<main id="interpretation">)
 let resultEl = null;      // where the stored/generated summary renders
-let controls = null;      // { modelSelect, tempInput, seedInput, runBtn, errorEl, stopwatchEl }
-let caps = {};            // { "provider:model": { temperature, seed } }
+let controls = null;      // { modelSelect, tempInput, seedInput, thinkInput, thinkControl, runBtn, errorEl, stopwatchEl }
+let caps = {};            // { "provider:model": { temperature, seed, reasoning, think } }
 let defaultTemperature = 1.0;
 let currentState = { runDate: null, lane: "health" };
 let buildPromise = null;  // ensures the scaffold (and one defaults fetch) is built once
@@ -79,13 +79,43 @@ function metaLine(model, generatedAt, durationMs) {
   return parts.join(" · ");
 }
 
+// The applied generation parameters for this run: temperature, seed, and think,
+// each rendered as not-applicable ("n/a") when NULL — temperature/seed NULL on a
+// model that ignored them, think NULL when the model is not reasoning-capable or
+// its provider does not honor the toggle, "off"/"on" when it does. Returns "" when
+// the row carries no provenance keys at all (an older payload), so the line is
+// omitted rather than showing three "n/a"s.
+function paramsLine(data) {
+  if (data.temperature === undefined && data.seed === undefined
+      && data.think === undefined) {
+    return "";
+  }
+  const na = "n/a";
+  const temp = data.temperature == null ? na : String(data.temperature);
+  const seed = data.seed == null ? na : String(data.seed);
+  const think = data.think == null ? na : (data.think ? "on" : "off");
+  return `temperature ${temp} · seed ${seed} · think ${think}`;
+}
+
 function renderCard(data) {
   const card = node("section", { class: "glass-panel interpretation-card" }, [
     node("h2", { class: "heading-sm", text: "Interpretation" }),
   ]);
   const meta = metaLine(data.model, data.generated_at, data.duration_ms);
   if (meta) card.appendChild(node("p", { class: "interpretation-meta", text: meta }));
+  const params = paramsLine(data);
+  if (params) card.appendChild(node("p", { class: "interpretation-params", text: params }));
   card.appendChild(node("div", { class: "interpretation-text", text: data.text }));
+  // The thinking transcript, when think was on. It is transient (returned only on
+  // the fresh /api/interpret response, never persisted), so it appears right after a
+  // think-on generation and is absent on a re-read. Collapsed by default; the larger
+  // token count it implies is intended, not a bug. textContent only — never HTML.
+  if (data.thinking) {
+    card.appendChild(node("details", { class: "interpretation-thinking" }, [
+      node("summary", { text: "Thinking" }),
+      node("div", { class: "interpretation-thinking-text", text: data.thinking }),
+    ]));
+  }
   resultEl.replaceChildren(card);
 }
 
@@ -101,21 +131,43 @@ function labeled(text, input) {
 // Grey (disable) the controls the selected model would silently ignore, per the
 // server-reported capability map. NO provider hardcode: a model's honored params
 // come from caps[model], the single source the adapter also derives from.
+//
+// The think toggle has TWO gates: `reasoning` SHOWS it (the model can think) and
+// `think` ENABLES it (this provider's adapter actually honors the toggle). A
+// reasoning model on a non-honoring provider shows a disabled, forced-OFF toggle —
+// the honest no-op, not a hidden one. A non-reasoning model hides the toggle.
 function applyCapabilities(model) {
-  const c = caps[model] || { temperature: true, seed: true };
-  const { tempInput, seedInput } = controls;
+  const c = caps[model] || { temperature: true, seed: true, reasoning: false, think: false };
+  const { tempInput, seedInput, thinkInput, thinkControl } = controls;
   tempInput.disabled = !c.temperature;
   seedInput.disabled = !c.seed;
   tempInput.closest(".interpret-control").classList.toggle("control-muted", !c.temperature);
   seedInput.closest(".interpret-control").classList.toggle("control-muted", !c.seed);
   tempInput.title = c.temperature ? "" : "This model ignores temperature";
   seedInput.title = c.seed ? "" : "This model ignores seed";
+
+  thinkControl.hidden = !c.reasoning;
+  const honored = !!c.think;
+  thinkInput.disabled = !honored;
+  if (!honored) thinkInput.checked = false;   // force the off state when not honored
+  thinkControl.classList.toggle("control-muted", c.reasoning && !honored);
+  thinkInput.title = honored
+    ? ""
+    : "This model reasons internally; thinking output is not exposed";
 }
 
 async function buildScaffold() {
   const modelSelect = node("select", { class: "interpret-select", attrs: { "aria-label": "Model" } });
   const tempInput = node("input", { type: "number", attrs: { step: "0.1", min: "0", max: "2", "aria-label": "Temperature" } });
   const seedInput = node("input", { type: "number", attrs: { step: "1", min: "1", "aria-label": "Seed" } });
+  // Think toggle: a checkbox under a "Think" caption. The checkbox is wrapped (not a
+  // direct child of .interpret-control) so the `> input` text-input styling for
+  // temperature/seed never applies to it. Shown/enabled by applyCapabilities.
+  const thinkInput = node("input", { type: "checkbox", attrs: { "aria-label": "Think" } });
+  const thinkControl = node("div", { class: "interpret-control interpret-think" }, [
+    node("span", { class: "control-label", text: "Think" }),
+    node("div", { class: "interpret-think-box" }, [thinkInput]),
+  ]);
   const runBtn = node("button", { class: "btn-primary interpret-run", type: "button", text: "Run" });
   // Run-time element: a labeled value with a visible resting state ("—") so it is
   // never an invisible empty span. Ticks live during a run, then freezes to the
@@ -146,8 +198,8 @@ async function buildScaffold() {
     fieldsDropdown,
   ]);
 
-  controls = { modelSelect, tempInput, seedInput, runBtn, errorEl, stopwatchEl,
-               fieldsToggle, fieldsPanel, fieldsDropdown };
+  controls = { modelSelect, tempInput, seedInput, thinkInput, thinkControl, runBtn,
+               errorEl, stopwatchEl, fieldsToggle, fieldsPanel, fieldsDropdown };
 
   const panel = node("section", { class: "glass-panel interpret-controls" }, [
     node("h2", { class: "heading-sm", text: "Generate interpretation" }),
@@ -155,6 +207,7 @@ async function buildScaffold() {
       labeled("Model", modelSelect),
       labeled("Temperature", tempInput),
       labeled("Seed", seedInput),
+      thinkControl,
       fieldsControl,
       runBtn,
       runtime,
@@ -243,7 +296,11 @@ function readParams() {
   const raw = controls.seedInput.value;
   let seed = raw === "" ? null : Number(raw);
   if (seed != null && Number.isNaN(seed)) seed = null;
-  return { model: controls.modelSelect.value, temperature, seed };
+  // think: a real on/off only when the toggle is interactive (an honoring model).
+  // Disabled/hidden -> null ("not applicable"); the server normalizes either way,
+  // and null persists as NULL while false persists as 0 (the honored-off case).
+  const think = controls.thinkInput.disabled ? null : controls.thinkInput.checked;
+  return { model: controls.modelSelect.value, temperature, seed, think };
 }
 
 async function onRun() {
@@ -251,7 +308,7 @@ async function onRun() {
     controls.errorEl.textContent = "Select a run first.";
     return;
   }
-  const { model, temperature, seed } = readParams();
+  const { model, temperature, seed, think } = readParams();
   const { runBtn, errorEl, stopwatchEl } = controls;
   errorEl.textContent = "";
   runBtn.disabled = true;
@@ -270,6 +327,7 @@ async function onRun() {
       model,
       temperature,
       seed,
+      think,
       fields: selectedFields(),
     });
     clearInterval(timer);
@@ -282,7 +340,15 @@ async function onRun() {
       // Freeze to the SERVER's measured generate() time — the value that is also
       // stored — rather than the client round-trip, so live and persisted agree.
       stopwatchEl.textContent = formatDuration(res.duration_ms) || "—";
-      renderCard({ text: res.text, model: res.model, duration_ms: res.duration_ms });
+      // Map the applied provenance into the same keys the stored read path uses:
+      // temperature is the requested value (what synthesize_lane persists), seed/
+      // think are the APPLIED values, and `thinking` is the transient reasoning
+      // content (present only on this fresh response, never re-fetched).
+      renderCard({
+        text: res.text, model: res.model, duration_ms: res.duration_ms,
+        temperature, seed: res.seed_applied, think: res.think_applied,
+        thinking: res.thinking,
+      });
       // A written run logged a new invocation, so the spend totals changed. Notify
       // the spend panel (main.js routes this to spend.refresh). Only the written
       // branch: a skipped lane logs nothing, so spend is unchanged.
