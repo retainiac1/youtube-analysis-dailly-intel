@@ -60,6 +60,7 @@
   --bg-elevated: #ffffff;
   --bg-card: rgba(255, 255, 255, 0.2);
   --bg-card-hover: rgba(255, 255, 255, 0.35);
+  --bg-panel-hover: #eef1f8;
   --border-subtle: rgba(0, 0, 0, 0.06);
   --border-glass: rgba(0, 0, 0, 0.08);
   --text-primary: #1a1f36;
