@@ -1,5 +1,6 @@
 import pytest
 
+import config
 import db
 import interpret
 import llm
@@ -62,12 +63,13 @@ def _make_fake_generate(rec, *, text="One. Two. Three.", input_tokens=120,
     provider that drops the seed. `think`/`is_reasoning` are recorded; the applied
     think mirrors the adapter contract (None when think did not apply, else int)."""
     def fake(model, prompt, *, temperature, seed, supports_temperature=None,
-             supports_seed=None, think=None, is_reasoning=False):
+             supports_seed=None, think=None, is_reasoning=False, max_tokens=None):
         rec.append({"model": model, "prompt": prompt,
                     "temperature": temperature, "seed": seed,
                     "supports_temperature": supports_temperature,
                     "supports_seed": supports_seed,
-                    "think": think, "is_reasoning": is_reasoning})
+                    "think": think, "is_reasoning": is_reasoning,
+                    "max_tokens": max_tokens})
         applied = seed if seed_applied == "echo" else seed_applied
         think_applied = None if think is None else int(think)
         thinking = "[reasoning]" if think else None
@@ -273,6 +275,31 @@ def test_synthesize_lane_passes_is_reasoning_to_generate(conn, monkeypatch):
     # ollama:qwen3.5:9b is seeded is_reasoning=1.
     assert rec[0]["is_reasoning"] is True
     assert rec[0]["think"] is True
+
+
+def test_synthesize_lane_threads_max_tokens_from_row(conn, monkeypatch):
+    # synthesize_lane reads max_tokens from the model row and threads it into
+    # generate() like the other capability columns. gpt-5.4-nano is a reasoning cloud
+    # model seeded with the generous default.
+    rec = []
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate(rec))
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    interpret.synthesize_lane(conn, "2026-06-09", "overall", "openai:gpt-5.4-nano",
+                              temperature=0.5, seed=7)
+    assert rec[0]["max_tokens"] == config.DEFAULT_MAX_TOKENS_REASONING
+
+
+def test_synthesize_lane_threads_null_max_tokens_for_local(conn, monkeypatch):
+    # A local (ollama) row is uncapped: NULL max_tokens threads through as None so the
+    # adapter omits the cap.
+    rec = []
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate(rec))
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    interpret.synthesize_lane(conn, "2026-06-09", "overall", "ollama:qwen3.5:9b",
+                              temperature=0.5, seed=7, think=True)
+    assert rec[0]["max_tokens"] is None
 
 
 def test_synthesize_lane_empty_skips_llm_and_writes_nothing(conn, monkeypatch):

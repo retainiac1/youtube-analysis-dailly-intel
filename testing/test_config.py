@@ -20,6 +20,9 @@ def make_good_config() -> SimpleNamespace:
         CATEGORY_REGION="US",
         OLLAMA_BASE_URL="http://127.0.0.1:11434",
         OLLAMA_TIMEOUT_SECONDS=600,
+        DEFAULT_MAX_TOKENS=512,
+        DEFAULT_MAX_TOKENS_REASONING=5000,
+        MAX_TOKENS_UPPER_BOUND=8192,
         SEARCH_QUERIES=[
             {"q": "build habits", "bucket": "habit"},
             {"q": "zone 2 cardio", "bucket": "health"},
@@ -266,3 +269,65 @@ def test_settings_toml_spend_viz_round_trips():
 
 def test_config_error_is_value_error():
     assert issubclass(config.ConfigError, ValueError)
+
+
+# --- max_tokens per-model caps (v9) -----------------------------------------
+
+def test_real_module_max_tokens_values():
+    # The three caps live ONLY in settings.toml (strict, no in-code fallback).
+    assert config.DEFAULT_MAX_TOKENS == 512
+    assert config.DEFAULT_MAX_TOKENS_REASONING == 5000
+    assert config.MAX_TOKENS_UPPER_BOUND == 8192
+
+
+def test_local_providers_contains_ollama():
+    # "Must be capped" = provider not in LOCAL_PROVIDERS; ollama is the local/free
+    # provider that may stay uncapped (NULL).
+    assert "ollama" in config.LOCAL_PROVIDERS
+
+
+def test_default_max_tokens_local_is_uncapped():
+    # A local/free provider gets None: the row stores no cap, the adapter omits the
+    # limit param. is_reasoning is irrelevant for a local model.
+    assert config.default_max_tokens("ollama", 1) is None
+    assert config.default_max_tokens("ollama", 0) is None
+
+
+def test_default_max_tokens_cloud_non_reasoning():
+    assert config.default_max_tokens("anthropic", 0) == config.DEFAULT_MAX_TOKENS
+
+
+def test_default_max_tokens_cloud_reasoning():
+    assert config.default_max_tokens("openai", 1) == config.DEFAULT_MAX_TOKENS_REASONING
+
+
+def test_non_positive_default_max_tokens_raises_named_error():
+    cfg = make_good_config()
+    cfg.DEFAULT_MAX_TOKENS = 0
+    with pytest.raises(config.ConfigError, match="DEFAULT_MAX_TOKENS"):
+        config.validate_config(cfg)
+
+
+def test_default_max_tokens_over_bound_raises_named_error():
+    # The factory default must not exceed the typo-guard ceiling.
+    cfg = make_good_config()
+    cfg.DEFAULT_MAX_TOKENS = cfg.MAX_TOKENS_UPPER_BOUND + 1
+    with pytest.raises(config.ConfigError, match="DEFAULT_MAX_TOKENS"):
+        config.validate_config(cfg)
+
+
+def test_reasoning_default_over_bound_raises_named_error():
+    # The reasoning default sits below the ceiling so a reasoning model has headroom
+    # to be tuned up; an inverted config (default above ceiling) must fail.
+    cfg = make_good_config()
+    cfg.DEFAULT_MAX_TOKENS_REASONING = cfg.MAX_TOKENS_UPPER_BOUND + 1
+    with pytest.raises(config.ConfigError, match="DEFAULT_MAX_TOKENS_REASONING"):
+        config.validate_config(cfg)
+
+
+def test_bool_rejected_for_max_tokens_key():
+    # A hand-edited `DEFAULT_MAX_TOKENS = true` in TOML parses to a bool.
+    cfg = make_good_config()
+    cfg.DEFAULT_MAX_TOKENS = True
+    with pytest.raises(config.ConfigError, match="DEFAULT_MAX_TOKENS"):
+        config.validate_config(cfg)

@@ -14,6 +14,15 @@ CATEGORY_REGION = "US"             # ISO-3166 region whose titles seed the categ
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"  # local Ollama HTTP endpoint the adapter calls; non-empty string. Loopback only (never 0.0.0.0).
 OLLAMA_TIMEOUT_SECONDS = 600       # per-request timeout for the Ollama call; positive int. Generous (local thinking runs are slow) but bounded so a dead server fails clean, not hangs.
 
+# Per-model LLM output-token caps (the models.max_tokens column defaults). These
+# three have NO in-code fallback: config.py loads them strictly and ConfigError-s
+# if the file/key is missing, because a silently-defaulted token cap is an invisible
+# cost surprise. A cloud row stores one of the two defaults; a local row stores NULL
+# (uncapped). max_tokens bounds total billed output INCLUDING reasoning tokens.
+DEFAULT_MAX_TOKENS = 512            # factory default for a NON-reasoning cloud model; positive int, <= MAX_TOKENS_UPPER_BOUND. 512 fits a 3-4 sentence summary.
+DEFAULT_MAX_TOKENS_REASONING = 5000 # factory default for a REASONING cloud model; positive int, <= MAX_TOKENS_UPPER_BOUND. Generous so thinking tokens don't starve the answer.
+MAX_TOKENS_UPPER_BOUND = 8192      # typo-guard ceiling for an edited max_tokens; positive int. Deliberately ABOVE the reasoning default so a reasoning model has headroom to be tuned up without a config edit. The provider enforces its own real ceiling.
+
 # Search queries, each tagged with a bucket. bucket must be "health" or "habit".
 [[SEARCH_QUERIES]]
 q = "build habits"

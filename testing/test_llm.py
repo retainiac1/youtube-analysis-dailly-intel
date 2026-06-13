@@ -143,12 +143,14 @@ def test_generate_openai(monkeypatch):
                         lambda: _fake_openai(rec, content="hi", prompt_tokens=20,
                                              completion_tokens=5))
     r = llm.generate("openai:gpt-5.4-nano", "p", temperature=0.5, seed=42,
-                     supports_temperature=False, supports_seed=True)
+                     supports_temperature=False, supports_seed=True, max_tokens=256)
     assert (r.text, r.input_tokens, r.output_tokens) == ("hi", 20, 5)
     assert r.seed_applied == 42
     assert rec["seed"] == 42                   # seed forwarded
     assert "temperature" not in rec            # temperature omitted (flag False)
-    assert "max_completion_tokens" in rec and "max_tokens" not in rec
+    # OpenAI's cap param name (max_completion_tokens, never max_tokens), carrying the
+    # caller-supplied per-model value.
+    assert rec["max_completion_tokens"] == 256 and "max_tokens" not in rec
 
 
 def test_generate_xai(monkeypatch):
@@ -157,12 +159,12 @@ def test_generate_xai(monkeypatch):
                         lambda: _fake_openai(rec, content="hi", prompt_tokens=20,
                                              completion_tokens=5))
     r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=42,
-                     supports_temperature=True, supports_seed=True)
+                     supports_temperature=True, supports_seed=True, max_tokens=256)
     assert (r.text, r.input_tokens, r.output_tokens) == ("hi", 20, 5)
     assert r.seed_applied == 42
     assert rec["seed"] == 42                   # seed honored by x.ai
     assert rec["temperature"] == 0.5           # temperature forwarded
-    assert "max_tokens" in rec                 # standard chat-completions cap
+    assert rec["max_tokens"] == 256            # standard chat-completions cap, value carried
 
 
 def test_generate_google(monkeypatch):
@@ -176,6 +178,85 @@ def test_generate_google(monkeypatch):
     assert r.seed_applied == 42
     cfg = rec["config"]
     assert cfg.temperature == 0.5 and cfg.seed == 42   # both in the config object
+
+
+# --- max_tokens threading (v9): the per-model cap reaches the right param ----
+# A non-None value lands under each provider's correct cap parameter; None means
+# uncapped and the adapter OMITS its cap param entirely (the temperature/seed
+# omit-when-not-set pattern). The param NAME differs per provider and stays locked.
+
+def test_anthropic_forwards_max_tokens_value(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_anthropic", lambda: _fake_anthropic(rec))
+    llm.generate("anthropic:claude-haiku-4-5", "p", temperature=0.5, seed=None,
+                 supports_temperature=True, supports_seed=False, max_tokens=321)
+    assert rec["max_tokens"] == 321
+
+
+def test_openai_forwards_max_tokens_value(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_openai", lambda: _fake_openai(rec))
+    llm.generate("openai:gpt-5.4-nano", "p", temperature=0.5, seed=None,
+                 supports_temperature=False, supports_seed=True, max_tokens=321)
+    assert rec["max_completion_tokens"] == 321 and "max_tokens" not in rec
+
+
+def test_xai_forwards_max_tokens_value(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
+    llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None,
+                 supports_temperature=True, supports_seed=True, max_tokens=321)
+    assert rec["max_tokens"] == 321
+
+
+def test_google_forwards_max_tokens_value(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_google", lambda: _fake_google(rec))
+    llm.generate("google:gemini-2.5-flash-lite", "p", temperature=0.5, seed=None,
+                 supports_temperature=True, supports_seed=True, max_tokens=321)
+    assert rec["config"].max_output_tokens == 321
+
+
+def test_anthropic_none_max_tokens_omits_cap(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_anthropic", lambda: _fake_anthropic(rec))
+    llm.generate("anthropic:claude-haiku-4-5", "p", temperature=0.5, seed=None,
+                 supports_temperature=True, supports_seed=False, max_tokens=None)
+    assert "max_tokens" not in rec
+
+
+def test_openai_none_max_tokens_omits_cap(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_openai", lambda: _fake_openai(rec))
+    llm.generate("openai:gpt-5.4-nano", "p", temperature=0.5, seed=None,
+                 supports_temperature=False, supports_seed=True, max_tokens=None)
+    assert "max_completion_tokens" not in rec
+
+
+def test_xai_none_max_tokens_omits_cap(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
+    llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None,
+                 supports_temperature=True, supports_seed=True, max_tokens=None)
+    assert "max_tokens" not in rec
+
+
+def test_google_none_max_tokens_omits_cap(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(llm, "_client_google", lambda: _fake_google(rec))
+    llm.generate("google:gemini-2.5-flash-lite", "p", temperature=0.5, seed=None,
+                 supports_temperature=True, supports_seed=True, max_tokens=None)
+    assert getattr(rec["config"], "max_output_tokens", None) is None
+
+
+def test_generate_default_max_tokens_is_none_uncapped(monkeypatch):
+    # The seam defaults max_tokens to None so the row-less seed_models.verify_xai_live
+    # call keeps working and emits no cap. Omitting the arg == uncapped.
+    rec = {}
+    monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
+    llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None,
+                 supports_temperature=True, supports_seed=True)
+    assert "max_tokens" not in rec
 
 
 # --- temperature range -----------------------------------------------------

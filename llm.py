@@ -41,9 +41,9 @@ SUPPORTED_PROVIDERS = ("anthropic", "openai", "xai", "google", "ollama")
 # uses it to decide whether the think toggle is interactive or shown-but-disabled.
 THINK_PROVIDERS = frozenset({"ollama"})
 
-# Output cap for a 3-4 sentence summary. Generous enough that the model is never
-# truncated mid-sentence; small enough to keep cost and latency low.
-MAX_OUTPUT_TOKENS = 512
+# The output cap is no longer a flat constant: it is the per-model max_tokens column
+# (config.DEFAULT_MAX_TOKENS / DEFAULT_MAX_TOKENS_REASONING seed the rows), threaded
+# through generate() into each adapter and omitted entirely when NULL (uncapped).
 
 # Whether a model honors temperature / seed is no longer inferred from the model
 # id here: it is read from the `models` table (supports_temperature / supports_seed)
@@ -111,7 +111,8 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int,
 def generate(model: str, prompt: str, *, temperature: float,
              seed: int | None, supports_temperature: bool,
              supports_seed: bool, think: bool | None = None,
-             is_reasoning: bool = False) -> GenerateResult:
+             is_reasoning: bool = False,
+             max_tokens: int | None = None) -> GenerateResult:
     """Generate a summary for `prompt` using the canonical combined `model`
     string. Splits the model exactly here, dispatches to the matching provider
     adapter, and returns a normalized GenerateResult. An unknown provider raises
@@ -126,7 +127,13 @@ def generate(model: str, prompt: str, *, temperature: float,
     (THINK_PROVIDERS); otherwise it is normalized to None here so no adapter receives
     it for a model it cannot apply it to (and the persisted think_applied is None).
     Provider-level rules (temperature range checks, Anthropic's structural no-seed)
-    stay in the adapters, independent of the flag."""
+    stay in the adapters, independent of the flag.
+
+    `max_tokens` is the per-model output cap (read from the same row by the caller).
+    None means uncapped: each adapter omits its cap parameter, exactly as it omits an
+    unset temperature/seed. It defaults to None so a row-less caller (e.g. the live
+    xAI verification) runs without forwarding a cap. The provider enforces its own
+    hard ceiling; an over-ceiling value surfaces through the adapter's LLMError."""
     provider, model_id = split_model(model)
     adapter = _ADAPTERS.get(provider)
     if adapter is None:
@@ -152,7 +159,8 @@ def generate(model: str, prompt: str, *, temperature: float,
     if not (is_reasoning and provider in THINK_PROVIDERS):
         think = None
     return adapter(model_id, prompt, temperature=temperature, seed=seed,
-                   supports_temperature=supports_temperature, think=think)
+                   supports_temperature=supports_temperature, think=think,
+                   max_tokens=max_tokens)
 
 
 def _api_error_base(provider: str):
@@ -232,18 +240,20 @@ def _client_google():
 # actually governed generation (None when the provider applied none).
 
 def _generate_anthropic(model_id, prompt, *, temperature, seed, supports_temperature,
-                        think=None):
+                        think=None, max_tokens=None):
     # Anthropic Messages API: temperature 0.0-1.0, forwarded when the model's flag
     # allows. seed is NOT a parameter here, so it is omitted STRUCTURALLY (regardless
     # of supports_seed) and seed_applied is always None. `think` is accepted for a
     # uniform adapter contract but never honored (anthropic is not in THINK_PROVIDERS,
-    # so generate() always passes None) → thinking/think_applied stay None.
+    # so generate() always passes None) → thinking/think_applied stay None. max_tokens
+    # is the per-model output cap, forwarded only when set (None = uncapped, omitted).
     client = _client_anthropic()
     kwargs = {
         "model": model_id,
-        "max_tokens": MAX_OUTPUT_TOKENS,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
     if supports_temperature:
         _check_temperature("anthropic", temperature, 0.0, 1.0)
         kwargs["temperature"] = temperature
@@ -259,17 +269,19 @@ def _generate_anthropic(model_id, prompt, *, temperature, seed, supports_tempera
 
 
 def _generate_openai(model_id, prompt, *, temperature, seed, supports_temperature,
-                     think=None):
+                     think=None, max_tokens=None):
     # supports_temperature is False for reasoning models (GPT-5 / o-series), which
     # reject any non-default temperature → omit it (not forwarded, not validated).
     # Others accept 0.0-2.0 → validate and forward. seed IS supported (verified live
-    # on gpt-5.4-nano); the cap param is max_completion_tokens.
+    # on gpt-5.4-nano); the cap param is max_completion_tokens, forwarded only when
+    # set (None = uncapped, omitted).
     client = _client_openai()
     kwargs = {
         "model": model_id,
         "messages": [{"role": "user", "content": prompt}],
-        "max_completion_tokens": MAX_OUTPUT_TOKENS,
     }
+    if max_tokens is not None:
+        kwargs["max_completion_tokens"] = max_tokens
     if supports_temperature:
         _check_temperature("openai", temperature, 0.0, 2.0)
         kwargs["temperature"] = temperature
@@ -286,15 +298,17 @@ def _generate_openai(model_id, prompt, *, temperature, seed, supports_temperatur
 
 
 def _generate_xai(model_id, prompt, *, temperature, seed, supports_temperature,
-                  think=None):
+                  think=None, max_tokens=None):
     # xAI is OpenAI-compatible: temperature 0.0-2.0 forwarded when supported, seed
-    # honored (best-effort), standard max_tokens cap.
+    # honored (best-effort), standard max_tokens cap forwarded only when set
+    # (None = uncapped, omitted).
     client = _client_xai()
     kwargs = {
         "model": model_id,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": MAX_OUTPUT_TOKENS,
     }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
     if supports_temperature:
         _check_temperature("xai", temperature, 0.0, 2.0)
         kwargs["temperature"] = temperature
@@ -311,13 +325,16 @@ def _generate_xai(model_id, prompt, *, temperature, seed, supports_temperature,
 
 
 def _generate_google(model_id, prompt, *, temperature, seed, supports_temperature,
-                     think=None):
+                     think=None, max_tokens=None):
     # Gemini: temperature 0.0-2.0 and seed both ride in GenerateContentConfig, each
     # set ONLY when applicable; usage lives under
-    # usage_metadata.{prompt,candidates}_token_count.
+    # usage_metadata.{prompt,candidates}_token_count. max_output_tokens is the cap,
+    # set only when max_tokens is provided (None = uncapped, omitted).
     client = _client_google()
     from google.genai import types
-    cfg_kwargs = {"max_output_tokens": MAX_OUTPUT_TOKENS}
+    cfg_kwargs = {}
+    if max_tokens is not None:
+        cfg_kwargs["max_output_tokens"] = max_tokens
     if supports_temperature:
         _check_temperature("google", temperature, 0.0, 2.0)
         cfg_kwargs["temperature"] = temperature
@@ -355,7 +372,11 @@ def _ollama_request(payload: dict) -> dict:
 
 
 def _generate_ollama(model_id, prompt, *, temperature, seed, supports_temperature,
-                     think=None):
+                     think=None, max_tokens=None):
+    # max_tokens is accepted for the uniform adapter contract but deliberately IGNORED
+    # (no num_predict): Ollama is local and free, so the cost ceiling that justifies a
+    # cap elsewhere does not apply and runaway runtime is the timeout's job. Its row is
+    # NULL (uncapped) and never reaches here as a real cap.
     # Local Ollama over HTTP: no SDK, no API key, base URL + timeout from config.
     # model_id is the bare tag (split_model already stripped the 'ollama:' prefix).
     # temperature/seed ride in `options` only when applicable; NO temperature range

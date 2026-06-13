@@ -58,7 +58,7 @@ EXPECTED_COLUMNS = {
     "app_preferences": {"key", "value", "updated_at"},
     "models": {
         "model", "provider", "enabled", "supports_temperature", "supports_seed",
-        "is_reasoning", "deleted", "added_at", "notes",
+        "is_reasoning", "max_tokens", "deleted", "added_at", "notes",
     },
     "model_prices": {
         "id", "model", "input_per_1m", "output_per_1m", "valid_from", "valid_to",
@@ -123,7 +123,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 8
+        assert version == db.SCHEMA_VERSION == 9
     finally:
         conn.close()
 
@@ -622,7 +622,7 @@ def test_v7_to_v8_adds_think_and_seeds_ollama_non_destructively(tmp_path):
     conn = db.get_connection(db_path)
     try:
         assert "think" in _columns(conn, "interpretations")
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         ollama = conn.execute(
             "SELECT * FROM models WHERE model = 'ollama:qwen3.5:9b'"
         ).fetchone()
@@ -639,6 +639,138 @@ def test_v7_to_v8_adds_think_and_seeds_ollama_non_destructively(tmp_path):
         interp_after = dict(conn.execute("SELECT * FROM interpretations").fetchone())
         assert interp_after["think"] is None
         assert {k: interp_after[k] for k in interp_before} == interp_before
+    finally:
+        conn.close()
+
+
+# --- v8 -> v9: models.max_tokens (nullable, reasoning-aware backfill) --------
+
+# A genuine v8 models table predates max_tokens; built from this CREATE (not the
+# current statement, which already has the column) so the migration is exercised.
+_PRE_V9_MODELS = """
+CREATE TABLE models (
+    model TEXT PRIMARY KEY,
+    provider TEXT,
+    enabled INTEGER DEFAULT 1,
+    supports_temperature INTEGER,
+    supports_seed INTEGER,
+    is_reasoning INTEGER,
+    deleted INTEGER DEFAULT 0,
+    added_at TEXT,
+    notes TEXT
+)
+"""
+
+
+def _build_v8_db(db_path):
+    """A real v8 schema: the current CREATEs but `models` at its pre-v9 (no
+    max_tokens) shape, stamped user_version = 8, seeded with three rows that carry
+    NO max_tokens column — a non-reasoning cloud model, a reasoning cloud model, and
+    the local ollama model — so the v8->v9 migration is shown to ADD and backfill
+    the column reasoning-aware."""
+    conn = db.get_connection(db_path)
+    try:
+        for statement in db.SCHEMA_STATEMENTS:
+            if "CREATE TABLE IF NOT EXISTS models" in statement:
+                statement = _PRE_V9_MODELS
+            conn.execute(statement)
+        conn.executemany(
+            "INSERT INTO models (model, provider, enabled, supports_temperature, "
+            "supports_seed, is_reasoning, deleted, added_at, notes) "
+            "VALUES (?, ?, 1, 1, 1, ?, 0, '2026-01-01T00:00:00-05:00', NULL)",
+            [
+                ("anthropic:claude-haiku-4-5", "anthropic", 0),
+                ("openai:gpt-5.4-nano", "openai", 1),
+                ("ollama:qwen3.5:9b", "ollama", 1),
+            ],
+        )
+        conn.execute("PRAGMA user_version = 8")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_v8_to_v9_adds_max_tokens_reasoning_aware(tmp_path):
+    """A genuine v8 DB (models without max_tokens) gains a nullable max_tokens via
+    ALTER, backfilled by is_reasoning: non-reasoning cloud -> lean default (no
+    behavior change), reasoning cloud -> generous default (the one intended
+    512->5000 fix), local -> NULL (uncapped). Bumps to v9."""
+    db_path = str(tmp_path / "test.db")
+    _build_v8_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        assert "max_tokens" not in _columns(conn, "models")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    finally:
+        conn.close()
+
+    db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        assert "max_tokens" in _columns(conn, "models")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+
+        def mt(model):
+            return conn.execute(
+                "SELECT max_tokens FROM models WHERE model = ?", (model,)
+            ).fetchone()["max_tokens"]
+
+        assert mt("anthropic:claude-haiku-4-5") == config.DEFAULT_MAX_TOKENS
+        assert mt("openai:gpt-5.4-nano") == config.DEFAULT_MAX_TOKENS_REASONING
+        assert mt("ollama:qwen3.5:9b") is None
+    finally:
+        conn.close()
+
+
+def test_v9_migration_fails_closed_on_uncapped_paid_row(tmp_path):
+    """A dirty pre-v9 row — a non-local model with a NULL provider — must not slip
+    through `NOT IN (local)` (NULL NOT IN (...) is NULL, not TRUE) and survive
+    uncapped. The migration raises and rolls back: version stays 8, no column added,
+    so a paid model can never silently end up uncapped."""
+    db_path = str(tmp_path / "test.db")
+    _build_v8_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO models (model, provider, enabled, supports_temperature, "
+            "supports_seed, is_reasoning, deleted, added_at, notes) "
+            "VALUES ('mystery:x', NULL, 1, 1, 1, 0, 0, "
+            "'2026-01-01T00:00:00-05:00', NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(ValueError, match="uncapped"):
+        db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert "max_tokens" not in _columns(conn, "models")
+    finally:
+        conn.close()
+
+
+def test_init_db_seeds_max_tokens_reasoning_aware(tmp_path):
+    """A freshly-seeded DB caps each cloud model by its reasoning flag and leaves
+    the local model uncapped — fresh seed == the migration backfill."""
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        def mt(model):
+            return conn.execute(
+                "SELECT max_tokens FROM models WHERE model = ?", (model,)
+            ).fetchone()["max_tokens"]
+
+        assert mt("openai:gpt-5.4-nano") == config.DEFAULT_MAX_TOKENS_REASONING
+        assert mt("anthropic:claude-haiku-4-5") == config.DEFAULT_MAX_TOKENS
+        assert mt("xai:grok-4-fast") == config.DEFAULT_MAX_TOKENS
+        assert mt("google:gemini-2.5-flash-lite") == config.DEFAULT_MAX_TOKENS
+        assert mt("ollama:qwen3.5:9b") is None
     finally:
         conn.close()
 
@@ -1336,6 +1468,82 @@ def test_update_model_changes_mutable_cols_never_pk(tmp_path):
             assert db.update_model(
                 conn, model="nope:x", enabled=True, supports_temperature=True,
                 supports_seed=True, is_reasoning=False, notes=None) == 0
+    finally:
+        conn.close()
+
+
+def test_insert_model_defaults_max_tokens_reasoning_aware(tmp_path):
+    # Omitting max_tokens applies config.default_max_tokens: reasoning cloud ->
+    # generous, non-reasoning cloud -> lean, local -> NULL (uncapped).
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        with db.transaction(conn):
+            db.insert_model(conn, model="openai:r", provider="openai", enabled=True,
+                            supports_temperature=False, supports_seed=True,
+                            is_reasoning=True, notes=None,
+                            now="2026-06-12T10:00:00-04:00")
+            db.insert_model(conn, model="anthropic:c", provider="anthropic",
+                            enabled=True, supports_temperature=True,
+                            supports_seed=False, is_reasoning=False, notes=None,
+                            now="2026-06-12T10:00:00-04:00")
+            db.insert_model(conn, model="ollama:loc", provider="ollama",
+                            enabled=True, supports_temperature=True,
+                            supports_seed=True, is_reasoning=True, notes=None,
+                            now="2026-06-12T10:00:00-04:00")
+        assert (db.fetch_model(conn, "openai:r")["max_tokens"]
+                == config.DEFAULT_MAX_TOKENS_REASONING)
+        assert (db.fetch_model(conn, "anthropic:c")["max_tokens"]
+                == config.DEFAULT_MAX_TOKENS)
+        assert db.fetch_model(conn, "ollama:loc")["max_tokens"] is None
+    finally:
+        conn.close()
+
+
+def test_insert_model_explicit_max_tokens_is_stored(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        with db.transaction(conn):
+            db.insert_model(conn, model="xai:x", provider="xai", enabled=True,
+                            supports_temperature=True, supports_seed=True,
+                            is_reasoning=False, notes=None, max_tokens=1234,
+                            now="2026-06-12T10:00:00-04:00")
+        assert db.fetch_model(conn, "xai:x")["max_tokens"] == 1234
+    finally:
+        conn.close()
+
+
+def test_update_model_sets_max_tokens_when_given(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        with db.transaction(conn):
+            db.update_model(conn, model="anthropic:claude-haiku-4-5", enabled=True,
+                            supports_temperature=True, supports_seed=False,
+                            is_reasoning=False, notes=None, max_tokens=2048)
+        assert db.fetch_model(conn, "anthropic:claude-haiku-4-5")["max_tokens"] == 2048
+    finally:
+        conn.close()
+
+
+def test_update_model_omitting_max_tokens_leaves_it_unchanged(tmp_path):
+    # The PUT endpoint stays on its current path until Phase 2; an omitted
+    # max_tokens must not silently wipe the stored cap.
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        before = db.fetch_model(conn, "anthropic:claude-haiku-4-5")["max_tokens"]
+        assert before == config.DEFAULT_MAX_TOKENS  # sanity: a real cap to preserve
+        with db.transaction(conn):
+            db.update_model(conn, model="anthropic:claude-haiku-4-5", enabled=False,
+                            supports_temperature=True, supports_seed=False,
+                            is_reasoning=False, notes="x")
+        assert db.fetch_model(conn, "anthropic:claude-haiku-4-5")["max_tokens"] == before
     finally:
         conn.close()
 

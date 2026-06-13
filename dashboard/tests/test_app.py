@@ -161,7 +161,7 @@ VALID_MODEL = "openai:gpt-5.4-nano"
 
 def _fake_generate(text="Synthesized summary.", input_tokens=100, output_tokens=30):
     def fake(model, prompt, *, temperature, seed, supports_temperature=None,
-             supports_seed=None, think=None, is_reasoning=False):
+             supports_seed=None, think=None, is_reasoning=False, max_tokens=None):
         return llm.GenerateResult(text, input_tokens, output_tokens, seed_applied=seed,
                                   thinking=("[reasoning]" if think else None),
                                   think_applied=(None if think is None else int(think)))

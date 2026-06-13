@@ -139,6 +139,48 @@ SETTINGS_DEFAULTS: dict[str, object] = {
 _SETTINGS_PATH = Path(__file__).resolve().with_name("settings.toml")
 
 
+class ConfigError(ValueError):
+    """Raised when configuration is missing a key, has a wrong type, or holds an
+    invalid SEARCH_QUERIES entry. Subclasses ValueError so callers can catch
+    either."""
+
+
+# Keys with NO in-code default: they MUST be present in settings.toml. Loaded by
+# load_required_settings (strict, ConfigError on absence), NOT merged through
+# SETTINGS_DEFAULTS. Type/range validation lives in validate_config.
+REQUIRED_TOML_KEYS: dict[str, type] = {
+    "DEFAULT_MAX_TOKENS": int,
+    "DEFAULT_MAX_TOKENS_REASONING": int,
+    "MAX_TOKENS_UPPER_BOUND": int,
+}
+
+
+def load_required_settings(path: Path | str = _SETTINGS_PATH) -> dict:
+    """Load the keys that have NO safe-degrade fallback and so MUST be in the file.
+
+    Unlike load_settings (a missing file/key degrades to its DEFAULT_*), this is
+    deliberately strict: a missing file OR a missing key raises ConfigError. A
+    silently-defaulted output-token cap is exactly the invisible cost surprise the
+    per-model max_tokens work exists to kill, so these three keys fail loud. The
+    blast radius is intentional — a bad/absent settings.toml hard-fails here where
+    every other setting would degrade. Values are NOT range-checked here; run
+    validate_config over the loaded module."""
+    try:
+        with open(path, "rb") as f:
+            parsed = tomllib.load(f)
+    except FileNotFoundError as e:
+        raise ConfigError(
+            f"settings.toml not found at {path}; the required keys "
+            f"{sorted(REQUIRED_TOML_KEYS)} have no in-code fallback"
+        ) from e
+    out = {}
+    for key in REQUIRED_TOML_KEYS:
+        if key not in parsed:
+            raise ConfigError(f"Missing required settings.toml key: {key}")
+        out[key] = parsed[key]
+    return out
+
+
 def load_settings(path: Path | str = _SETTINGS_PATH) -> dict:
     """Load the user-tunable settings from a TOML file, merged over the in-code
     defaults so the result always has every key.
@@ -175,6 +217,30 @@ CATEGORY_REGION = _settings["CATEGORY_REGION"]
 SEARCH_QUERIES = _settings["SEARCH_QUERIES"]
 PRICES = _settings["PRICES"]
 SPEND_VIZ = _settings["SPEND_VIZ"]
+
+# The per-model max_tokens defaults — strict, no fallback (see load_required_settings).
+_required = load_required_settings()
+DEFAULT_MAX_TOKENS = _required["DEFAULT_MAX_TOKENS"]
+DEFAULT_MAX_TOKENS_REASONING = _required["DEFAULT_MAX_TOKENS_REASONING"]
+MAX_TOKENS_UPPER_BOUND = _required["MAX_TOKENS_UPPER_BOUND"]
+
+# Providers that run locally and free, so a NULL (uncapped) max_tokens is allowed:
+# the cost ceiling that justifies a cap everywhere else does not apply, and runaway
+# runtime is the timeout's job, not a token cap. A dedicated set — NOT llm's
+# THINK_PROVIDERS (different concern: the think toggle vs the cap policy). "Must be
+# capped" (the paid-model guarantee) is `provider not in LOCAL_PROVIDERS`.
+LOCAL_PROVIDERS: frozenset[str] = frozenset({"ollama"})
+
+
+def default_max_tokens(provider: str, is_reasoning) -> int | None:
+    """Factory default output cap for a model, in ONE place (seed, v9 backfill, and
+    insert_model all call this). None for a local/free provider (stored uncapped;
+    the adapter omits its limit param); otherwise the reasoning-aware cloud default
+    — a reasoning model gets the generous cap so thinking tokens do not starve the
+    answer. `is_reasoning` accepts 0/1 or bool."""
+    if provider in LOCAL_PROVIDERS:
+        return None
+    return DEFAULT_MAX_TOKENS_REASONING if is_reasoning else DEFAULT_MAX_TOKENS
 
 PUBLISHED_AFTER = "2025-09-01T00:00:00Z"
 PUBLISHED_BEFORE = None
@@ -315,19 +381,17 @@ REQUIRED_KEYS: dict[str, type] = {
     "OLLAMA_TIMEOUT_SECONDS": int,
     "SEARCH_QUERIES": list,
     "PRICES": dict,
+    "DEFAULT_MAX_TOKENS": int,
+    "DEFAULT_MAX_TOKENS_REASONING": int,
+    "MAX_TOKENS_UPPER_BOUND": int,
 }
 
 # Keys that must be strictly positive ints (type is checked via REQUIRED_KEYS).
 POSITIVE_INT_KEYS: frozenset[str] = frozenset(
     {"MIN_VIEWS", "WINDOW_DAYS", "TOP_N", "SHORT_MAX_SECONDS",
-     "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER", "OLLAMA_TIMEOUT_SECONDS"}
+     "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER", "OLLAMA_TIMEOUT_SECONDS",
+     "DEFAULT_MAX_TOKENS", "DEFAULT_MAX_TOKENS_REASONING", "MAX_TOKENS_UPPER_BOUND"}
 )
-
-
-class ConfigError(ValueError):
-    """Raised when configuration is missing a key, has a wrong type, or holds an
-    invalid SEARCH_QUERIES entry. Subclasses ValueError so callers can catch
-    either."""
 
 
 def get_published_after() -> str:
@@ -400,6 +464,19 @@ def validate_config(cfg: object | None = None) -> None:
 
     if getattr(cfg, "SAFETY_BUFFER") >= getattr(cfg, "DAILY_QUOTA_LIMIT"):
         raise ConfigError("Config key SAFETY_BUFFER must be < DAILY_QUOTA_LIMIT")
+
+    # The factory defaults must not exceed the typo-guard ceiling. The reasoning
+    # default deliberately sits BELOW the ceiling so a reasoning model keeps headroom
+    # to be tuned up in /models without a config edit.
+    bound = getattr(cfg, "MAX_TOKENS_UPPER_BOUND")
+    if getattr(cfg, "DEFAULT_MAX_TOKENS") > bound:
+        raise ConfigError(
+            "Config key DEFAULT_MAX_TOKENS must be <= MAX_TOKENS_UPPER_BOUND"
+        )
+    if getattr(cfg, "DEFAULT_MAX_TOKENS_REASONING") > bound:
+        raise ConfigError(
+            "Config key DEFAULT_MAX_TOKENS_REASONING must be <= MAX_TOKENS_UPPER_BOUND"
+        )
 
     # CATEGORY_REGION feeds the videoCategories.list regionCode; an empty string
     # would silently break the fetch, so reject it even though it types as str.

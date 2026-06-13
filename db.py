@@ -36,7 +36,13 @@ import config
 # < 8 so an existing v7 DB picks up the newly-added local Ollama model; the seed is
 # insert-if-empty (ON CONFLICT DO NOTHING) and soft-deleted rows conflict to a
 # no-op, so re-running never resurrects an operator-removed model.
-SCHEMA_VERSION = 8
+# v9: added models.max_tokens (the per-model output-token cap; NULLABLE, NULL =
+# uncapped). Guarded ALTER in the same atomic block, then a reasoning-aware backfill
+# of pre-existing non-local rows (config.default_max_tokens, so no literal here) and
+# a fail-closed assertion that no non-local/unknown-provider row is left uncapped.
+# Local rows (ollama) stay NULL; the "never uncapped" guarantee for paid models is
+# enforced by validation, not the column. See config.default_max_tokens.
+SCHEMA_VERSION = 9
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -180,6 +186,7 @@ SCHEMA_STATEMENTS: list[str] = [
         supports_temperature INTEGER,   -- pass temperature only if 1
         supports_seed INTEGER,          -- pass seed only if 1
         is_reasoning INTEGER,           -- informational / UI
+        max_tokens INTEGER,             -- output cap; NULL = uncapped (local only)
         deleted INTEGER DEFAULT 0,      -- soft-delete flag
         added_at TEXT,
         notes TEXT
@@ -251,12 +258,14 @@ def _seed_models(conn: sqlite3.Connection) -> None:
     for m in config.SEED_MODELS:
         conn.execute(
             "INSERT INTO models (model, provider, enabled, supports_temperature, "
-            "supports_seed, is_reasoning, deleted, added_at, notes) "
-            "VALUES (:model, :provider, 1, :st, :ss, :ir, 0, :now, NULL) "
+            "supports_seed, is_reasoning, max_tokens, deleted, added_at, notes) "
+            "VALUES (:model, :provider, 1, :st, :ss, :ir, :mt, 0, :now, NULL) "
             "ON CONFLICT(model) DO NOTHING",
             {"model": m["model"], "provider": m["provider"],
              "st": m["supports_temperature"], "ss": m["supports_seed"],
-             "ir": m["is_reasoning"], "now": now},
+             "ir": m["is_reasoning"],
+             "mt": config.default_max_tokens(m["provider"], m["is_reasoning"]),
+             "now": now},
         )
         has_window = conn.execute(
             "SELECT 1 FROM model_prices WHERE model = ? LIMIT 1", (m["model"],)
@@ -322,6 +331,32 @@ def init_db(db_path: str) -> None:
             # CREATE above, so the guard skips the ALTER.
             if "think" not in interp_cols:
                 conn.execute("ALTER TABLE interpretations ADD COLUMN think INTEGER")
+            # The local-provider set, as a parameterized IN clause, reused by the v9
+            # backfill and the fail-closed guard. Built from config so the policy has
+            # one home and no provider string is hardcoded here.
+            _locals = sorted(config.LOCAL_PROVIDERS)
+            _local_params = {f"local{i}": p for i, p in enumerate(_locals)}
+            _local_in = ", ".join(f":{k}" for k in _local_params)
+            # v8 -> v9: add models.max_tokens (nullable; NULL = uncapped). A fresh DB
+            # already has it from the CREATE above, so the guard skips the ALTER and
+            # the seed below sets each row's value. For a pre-existing DB the ALTER
+            # leaves every row NULL, so backfill is reasoning-aware: a non-local row
+            # gets its config default (reasoning -> generous, else lean); local rows
+            # stay NULL. config values are bound, so no token literal lives here.
+            if "max_tokens" not in _column_names(conn, "models"):
+                conn.execute("ALTER TABLE models ADD COLUMN max_tokens INTEGER")
+                # Plain NOT IN (no COALESCE): a NULL-provider row is intentionally
+                # NOT matched (NULL NOT IN (...) is NULL), so it stays NULL and the
+                # fail-closed guard below catches it and aborts — a dirty provider is
+                # surfaced, not silently capped to a default that may be wrong.
+                conn.execute(
+                    "UPDATE models SET max_tokens = "
+                    "CASE WHEN is_reasoning = 1 THEN :reasoning ELSE :default END "
+                    "WHERE max_tokens IS NULL "
+                    f"AND provider NOT IN ({_local_in})",
+                    {"reasoning": config.DEFAULT_MAX_TOKENS_REASONING,
+                     "default": config.DEFAULT_MAX_TOKENS, **_local_params},
+                )
             # Offline-seed the baseline model registry, gated to current_version < 8
             # so the v7->v8 migration re-runs the seed and an existing v7 DB picks up
             # the new local Ollama model. Insert-if-empty (ON CONFLICT DO NOTHING):
@@ -330,6 +365,23 @@ def init_db(db_path: str) -> None:
             # Inside this block so seed + columns + stamp are atomic.
             if current_version < 8:
                 _seed_models(conn)
+            # Fail-closed: a non-local (paid) model must never be left uncapped. A
+            # row with a NULL or odd-cased provider would slip the backfill's NOT IN
+            # (NULL NOT IN (...) is NULL, not TRUE) and stay NULL, so assert it here
+            # over ALL rows before stamping. A violation raises and the except below
+            # ROLLBACKs the whole migration (column + version), so init_db refuses to
+            # leave a paid model uncapped rather than half-applying.
+            uncapped = conn.execute(
+                "SELECT COUNT(*) AS c FROM models WHERE max_tokens IS NULL "
+                f"AND COALESCE(provider, '') NOT IN ({_local_in})",
+                _local_params,
+            ).fetchone()["c"]
+            if uncapped:
+                raise ValueError(
+                    f"v9 migration would leave {uncapped} non-local model row(s) "
+                    "uncapped (NULL max_tokens with a non-local/unknown provider); "
+                    "refusing to stamp the schema version"
+                )
             # Stamp LAST, so the version is never ahead of the schema.
             if current_version != SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -831,44 +883,62 @@ def fetch_models(
     ).fetchall()
 
 
+# Sentinel for "max_tokens argument not supplied" — distinct from an explicit None,
+# which is a real value (uncapped). Lets insert_model fall back to the reasoning-
+# aware default and update_model leave the column untouched.
+_UNSET = object()
+
+
 def insert_model(conn: sqlite3.Connection, *, model: str, provider: str,
                  enabled: bool, supports_temperature: bool, supports_seed: bool,
-                 is_reasoning: bool, notes, now: str) -> int:
+                 is_reasoning: bool, notes, now: str, max_tokens=_UNSET) -> int:
     """Insert a new model (insert-if-absent). ON CONFLICT(model) DO NOTHING, so a
     duplicate PK returns rowcount 0 (the endpoint maps that to 409) and never
-    overwrites. Booleans coerced to 1/0; added_at = now. Does not commit."""
+    overwrites. Booleans coerced to 1/0; added_at = now. Does not commit.
+
+    max_tokens is the output cap (None = uncapped). When omitted it falls back to
+    config.default_max_tokens(provider, is_reasoning) — the one place the factory
+    default lives — so a new cloud model is never inserted uncapped; pass an explicit
+    value (including None for a local model) to override."""
+    if max_tokens is _UNSET:
+        max_tokens = config.default_max_tokens(provider, is_reasoning)
     cur = conn.execute(
         """
         INSERT INTO models (model, provider, enabled, supports_temperature,
-                            supports_seed, is_reasoning, deleted, added_at, notes)
-        VALUES (:model, :provider, :enabled, :st, :ss, :ir, 0, :now, :notes)
+                            supports_seed, is_reasoning, max_tokens, deleted,
+                            added_at, notes)
+        VALUES (:model, :provider, :enabled, :st, :ss, :ir, :mt, 0, :now, :notes)
         ON CONFLICT(model) DO NOTHING
         """,
         {"model": model, "provider": provider, "enabled": 1 if enabled else 0,
          "st": 1 if supports_temperature else 0, "ss": 1 if supports_seed else 0,
-         "ir": 1 if is_reasoning else 0, "now": now, "notes": notes},
+         "ir": 1 if is_reasoning else 0, "mt": max_tokens, "now": now,
+         "notes": notes},
     )
     return cur.rowcount
 
 
 def update_model(conn: sqlite3.Connection, *, model: str, enabled: bool,
                  supports_temperature: bool, supports_seed: bool,
-                 is_reasoning: bool, notes) -> int:
-    """Update the five mutable columns of one model. NEVER sets `model` (the PK is
-    taken only from the path and is immutable). Booleans coerced to 1/0. Returns
-    rowcount (0 = unknown model). Does not commit."""
+                 is_reasoning: bool, notes, max_tokens=_UNSET) -> int:
+    """Update the mutable columns of one model. NEVER sets `model` (the PK is taken
+    only from the path and is immutable). Booleans coerced to 1/0. Returns rowcount
+    (0 = unknown model). Does not commit.
+
+    max_tokens (None = uncapped) is included in the SET only when supplied, so a
+    caller that does not manage the cap leaves the stored value untouched rather than
+    wiping it to NULL."""
+    sets = ["enabled = :enabled", "supports_temperature = :st",
+            "supports_seed = :ss", "is_reasoning = :ir", "notes = :notes"]
+    params = {"model": model, "enabled": 1 if enabled else 0,
+              "st": 1 if supports_temperature else 0,
+              "ss": 1 if supports_seed else 0,
+              "ir": 1 if is_reasoning else 0, "notes": notes}
+    if max_tokens is not _UNSET:
+        sets.append("max_tokens = :mt")
+        params["mt"] = max_tokens
     cur = conn.execute(
-        """
-        UPDATE models SET enabled = :enabled,
-                          supports_temperature = :st,
-                          supports_seed = :ss,
-                          is_reasoning = :ir,
-                          notes = :notes
-        WHERE model = :model
-        """,
-        {"model": model, "enabled": 1 if enabled else 0,
-         "st": 1 if supports_temperature else 0, "ss": 1 if supports_seed else 0,
-         "ir": 1 if is_reasoning else 0, "notes": notes},
+        f"UPDATE models SET {', '.join(sets)} WHERE model = :model", params
     )
     return cur.rowcount
 

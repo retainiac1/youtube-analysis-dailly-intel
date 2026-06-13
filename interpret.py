@@ -221,7 +221,8 @@ def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
                       supports_temperature=bool(model_row["supports_temperature"]),
                       supports_seed=bool(model_row["supports_seed"]),
                       think=think,
-                      is_reasoning=bool(model_row["is_reasoning"]))
+                      is_reasoning=bool(model_row["is_reasoning"]),
+                      max_tokens=model_row["max_tokens"])
     duration_ms = int((time.monotonic() - start) * 1000)
     now = now_local_iso()
 

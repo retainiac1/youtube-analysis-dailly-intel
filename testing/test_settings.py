@@ -5,6 +5,8 @@ and no dependence on the real settings.toml beyond the regression assertions tha
 the shipped module still loads the expected values.
 """
 
+import pytest
+
 import config
 
 VALID_TOML = """\
@@ -83,3 +85,40 @@ def test_real_module_unchanged_after_load():
     assert config.DAILY_QUOTA_LIMIT == 10000
     assert config.SAFETY_BUFFER == 500
     assert len(config.SEARCH_QUERIES) == 12
+
+
+# --- strict required-key load for the max_tokens caps (v9) -------------------
+# Unlike load_settings (degrades a missing file/key to a DEFAULT_* fallback),
+# load_required_settings has NO fallback: a silently-defaulted token cap is an
+# invisible cost surprise, so a missing file or key fails loud with ConfigError.
+
+REQUIRED_TOML = """\
+DEFAULT_MAX_TOKENS = 512
+DEFAULT_MAX_TOKENS_REASONING = 5000
+MAX_TOKENS_UPPER_BOUND = 8192
+"""
+
+
+def test_load_required_returns_the_caps(tmp_path):
+    loaded = config.load_required_settings(_write(tmp_path, REQUIRED_TOML))
+    assert loaded["DEFAULT_MAX_TOKENS"] == 512
+    assert loaded["DEFAULT_MAX_TOKENS_REASONING"] == 5000
+    assert loaded["MAX_TOKENS_UPPER_BOUND"] == 8192
+
+
+def test_load_required_missing_key_raises_named_error(tmp_path):
+    partial = "DEFAULT_MAX_TOKENS = 512\nMAX_TOKENS_UPPER_BOUND = 8192\n"
+    with pytest.raises(config.ConfigError, match="DEFAULT_MAX_TOKENS_REASONING"):
+        config.load_required_settings(_write(tmp_path, partial))
+
+
+def test_load_required_missing_file_raises(tmp_path):
+    # No safe-degrade for these keys: a missing settings.toml is a hard error.
+    with pytest.raises(config.ConfigError, match="not found"):
+        config.load_required_settings(tmp_path / "does_not_exist.toml")
+
+
+def test_real_module_required_caps_loaded():
+    assert config.DEFAULT_MAX_TOKENS == 512
+    assert config.DEFAULT_MAX_TOKENS_REASONING == 5000
+    assert config.MAX_TOKENS_UPPER_BOUND == 8192
