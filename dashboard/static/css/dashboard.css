@@ -927,7 +927,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
    flag pills, a distinct "current" price badge, and one danger affordance for
    soft-delete. Cohesion with the Glass Theme over a new aesthetic. */
 .models { grid-column: 1 / -1; min-height: 12rem; }
-.models-page { display: flex; flex-direction: column; gap: 1.25rem; }
+.models-page { display: flex; flex-direction: column; gap: 1.25rem; --cap-w: 7rem; }
 .models-page-head,
 .models-detail-head {
   display: flex; align-items: center; justify-content: space-between; gap: 1rem;
@@ -941,10 +941,23 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .models-detail-title { display: flex; align-items: center; gap: 0.5rem; }
 .models-detail-head { margin-bottom: 0.85rem; }
 
-/* The model grid row: model | flags | notes | action. Header shares the columns. */
-.models-row {
+/* The column tracks live ONCE on the grid container; the header and every data row
+   are subgrids of it, so their cells share identical column lines. (Without this each
+   .models-row is an independent grid whose content-sized `auto` tracks — pills, the
+   Delete button — diverge between header and rows, so the headers don't line up with
+   their data.) */
+.models-grid {
   display: grid;
   grid-template-columns: minmax(12rem, 2fr) auto minmax(5rem, 0.6fr) minmax(6rem, 1fr) auto;
+  column-gap: 1rem;
+}
+
+/* The model grid row: model | flags | cap | notes | action. Header shares the columns
+   via subgrid. */
+.models-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   gap: 1rem;
   align-items: center;
   padding: 0.5rem 0.75rem;
@@ -968,6 +981,14 @@ html { scroll-padding-top: var(--header-h, 0px); }
   font-weight: 600; font-size: 0.72rem;
   text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--text-muted);
+}
+/* Toggle header centers over the pill group (col2 is auto-sized to the pills). */
+.models-h--toggle { text-align: center; }
+/* Cap header mirrors the cap input box (same width, left-pinned at the same column
+   edge) and centers, so it sits over the centered cap number. */
+.models-h--cap {
+  width: var(--cap-w); max-width: 100%;
+  text-align: center;
 }
 .models-row[data-row]:hover { background: var(--bg-panel-hover); cursor: pointer; }
 .models-row.is-selected {
@@ -1018,7 +1039,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
 /* the per-model output cap: a compact number input + a non-blocking warn note stacked
    in one grid cell, so the cap reads next to the toggle flags. */
 .models-cap-wrap { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
-.models-cap { max-width: 7rem; }
+.models-cap { max-width: var(--cap-w); text-align: center; }
 .models-cap:disabled { opacity: 0.55; cursor: not-allowed; }
 .models-cap-warn { font-size: 0.68rem; line-height: 1.2; color: var(--accent-amber); }
 .models-cap-warn[hidden] { display: none; }
@@ -1091,6 +1112,8 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .models-confirm-actions { display: flex; gap: 0.5rem; }
 
 @media (max-width: 760px) {
+  /* collapse the shared track grid so each row drives its own 2-col reflow */
+  .models-grid { display: block; }
   .models-row { grid-template-columns: 1fr auto; row-gap: 0.5rem; }
   .models-notes { grid-column: 1 / -1; max-width: none; }
   .models-cap-wrap { grid-column: 1 / -1; }

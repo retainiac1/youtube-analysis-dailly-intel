@@ -89,11 +89,11 @@ function capCell(m) {
   const local = isLocalProvider(m.provider);
   const input = local
     ? node("input", {
-        class: "range-input models-num models-cap", type: "number", disabled: true,
+        class: "range-input models-cap", type: "number", disabled: true,
         attrs: { "data-max-tokens": "1", placeholder: "uncapped",
                  "aria-label": "Max output tokens (uncapped for a local model)" } })
     : node("input", {
-        class: "range-input models-num models-cap", type: "number",
+        class: "range-input models-cap", type: "number",
         value: m.max_tokens == null ? "" : String(m.max_tokens),
         attrs: { "data-max-tokens": "1", min: "1", max: String(maxCfg.upper_bound),
                  step: "1", placeholder: "cap", "aria-label": "Max output tokens" } });
@@ -165,7 +165,7 @@ function addModelForm(providers) {
   const provider0 = (providers || [])[0] || "";
   const local0 = isLocalProvider(provider0);
   const cap = node("input", {
-    class: "range-input models-num models-cap", type: "number",
+    class: "range-input models-cap", type: "number",
     value: local0 ? "" : String(maxCfg.default), disabled: local0,
     attrs: { "data-new-max-tokens": "1", min: "1", max: String(maxCfg.upper_bound),
              step: "1", placeholder: "cap", "aria-label": "Max output tokens" } });
@@ -189,9 +189,19 @@ function addModelForm(providers) {
 }
 
 function gridHeader() {
-  const labels = ["Model", "Toggle on/off", "Cap", "Notes", ""];
+  // Per-column header alignment: the toggle header centers over the pills, the cap
+  // header centers over the (centered) cap numbers. Explicit modifier classes (not
+  // nth-child) so the alignment survives any column reorder.
+  const labels = [
+    ["Model", ""],
+    ["Toggle on/off", "models-h--toggle"],
+    ["Cap", "models-h--cap"],
+    ["Notes", ""],
+    ["", ""],
+  ];
   return node("div", { class: "models-row models-grid-head" },
-    labels.map((t) => node("span", { class: "models-h", text: t })));
+    labels.map(([t, cls]) =>
+      node("span", { class: "models-h" + (cls ? " " + cls : ""), text: t })));
 }
 
 async function renderGrid() {
