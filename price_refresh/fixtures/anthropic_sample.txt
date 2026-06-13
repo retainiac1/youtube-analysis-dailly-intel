@@ -1,0 +1,13 @@
+Claude Haiku 4.5
+
+Standard API pricing
+Input: $1.00 / MTok
+Output: $5.00 / MTok
+
+Batch API (50% discount)
+Input: $0.50 / MTok
+Output: $2.50 / MTok
+
+Prompt caching
+Cache write: $1.25 / MTok
+Cache read: $0.10 / MTok

@@ -122,3 +122,22 @@ magnitude_lo    = 0.02    # per-MTok floor; positive number below magnitude_hi. 
 magnitude_hi    = 200.0   # per-MTok ceiling; number above magnitude_lo. Catches 1000x unit errors.
 cross_tol       = 0.05    # cross-source agreement tolerance; fraction in (0, 1). Two sources within 5% are considered to agree.
 delta_threshold = 0.10    # auto-apply (< this) vs stage-for-review (>= this) boundary; fraction in (0, 1). A >=10% move needs a human.
+
+# The model that powers price extraction (canonical provider:model). Reads pricing
+# page text and emits strict JSON. Capability flags are read from the models table at
+# call time. To A/B a different model, point this at another registry row and record a
+# per-model accuracy baseline in the fixtures (see price_refresh/fixtures).
+EXTRACTION_MODEL = "anthropic:claude-haiku-4-5"
+
+# Two independent pricing sources per NON-LOCAL provider (official page + an aggregator,
+# or two aggregators) so the price-refresh cross-source check has something to compare.
+# UPPERCASE section name per the loader convention (a lowercase/dotted name silently
+# falls back to DEFAULT_PRICE_SOURCES). Sources MUST be server-rendered (the fetcher
+# runs no JS). TODO(build): verify each URL is SSR + capture a golden fixture before
+# trusting the live gate; the second source per provider is a placeholder until an
+# aggregator is chosen.
+[PRICE_SOURCES]
+anthropic = ["https://www.anthropic.com/pricing", "https://www.anthropic.com/pricing"]
+openai    = ["https://openai.com/api/pricing/", "https://openai.com/api/pricing/"]
+xai       = ["https://x.ai/api", "https://x.ai/api"]
+google    = ["https://ai.google.dev/pricing", "https://ai.google.dev/pricing"]

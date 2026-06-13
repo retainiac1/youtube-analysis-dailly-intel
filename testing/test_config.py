@@ -52,6 +52,13 @@ def make_good_config() -> SimpleNamespace:
             "cross_tol": 0.05,
             "delta_threshold": 0.10,
         },
+        EXTRACTION_MODEL="anthropic:claude-haiku-4-5",
+        PRICE_SOURCES={
+            "anthropic": ["https://a/official", "https://a/aggregator"],
+            "openai": ["https://o/official", "https://o/aggregator"],
+            "xai": ["https://x/official", "https://x/aggregator"],
+            "google": ["https://g/official", "https://g/aggregator"],
+        },
     )
 
 
@@ -408,3 +415,73 @@ def test_price_refresh_cross_tol_out_of_range_raises():
     cfg.PRICE_REFRESH = {**cfg.PRICE_REFRESH, "cross_tol": 0}
     with pytest.raises(config.ConfigError, match="cross_tol"):
         config.validate_config(cfg)
+
+
+# --- extraction model + price sources (Phase 1) -----------------------------
+
+def test_extraction_config_well_formed_passes():
+    config.validate_config(make_good_config())
+
+
+def test_real_module_extraction_model_value():
+    assert ":" in config.EXTRACTION_MODEL
+    assert config.EXTRACTION_MODEL.strip() == config.EXTRACTION_MODEL
+
+
+def test_real_module_price_sources_cover_seeded_providers():
+    seeded = {m["provider"] for m in config.SEED_MODELS} - config.LOCAL_PROVIDERS
+    for provider in seeded:
+        urls = config.PRICE_SOURCES[provider]
+        assert isinstance(urls, list) and len(urls) >= 2, provider
+
+
+def test_settings_toml_price_sources_round_trips():
+    # Guards against a lowercase/dotted [PRICE_SOURCES] section name silently falling
+    # back to DEFAULT_PRICE_SOURCES.
+    src = config.load_settings()["PRICE_SOURCES"]
+    assert src is not config.DEFAULT_PRICE_SOURCES
+    assert "anthropic" in src
+
+
+def test_extraction_model_empty_raises():
+    cfg = make_good_config()
+    cfg.EXTRACTION_MODEL = "  "
+    with pytest.raises(config.ConfigError, match="EXTRACTION_MODEL"):
+        config.validate_config(cfg)
+
+
+def test_extraction_model_without_colon_raises():
+    cfg = make_good_config()
+    cfg.EXTRACTION_MODEL = "claude-haiku"  # not a provider:model
+    with pytest.raises(config.ConfigError, match="EXTRACTION_MODEL"):
+        config.validate_config(cfg)
+
+
+def test_price_sources_missing_seeded_provider_raises():
+    cfg = make_good_config()
+    cfg.PRICE_SOURCES = {k: v for k, v in cfg.PRICE_SOURCES.items()
+                         if k != "anthropic"}
+    with pytest.raises(config.ConfigError, match="anthropic"):
+        config.validate_config(cfg)
+
+
+def test_price_sources_fewer_than_two_urls_raises():
+    cfg = make_good_config()
+    cfg.PRICE_SOURCES = {**cfg.PRICE_SOURCES, "openai": ["https://only-one"]}
+    with pytest.raises(config.ConfigError, match="openai"):
+        config.validate_config(cfg)
+
+
+def test_price_sources_blank_url_raises():
+    cfg = make_good_config()
+    cfg.PRICE_SOURCES = {**cfg.PRICE_SOURCES, "xai": ["https://ok", "  "]}
+    with pytest.raises(config.ConfigError, match="xai"):
+        config.validate_config(cfg)
+
+
+def test_price_sources_excludes_local_providers():
+    # ollama is local — it must NOT be required in PRICE_SOURCES, so a config without
+    # an ollama entry still validates.
+    cfg = make_good_config()
+    assert "ollama" not in cfg.PRICE_SOURCES
+    config.validate_config(cfg)  # does not raise

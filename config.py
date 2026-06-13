@@ -129,6 +129,21 @@ DEFAULT_PRICE_REFRESH = {
     "delta_threshold": 0.10, # auto-apply (<) vs stage-for-review (>=) boundary
 }
 
+# The model that powers price extraction (canonical provider:model). Reads pricing
+# page text and emits strict JSON; any capable registry model works. A fresh-checkout
+# fallback — settings.toml overrides it.
+DEFAULT_EXTRACTION_MODEL = "anthropic:claude-haiku-4-5"
+
+# Two independent pricing sources per non-local provider so check_cross_source has
+# something to compare. Fresh-checkout fallback; settings.toml overrides it. Real,
+# SSR-friendly URLs and matching golden fixtures are filled during build.
+DEFAULT_PRICE_SOURCES = {
+    "anthropic": ["https://www.anthropic.com/pricing", "https://www.anthropic.com/pricing"],
+    "openai": ["https://openai.com/api/pricing/", "https://openai.com/api/pricing/"],
+    "xai": ["https://x.ai/api", "https://x.ai/api"],
+    "google": ["https://ai.google.dev/pricing", "https://ai.google.dev/pricing"],
+}
+
 # name -> default, for every externalized tunable. load_settings() merges the
 # parsed TOML over these, so a missing key always resolves to its default.
 SETTINGS_DEFAULTS: dict[str, object] = {
@@ -146,6 +161,8 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "PRICES": DEFAULT_PRICES,
     "SPEND_VIZ": DEFAULT_SPEND_VIZ,
     "PRICE_REFRESH": DEFAULT_PRICE_REFRESH,
+    "EXTRACTION_MODEL": DEFAULT_EXTRACTION_MODEL,
+    "PRICE_SOURCES": DEFAULT_PRICE_SOURCES,
 }
 
 # Resolve relative to THIS file, not CWD, so it works regardless of where the
@@ -232,6 +249,8 @@ SEARCH_QUERIES = _settings["SEARCH_QUERIES"]
 PRICES = _settings["PRICES"]
 SPEND_VIZ = _settings["SPEND_VIZ"]
 PRICE_REFRESH = _settings["PRICE_REFRESH"]
+EXTRACTION_MODEL = _settings["EXTRACTION_MODEL"]
+PRICE_SOURCES = _settings["PRICE_SOURCES"]
 
 # The per-model max_tokens defaults — strict, no fallback (see load_required_settings).
 _required = load_required_settings()
@@ -607,6 +626,36 @@ def validate_config(cfg: object | None = None) -> None:
     for key in ("cross_tol", "delta_threshold"):
         if not (0 < pr[key] < 1):
             raise ConfigError(f"PRICE_REFRESH['{key}'] must be a fraction in (0, 1)")
+
+    # EXTRACTION_MODEL: the canonical provider:model that powers price extraction. A
+    # non-empty string carrying a ':' (so split_model can dispatch a provider).
+    extraction_model = getattr(cfg, "EXTRACTION_MODEL")
+    if not isinstance(extraction_model, str) or ":" not in extraction_model.strip():
+        raise ConfigError(
+            "Config key EXTRACTION_MODEL must be a non-empty 'provider:model' string, "
+            f"got {extraction_model!r}"
+        )
+
+    # PRICE_SOURCES: two+ independent pricing-page URLs per NON-LOCAL seeded provider
+    # (local providers have no pricing page). A hand-edit typo fails loud, naming the
+    # offending provider.
+    sources = getattr(cfg, "PRICE_SOURCES")
+    if not isinstance(sources, dict):
+        raise ConfigError(
+            f"Config key PRICE_SOURCES must be a dict, got {type(sources).__name__}"
+        )
+    required = {m["provider"] for m in SEED_MODELS} - LOCAL_PROVIDERS
+    for provider in sorted(required):
+        urls = sources.get(provider)
+        if not isinstance(urls, list) or len(urls) < 2:
+            raise ConfigError(
+                f"PRICE_SOURCES['{provider}'] must list at least 2 source URLs"
+            )
+        for i, url in enumerate(urls):
+            if not isinstance(url, str) or not url.strip():
+                raise ConfigError(
+                    f"PRICE_SOURCES['{provider}'][{i}] must be a non-empty URL string"
+                )
 
 
 # Validate the loaded settings at import. An external settings.toml means

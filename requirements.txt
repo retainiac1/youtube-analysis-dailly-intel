@@ -6,3 +6,4 @@ uvicorn
 anthropic
 openai
 google-genai
+httpx

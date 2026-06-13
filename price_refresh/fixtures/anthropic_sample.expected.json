@@ -1,0 +1,13 @@
+{
+  "prices": {
+    "anthropic:claude-haiku-4-5": {
+      "input": 1.0,
+      "output": 5.0,
+      "quote": "Standard API pricing Input: $1.00 / MTok Output: $5.00 / MTok",
+      "source_url": "https://www.anthropic.com/pricing"
+    }
+  },
+  "baselines": {
+    "anthropic:claude-haiku-4-5": { "min_correct": 2 }
+  }
+}
