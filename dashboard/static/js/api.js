@@ -8,37 +8,37 @@ async function getJSON(url) {
   return resp.json();
 }
 
+// Build an Error from a non-ok response, preferring the server's {detail} (FastAPI's
+// clean message — "max_tokens must be <= 8192", "max_tokens is required ...", a
+// 422/409/400) and falling back to the status line when the body is not JSON (e.g. a
+// proxy page). Shared by POST and PUT so an edited-row error surfaces the same honest
+// message the add form does, not a bare "422 Unprocessable Content".
+async function errorFrom(resp) {
+  let detail = `${resp.status} ${resp.statusText}`;
+  try {
+    const b = await resp.json();
+    if (b && b.detail) detail = b.detail;
+  } catch (_) { /* non-JSON body: keep the status line */ }
+  return new Error(detail);
+}
+
 async function putJSON(url, body) {
   const resp = await fetch(url, {
     method: "PUT",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) {
-    throw new Error(`${resp.status} ${resp.statusText} for ${url}`);
-  }
+  if (!resp.ok) throw await errorFrom(resp);
   return resp.json();
 }
 
-// POST that surfaces the server's error `detail` (the generate endpoint returns a
-// clean {detail} on a 400 — missing key, out-of-range temperature, etc. — and the
-// UI shows it inline). The body parse is guarded so a non-JSON error (e.g. a proxy
-// page) falls back to the status line instead of throwing a parse error that masks
-// the real status.
 async function postJSON(url, body) {
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) {
-    let detail = `${resp.status} ${resp.statusText}`;
-    try {
-      const b = await resp.json();
-      if (b && b.detail) detail = b.detail;
-    } catch (_) { /* non-JSON body: keep the status line */ }
-    throw new Error(detail);
-  }
+  if (!resp.ok) throw await errorFrom(resp);
   return resp.json();
 }
 

@@ -13,6 +13,10 @@ let el = null;                 // the page mount (<main id="models">)
 let selected = null;           // the model whose price detail is open
 let showDeletedModels = false;
 let showDeletedPrices = false;
+// The per-model output-cap config served by GET /api/models (default, default_reasoning,
+// upper_bound, local_providers). The ONE source for the editor's cap numbers — never
+// hardcoded here. Set on each grid load.
+let maxCfg = null;
 let animateNext = false;       // stagger the reveal on page-entry ONLY, not on
                                // in-page re-renders (select/add/delete) — those
                                // would re-animate the whole grid on every click.
@@ -50,8 +54,9 @@ function chip(model) {
   ]);
 }
 
-const FLAG_LETTER = {
-  enabled: "E", supports_temperature: "T", supports_seed: "S", is_reasoning: "R",
+const FLAG_LABEL = {
+  enabled: "enabled", supports_temperature: "temp",
+  supports_seed: "seed", is_reasoning: "reasoning",
 };
 const FLAG_TITLE = {
   enabled: "enabled (offered in the dropdown)",
@@ -60,17 +65,50 @@ const FLAG_TITLE = {
   is_reasoning: "reasoning model (informational)",
 };
 
-// A self-labeling on/off pill: the native checkbox drives a lettered pill (E/T/S/R)
-// that fills when on, so a row's capability state reads at a glance.
+// A self-labeling on/off pill: the native checkbox drives a labeled pill
+// (enabled/temp/seed/reasoning) that fills when on, so a row's capability state
+// reads at a glance.
 function flagBox(field, value) {
   return node("label", { class: "models-flag", attrs: { title: FLAG_TITLE[field] } }, [
     node("input", { type: "checkbox", checked: value === 1,
                     attrs: { "data-flag": field, "aria-label": FLAG_TITLE[field] } }),
-    node("span", { class: "models-flag-pill", text: FLAG_LETTER[field] }),
+    node("span", { class: "models-flag-pill", text: FLAG_LABEL[field] }),
   ]);
 }
 
 // --- models grid ------------------------------------------------------------
+
+// The output cap, immediately after the flags so it reads next to the R flag. A local
+// provider is uncapped: a disabled, empty cell labeled "uncapped". A cloud provider is
+// an editable bounded integer. Wrapped with a non-blocking warn note shown when a
+// reasoning model carries a cap below the reasoning default (the empty-answer trap).
+const isLocalProvider = (provider) =>
+  !!maxCfg && (maxCfg.local_providers || []).includes(provider);
+
+function capCell(m) {
+  const local = isLocalProvider(m.provider);
+  const input = local
+    ? node("input", {
+        class: "range-input models-num models-cap", type: "number", disabled: true,
+        attrs: { "data-max-tokens": "1", placeholder: "uncapped",
+                 "aria-label": "Max output tokens (uncapped for a local model)" } })
+    : node("input", {
+        class: "range-input models-num models-cap", type: "number",
+        value: m.max_tokens == null ? "" : String(m.max_tokens),
+        attrs: { "data-max-tokens": "1", min: "1", max: String(maxCfg.upper_bound),
+                 step: "1", placeholder: "cap", "aria-label": "Max output tokens" } });
+  const warn = node("span", { class: "models-cap-warn",
+    text: "low cap for a reasoning model: may truncate" });
+  const wrap = node("div", { class: "models-cap-wrap" }, [input, warn]);
+  if (!capIsLow(local, m.is_reasoning === 1, m.max_tokens)) warn.hidden = true;
+  return wrap;
+}
+
+// True when a non-local reasoning model's cap is set but below the reasoning default.
+function capIsLow(local, reasoning, value) {
+  return !local && reasoning && value != null && maxCfg
+    && Number(value) < maxCfg.default_reasoning;
+}
 
 function modelRow(m) {
   const flags = node("div", { class: "models-flags" }, [
@@ -98,6 +136,7 @@ function modelRow(m) {
   }, [
     chip(m.model),
     flags,
+    capCell(m),
     notes,
     action,
   ]);
@@ -114,13 +153,22 @@ function newFlagLbl(field, label, checked) {
 // `providers` is the backend's SUPPORTED_PROVIDERS (served by GET /api/models), so
 // the picker has ONE source of truth — never a hardcoded list here. The user picks
 // a provider and types just the model id; a pasted full "provider:model" also works
-// (handled in the submit). All four flags (E·T·S·R) match the grid.
+// (handled in the submit). All four flags (enabled/temp/seed/reasoning) match the grid.
 function addModelForm(providers) {
   const providerSelect = node("select", {
     class: "interpret-select models-add-provider",
     attrs: { "data-new-provider": "1", "aria-label": "Provider" },
   }, (providers || []).map(
     (p) => node("option", { text: p, attrs: { value: p } })));
+  // The cap input, prefilled by the picked provider + reasoning flag from the served
+  // defaults (no hardcoded numbers). Local providers are uncapped (disabled/empty).
+  const provider0 = (providers || [])[0] || "";
+  const local0 = isLocalProvider(provider0);
+  const cap = node("input", {
+    class: "range-input models-num models-cap", type: "number",
+    value: local0 ? "" : String(maxCfg.default), disabled: local0,
+    attrs: { "data-new-max-tokens": "1", min: "1", max: String(maxCfg.upper_bound),
+             step: "1", placeholder: "cap", "aria-label": "Max output tokens" } });
   return node("form", { class: "models-add", attrs: { "data-add-model": "1" } }, [
     providerSelect,
     node("input", { class: "range-input models-add-id",
@@ -130,14 +178,18 @@ function addModelForm(providers) {
     newFlagLbl("supports_temperature", "temp", true),
     newFlagLbl("supports_seed", "seed", true),
     newFlagLbl("is_reasoning", "reasoning", false),
+    cap,
     node("button", { class: "btn-primary models-act", text: "Add model",
                      attrs: { type: "submit" } }),
+    node("span", { class: "models-cap-warn",
+                   attrs: { "data-add-cap-warn": "1", hidden: "hidden" },
+                   text: "low cap for a reasoning model: may truncate" }),
     node("p", { class: "models-add-error", attrs: { role: "alert", "data-add-error": "1" } }),
   ]);
 }
 
 function gridHeader() {
-  const labels = ["Model", "E · T · S · R", "Notes", ""];
+  const labels = ["Model", "Toggle on/off", "Cap", "Notes", ""];
   return node("div", { class: "models-row models-grid-head" },
     labels.map((t) => node("span", { class: "models-h", text: t })));
 }
@@ -151,6 +203,7 @@ async function renderGrid() {
     return;
   }
   const rows = data.models || [];
+  maxCfg = data.max_tokens || maxCfg;
   const animate = animateNext;
   animateNext = false;
   const grid = node("section", { class: "glass-panel models-grid" }, [
@@ -163,6 +216,12 @@ async function renderGrid() {
       }
       return r;
     }),
+  ]);
+
+  // Add-model lives in its OWN glass-panel card, not appended to the grid, so the
+  // "add new" task reads as a separate, clearly bounded zone from "edit existing".
+  const addPanel = node("section", { class: "glass-panel models-add-panel" }, [
+    node("h3", { class: "models-add-title", text: "Add a model" }),
     addModelForm(data.providers),
   ]);
 
@@ -176,7 +235,7 @@ async function renderGrid() {
   ]);
 
   const detail = node("div", { class: "models-detail", attrs: { "data-detail": "1" } });
-  el.replaceChildren(node("div", { class: "models-page" }, [head, grid, detail]));
+  el.replaceChildren(node("div", { class: "models-page" }, [head, grid, addPanel, detail]));
   if (selected) await renderDetail();
 }
 
@@ -283,6 +342,15 @@ async function confirmModelDelete(model, btn) {
 
 // --- events -----------------------------------------------------------------
 
+// Read a cap input to the value the API expects: an EMPTY or disabled cell is null
+// (uncapped / "let the server default it"), NOT 0 — so clearing a cloud cap yields the
+// honest "required" 422, never "must be positive".
+function readCap(input) {
+  if (!input || input.disabled) return null;
+  const v = input.value.trim();
+  return v === "" ? null : Number(v);
+}
+
 function readModelRow(row) {
   const flag = (f) => row.querySelector(`[data-flag="${f}"]`).checked;
   return {
@@ -291,7 +359,41 @@ function readModelRow(row) {
     supports_seed: flag("supports_seed"),
     is_reasoning: flag("is_reasoning"),
     notes: row.querySelector("[data-notes]").value,
+    max_tokens: readCap(row.querySelector("[data-max-tokens]")),
   };
+}
+
+// Toggle the non-blocking low-cap warning on a grid row's cap cell as flags/cap change,
+// without a server round-trip.
+function refreshRowCapWarn(row) {
+  const input = row.querySelector("[data-max-tokens]");
+  if (!input) return;
+  const warn = input.parentElement.querySelector(".models-cap-warn");
+  if (!warn) return;
+  const reasoning = row.querySelector('[data-flag="is_reasoning"]').checked;
+  warn.hidden = !capIsLow(input.disabled, reasoning, readCap(input));
+}
+
+// Recompute the add-form cap as provider/reasoning change: local -> disabled+empty;
+// cloud -> prefill the reasoning-aware default WITHOUT clobbering a custom value (only
+// when empty or still equal to one of the two defaults), and toggle the warn note.
+function refreshAddFormCap(form) {
+  const cap = form.querySelector("[data-new-max-tokens]");
+  const warn = form.querySelector("[data-add-cap-warn]");
+  const provider = form.querySelector("[data-new-provider]").value;
+  const reasoning = form.querySelector('[data-new-flag="is_reasoning"]').checked;
+  if (isLocalProvider(provider)) {
+    cap.disabled = true; cap.value = "";
+    if (warn) warn.hidden = true;
+    return;
+  }
+  cap.disabled = false;
+  const cur = cap.value.trim();
+  const n = Number(cur);
+  if (cur === "" || n === maxCfg.default || n === maxCfg.default_reasoning) {
+    cap.value = String(reasoning ? maxCfg.default_reasoning : maxCfg.default);
+  }
+  if (warn) warn.hidden = !capIsLow(false, reasoning, readCap(cap));
 }
 
 async function saveModelRow(row) {
@@ -306,10 +408,19 @@ async function saveModelRow(row) {
 }
 
 async function onChange(e) {
-  // A flag checkbox or the notes input (inputs fire change on blur) -> save the row.
-  const editable = e.target.closest("[data-flag], [data-notes]");
+  // Add-form provider/flag/cap change -> recompute the cap prefill + warn (no save).
+  const addForm = e.target.closest("[data-add-model]");
+  if (addForm &&
+      e.target.closest("[data-new-provider], [data-new-flag], [data-new-max-tokens]")) {
+    return void refreshAddFormCap(addForm);
+  }
+  // A flag checkbox, the notes input, or the cap input (inputs fire change on blur)
+  // -> refresh the row's warn then save it.
+  const editable = e.target.closest("[data-flag], [data-notes], [data-max-tokens]");
   if (editable && editable.closest(".models-row")) {
-    return void saveModelRow(editable.closest(".models-row"));
+    const row = editable.closest(".models-row");
+    refreshRowCapWarn(row);
+    return void saveModelRow(row);
   }
   if (e.target.closest("[data-show-deleted-models]")) {
     showDeletedModels = e.target.checked;
@@ -387,6 +498,7 @@ function wireSubmit() {
           supports_temperature: flag("supports_temperature"),
           supports_seed: flag("supports_seed"),
           is_reasoning: flag("is_reasoning"),
+          max_tokens: readCap(form.querySelector("[data-new-max-tokens]")),
         });
         selected = model;                       // open its (empty) price detail
         await renderGrid();

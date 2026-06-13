@@ -944,7 +944,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
 /* The model grid row: model | flags | notes | action. Header shares the columns. */
 .models-row {
   display: grid;
-  grid-template-columns: minmax(12rem, 2fr) auto minmax(6rem, 1fr) auto;
+  grid-template-columns: minmax(12rem, 2fr) auto minmax(5rem, 0.6fr) minmax(6rem, 1fr) auto;
   gap: 1rem;
   align-items: center;
   padding: 0.5rem 0.75rem;
@@ -953,8 +953,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
   border-left: 3px solid transparent;
   transition: background var(--transition-fast), border-color var(--transition-fast);
 }
-.models-grid > .models-row + .models-row,
-.models-grid > .models-add { margin-top: 0.35rem; }
+.models-grid > .models-row + .models-row { margin-top: 0.35rem; }
 .models-row.reveal { animation: models-reveal 0.35s both; animation-delay: calc(var(--i, 0) * 35ms); }
 @keyframes models-reveal { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
@@ -1002,7 +1001,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .models-flag input { position: absolute; opacity: 0; width: 0; height: 0; }
 .models-flag-pill {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 1.6rem; height: 1.6rem; border-radius: var(--radius-sm);
+  height: 1.6rem; padding: 0 0.5rem; border-radius: var(--radius-sm);
   font-family: var(--font-display); font-weight: 700; font-size: 0.72rem;
   color: var(--text-muted);
   background: var(--bg-elevated); border: 1px solid var(--border-glass);
@@ -1016,18 +1015,39 @@ html { scroll-padding-top: var(--header-h, 0px); }
   outline: 2px solid var(--accent-cyan); outline-offset: 2px;
 }
 .models-notes { max-width: 22rem; }
+/* the per-model output cap: a compact number input + a non-blocking warn note stacked
+   in one grid cell, so the cap reads next to the toggle flags. */
+.models-cap-wrap { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.models-cap { max-width: 7rem; }
+.models-cap:disabled { opacity: 0.55; cursor: not-allowed; }
+.models-cap-warn { font-size: 0.68rem; line-height: 1.2; color: var(--accent-amber); }
+.models-cap-warn[hidden] { display: none; }
 .models-act { padding: 0.4rem 0.85rem; font-size: 0.82rem; white-space: nowrap; }
 .models-danger {
   background: var(--accent-red); color: #fff;
   background-image: none;
 }
 
-/* add-model / add-price form rows. */
+/* add-model / add-price form rows. The dashed top divider separates the add-price
+   form from the price rows inside the detail panel; the add-model form lives in its
+   own card (.models-add-panel) so it suppresses the divider below. */
 .models-add {
   display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
   margin-top: 0.6rem; padding-top: 0.75rem;
   border-top: 1px dashed var(--border-subtle);
 }
+
+/* Add-model card: its own bounded glass-panel zone, separated from the grid by the
+   .models-page flex gap, consistent with every other dashboard section. */
+.models-add-panel { padding: 1rem 1.25rem; }
+.models-add-title {
+  margin: 0 0 0.75rem; font-family: var(--font-display);
+  font-weight: 600; font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+/* the card IS the boundary, so the form's own dashed top divider is redundant here. */
+.models-add-panel .models-add { margin-top: 0; padding-top: 0; border-top: none; }
 .models-add-id { min-width: 16rem; font-family: ui-monospace, Menlo, monospace; }
 .models-flag-lbl {
   display: inline-flex; align-items: center; gap: 0.3rem;
@@ -1073,6 +1093,8 @@ html { scroll-padding-top: var(--header-h, 0px); }
 @media (max-width: 760px) {
   .models-row { grid-template-columns: 1fr auto; row-gap: 0.5rem; }
   .models-notes { grid-column: 1 / -1; max-width: none; }
+  .models-cap-wrap { grid-column: 1 / -1; }
+  .models-cap { max-width: none; }
   .models-prow { grid-template-columns: 1fr 1fr; }
 }
 

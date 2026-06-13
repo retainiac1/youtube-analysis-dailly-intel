@@ -4,6 +4,7 @@ status + echo + read DB state directly. The seeded DB has the baseline models
 (each with one open price window dated "today")."""
 import sqlite3
 
+import config
 import db
 
 
@@ -105,7 +106,7 @@ def test_get_models_lists_seeded_with_and_without_deleted(client, seeded_db_path
 def test_put_model_edits_flags_and_notes(client, seeded_db_path):
     resp = client.put("/api/models/openai:gpt-5.4-nano", json={
         "enabled": False, "supports_temperature": True, "supports_seed": False,
-        "is_reasoning": False, "notes": "edited",
+        "is_reasoning": False, "notes": "edited", "max_tokens": 2048,
     })
     assert resp.status_code == 200
     row = _model(seeded_db_path, "openai:gpt-5.4-nano")
@@ -116,7 +117,7 @@ def test_put_model_edits_flags_and_notes(client, seeded_db_path):
 def test_put_model_unknown_is_404(client):
     resp = client.put("/api/models/nope:x", json={
         "enabled": True, "supports_temperature": True, "supports_seed": True,
-        "is_reasoning": False, "notes": None,
+        "is_reasoning": False, "notes": None, "max_tokens": 1024,
     })
     assert resp.status_code == 404
 
@@ -127,7 +128,7 @@ def test_put_model_is_pk_locked(client, seeded_db_path):
     resp = client.put("/api/models/openai:gpt-5.4-nano", json={
         "model": "hacked:x",  # extra field, must be ignored
         "enabled": True, "supports_temperature": True, "supports_seed": True,
-        "is_reasoning": False, "notes": "still nano",
+        "is_reasoning": False, "notes": "still nano", "max_tokens": 2048,
     })
     assert resp.status_code == 200
     assert _model(seeded_db_path, "hacked:x") is None          # PK not editable
@@ -377,3 +378,129 @@ def test_invocation_count_reads(client, seeded_db_path):
     assert client.get("/api/models/openai:gpt-4o/invocation-count").json()["count"] == 2
     # The open window covers both.
     assert client.get(f"/api/prices/{pid}/invocation-count").json()["count"] == 2
+
+
+# --- max_tokens (Phase 2): per-model output cap, editable + validated --------
+# Policy: a cloud/paid model MUST have a positive int <= MAX_TOKENS_UPPER_BOUND; a
+# local (ollama) model MUST be null (uncapped). The cloud "required" message must be
+# distinct from the "positive" message (the empty->null UI mapping relies on it).
+
+def test_get_models_serves_max_tokens_config_and_per_row(client):
+    body = client.get("/api/models").json()
+    cfg = body["max_tokens"]
+    assert cfg["default"] == config.DEFAULT_MAX_TOKENS
+    assert cfg["default_reasoning"] == config.DEFAULT_MAX_TOKENS_REASONING
+    assert cfg["upper_bound"] == config.MAX_TOKENS_UPPER_BOUND
+    assert cfg["local_providers"] == sorted(config.LOCAL_PROVIDERS)
+    rows = {m["model"]: m for m in body["models"]}
+    assert rows["openai:gpt-5.4-nano"]["max_tokens"] == config.DEFAULT_MAX_TOKENS_REASONING
+    assert rows["anthropic:claude-haiku-4-5"]["max_tokens"] == config.DEFAULT_MAX_TOKENS
+    assert rows["ollama:qwen3.5:9b"]["max_tokens"] is None
+
+
+def _put_cloud(client, **over):
+    body = {"enabled": True, "supports_temperature": True, "supports_seed": False,
+            "is_reasoning": False, "notes": None, "max_tokens": 2048}
+    body.update(over)
+    return client.put("/api/models/anthropic:claude-haiku-4-5", json=body)
+
+
+def test_put_cloud_sets_max_tokens(client, seeded_db_path):
+    resp = _put_cloud(client, max_tokens=2048)
+    assert resp.status_code == 200
+    assert resp.json()["max_tokens"] == 2048
+    assert _model(seeded_db_path, "anthropic:claude-haiku-4-5")["max_tokens"] == 2048
+
+
+def test_put_cloud_null_max_tokens_is_422_required(client):
+    resp = _put_cloud(client, max_tokens=None)
+    assert resp.status_code == 422
+    assert "required" in resp.json()["detail"].lower()
+
+
+def test_put_cloud_nonpositive_max_tokens_is_422_positive(client):
+    resp = _put_cloud(client, max_tokens=0)
+    assert resp.status_code == 422
+    assert "positive" in resp.json()["detail"].lower()
+
+
+def test_put_cloud_over_bound_max_tokens_is_422(client):
+    resp = _put_cloud(client, max_tokens=config.MAX_TOKENS_UPPER_BOUND + 1)
+    assert resp.status_code == 422
+
+
+def test_put_local_nonnull_max_tokens_is_422(client):
+    resp = client.put("/api/models/ollama:qwen3.5:9b", json={
+        "enabled": True, "supports_temperature": True, "supports_seed": True,
+        "is_reasoning": True, "notes": None, "max_tokens": 5000,
+    })
+    assert resp.status_code == 422
+
+
+def test_put_local_null_max_tokens_stays_uncapped(client, seeded_db_path):
+    resp = client.put("/api/models/ollama:qwen3.5:9b", json={
+        "enabled": True, "supports_temperature": True, "supports_seed": True,
+        "is_reasoning": True, "notes": None, "max_tokens": None,
+    })
+    assert resp.status_code == 200
+    assert _model(seeded_db_path, "ollama:qwen3.5:9b")["max_tokens"] is None
+
+
+def test_post_cloud_explicit_max_tokens_stored(client, seeded_db_path):
+    resp = client.post("/api/models", json={
+        "model": "openai:gpt-4o", "supports_temperature": True,
+        "supports_seed": True, "is_reasoning": False, "max_tokens": 1234,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["max_tokens"] == 1234
+    assert _model(seeded_db_path, "openai:gpt-4o")["max_tokens"] == 1234
+
+
+def test_post_cloud_omitted_max_tokens_defaults_reasoning_aware(client, seeded_db_path):
+    # Non-reasoning cloud -> lean default; reasoning cloud -> generous default. And the
+    # RETURNED cap must equal what actually landed in the row (anti-drift between the
+    # endpoint echo and db.insert_model's _UNSET default).
+    r1 = client.post("/api/models", json={
+        "model": "openai:gpt-4o", "supports_temperature": True,
+        "supports_seed": True, "is_reasoning": False,
+    })
+    assert r1.status_code == 200
+    stored1 = _model(seeded_db_path, "openai:gpt-4o")["max_tokens"]
+    assert stored1 == config.DEFAULT_MAX_TOKENS
+    assert r1.json()["max_tokens"] == stored1
+
+    r2 = client.post("/api/models", json={
+        "model": "openai:o5-mini", "supports_temperature": False,
+        "supports_seed": True, "is_reasoning": True,
+    })
+    assert r2.status_code == 200
+    stored2 = _model(seeded_db_path, "openai:o5-mini")["max_tokens"]
+    assert stored2 == config.DEFAULT_MAX_TOKENS_REASONING
+    assert r2.json()["max_tokens"] == stored2
+
+
+def test_post_cloud_over_bound_is_422(client):
+    resp = client.post("/api/models", json={
+        "model": "openai:gpt-4o", "supports_temperature": True,
+        "supports_seed": True, "is_reasoning": False,
+        "max_tokens": config.MAX_TOKENS_UPPER_BOUND + 1,
+    })
+    assert resp.status_code == 422
+
+
+def test_post_local_omitted_max_tokens_is_null(client, seeded_db_path):
+    resp = client.post("/api/models", json={
+        "model": "ollama:llama4", "supports_temperature": True,
+        "supports_seed": True, "is_reasoning": True,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["max_tokens"] is None
+    assert _model(seeded_db_path, "ollama:llama4")["max_tokens"] is None
+
+
+def test_post_local_explicit_max_tokens_is_422(client):
+    resp = client.post("/api/models", json={
+        "model": "ollama:llama4", "supports_temperature": True,
+        "supports_seed": True, "is_reasoning": True, "max_tokens": 5000,
+    })
+    assert resp.status_code == 422

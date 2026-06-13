@@ -638,6 +638,7 @@ class ModelUpdate(BaseModel):
     supports_seed: bool
     is_reasoning: bool
     notes: str | None = None
+    max_tokens: int | None = None
 
 
 class ModelInsert(BaseModel):
@@ -647,6 +648,41 @@ class ModelInsert(BaseModel):
     is_reasoning: bool
     enabled: bool = True
     notes: str | None = None
+    max_tokens: int | None = None
+
+
+def _resolve_max_tokens(provider: str, max_tokens, *, cloud_required: bool):
+    """Enforce the per-model output-cap policy and return the value to store.
+
+    A local/free provider must stay uncapped (null); a cloud/paid provider must carry
+    a positive int <= config.MAX_TOKENS_UPPER_BOUND. Raises HTTPException(422) with a
+    clear, distinct detail on violation. `cloud_required` is True on edit (the editor
+    owns the cap, so a cloud model can never be saved uncapped) and False on insert
+    (a missing cap there means "use the factory default" — the caller omits it so
+    db.insert_model applies config.default_max_tokens). The "required" vs "positive"
+    messages are distinct so a cleared cloud field reads honestly, not "must be
+    positive"."""
+    if provider in config.LOCAL_PROVIDERS:
+        if max_tokens is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"max_tokens must be null for local provider {provider!r}")
+        return None
+    if max_tokens is None:
+        if cloud_required:
+            raise HTTPException(
+                status_code=422,
+                detail=f"max_tokens is required for {provider!r} "
+                       "(a paid model must be capped)")
+        return None
+    if max_tokens <= 0:
+        raise HTTPException(status_code=422,
+                            detail="max_tokens must be a positive integer")
+    if max_tokens > config.MAX_TOKENS_UPPER_BOUND:
+        raise HTTPException(
+            status_code=422,
+            detail=f"max_tokens must be <= {config.MAX_TOKENS_UPPER_BOUND}")
+    return max_tokens
 
 
 class PriceInsert(BaseModel):
@@ -667,7 +703,18 @@ def api_list_models(
     rows = db.run_with_db_retry(
         lambda: db.fetch_models(conn, include_deleted=include_deleted)
     )
-    return {"models": _rows(rows), "providers": list(llm.SUPPORTED_PROVIDERS)}
+    # The max_tokens block is the ONE backend source for the editor's cap defaults,
+    # ceiling, and local-provider set, so the JS hardcodes none of those numbers.
+    return {
+        "models": _rows(rows),
+        "providers": list(llm.SUPPORTED_PROVIDERS),
+        "max_tokens": {
+            "default": config.DEFAULT_MAX_TOKENS,
+            "default_reasoning": config.DEFAULT_MAX_TOKENS_REASONING,
+            "upper_bound": config.MAX_TOKENS_UPPER_BOUND,
+            "local_providers": sorted(config.LOCAL_PROVIDERS),
+        },
+    }
 
 
 @app.put("/api/models/{model}")
@@ -675,19 +722,27 @@ def api_update_model(
     model: str, body: ModelUpdate,
     conn: sqlite3.Connection = Depends(get_conn),
 ):
-    """Edit one model's flags + notes. PK-locked: `model` comes only from the path
-    and is never written, so a `model` in the body is ignored (the doc's PK edit
-    rejection)."""
+    """Edit one model's flags + notes + output cap. PK-locked: `model` comes only from
+    the path and is never written, so a `model` in the body is ignored (the doc's PK
+    edit rejection). The editor owns the cap, so it is always written (cloud->value,
+    local->null) and cloud_required=True forbids saving a paid model uncapped."""
+    try:
+        provider, _ = llm.split_model(model)
+    except llm.LLMError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    cap = _resolve_max_tokens(provider, body.max_tokens, cloud_required=True)
+
     def write():
         with db.transaction(conn):
             return db.update_model(
                 conn, model=model, enabled=body.enabled,
                 supports_temperature=body.supports_temperature,
                 supports_seed=body.supports_seed,
-                is_reasoning=body.is_reasoning, notes=body.notes)
+                is_reasoning=body.is_reasoning, notes=body.notes,
+                max_tokens=cap)
     if db.run_with_db_retry(write) == 0:
         raise HTTPException(status_code=404, detail=f"no model {model!r}")
-    return {"model": model, **body.model_dump()}
+    return {"model": model, **body.model_dump(), "max_tokens": cap}
 
 
 @app.post("/api/models")
@@ -707,7 +762,13 @@ def api_insert_model(
         raise HTTPException(
             status_code=422,
             detail=f"provider must be one of {list(llm.SUPPORTED_PROVIDERS)}")
+    # Validate the cap (cloud_required=False: an omitted cap is allowed and means
+    # "use the factory default"). When omitted, do NOT pass max_tokens so insert_model's
+    # _UNSET path applies config.default_max_tokens — a cloud model auto-gets its
+    # reasoning-aware default (never uncapped), a local gets null.
+    _resolve_max_tokens(provider, body.max_tokens, cloud_required=False)
     now = config.now_local_iso()
+    extra = {} if body.max_tokens is None else {"max_tokens": body.max_tokens}
 
     def write():
         with db.transaction(conn):
@@ -715,11 +776,16 @@ def api_insert_model(
                 conn, model=body.model, provider=provider, enabled=body.enabled,
                 supports_temperature=body.supports_temperature,
                 supports_seed=body.supports_seed,
-                is_reasoning=body.is_reasoning, notes=body.notes, now=now)
+                is_reasoning=body.is_reasoning, notes=body.notes, now=now, **extra)
     if db.run_with_db_retry(write) == 0:
         raise HTTPException(status_code=409,
                             detail=f"model {body.model!r} already exists")
-    return {"model": body.model, "provider": provider, **body.model_dump(exclude={"model"})}
+    # Echo the EFFECTIVE stored cap (the same factory default insert_model applied when
+    # omitted), so the client never shows a misleading null for a defaulted cloud model.
+    effective = (body.max_tokens if body.max_tokens is not None
+                 else config.default_max_tokens(provider, body.is_reasoning))
+    return {"model": body.model, "provider": provider,
+            **body.model_dump(exclude={"model"}), "max_tokens": effective}
 
 
 @app.post("/api/models/{model}/delete")

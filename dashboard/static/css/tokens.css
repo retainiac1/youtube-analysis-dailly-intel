@@ -24,6 +24,7 @@
   --accent-blue: #2D7CFF;
   --accent-purple: #a855f7;
   --accent-red: #ef4444;
+  --accent-amber: #f59e0b;
   --accent-gradient: linear-gradient(135deg, #00F2A9 0%, #2D7CFF 100%);
   --accent-glow: rgba(0, 242, 169, 0.4);
 
@@ -70,6 +71,7 @@
   --accent-blue: #2563eb;
   --accent-purple: #7c3aed;
   --accent-red: #dc2626;
+  --accent-amber: #b45309;
   --accent-gradient: linear-gradient(135deg, #00c98d 0%, #2563eb 100%);
   --glass-blur: 18px;
   --glass-bg: rgba(255, 255, 255, 0.5);
