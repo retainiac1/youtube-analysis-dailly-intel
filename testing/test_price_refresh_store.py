@@ -170,3 +170,105 @@ def test_resolve_proposal_sets_status_and_resolved_at(conn):
         "SELECT * FROM price_proposals WHERE id=?", (pid,)).fetchone()
     assert row["status"] == "confirmed"
     assert row["resolved_at"] == NOW
+
+
+# --- proposal reads ---------------------------------------------------------
+
+def _stage(conn, *, model, field, new_value, old_value=5.0, now=NOW):
+    with db.transaction(conn):
+        store.upsert_proposal(
+            conn, model=model, field=field, old_value=old_value,
+            new_value=new_value, pct_change=0.40, direction="up", quote="q",
+            source_url="http://src", now=now)
+    return conn.execute(
+        "SELECT id FROM price_proposals WHERE model=? AND field=? AND status='pending'",
+        (model, field)).fetchone()["id"]
+
+
+def test_fetch_proposal_by_id(conn):
+    pid = _stage(conn, model="test:m", field="input", new_value=7.0)
+    row = store.fetch_proposal(conn, pid)
+    assert row is not None and row["model"] == "test:m" and row["new_value"] == 7.0
+    assert store.fetch_proposal(conn, 99999) is None
+
+
+def test_fetch_pending_proposals_excludes_resolved(conn):
+    p1 = _stage(conn, model="test:a", field="input", new_value=7.0)
+    _stage(conn, model="test:b", field="output", new_value=8.0)
+    with db.transaction(conn):
+        store.resolve_proposal(conn, p1, "rejected", now=NOW)
+    pending = store.fetch_pending_proposals(conn)
+    models = {r["model"] for r in pending}
+    assert models == {"test:b"}                          # resolved p1 excluded
+
+
+# --- confirm / reject -------------------------------------------------------
+
+def test_confirm_proposal_applies_carrying_other_field_forward(conn):
+    _window(conn, "test:m", 1.0, 2.0, "2026-01-01", None)        # active baseline
+    pid = _stage(conn, model="test:m", field="output", new_value=9.0, old_value=2.0)
+
+    assert store.confirm_proposal(conn, pid, now=NOW) is True
+
+    active = db.active_price_window(conn, "test:m")
+    assert active["valid_from"] == TODAY
+    assert active["input_per_1m"] == 1.0          # carried forward (unchanged field)
+    assert active["output_per_1m"] == 9.0         # the confirmed value
+    assert store.fetch_proposal(conn, pid)["status"] == "confirmed"
+    assert store.fetch_pending_proposals(conn) == []
+    # Reversibility: the prior window is retained as history.
+    rows = {r["valid_from"]: r for r in _windows(conn, "test:m")}
+    assert rows["2026-01-01"]["output_per_1m"] == 2.0
+
+
+def test_confirm_proposal_input_field_carries_output_forward(conn):
+    _window(conn, "test:m", 1.0, 2.0, "2026-01-01", None)
+    pid = _stage(conn, model="test:m", field="input", new_value=5.0, old_value=1.0)
+    assert store.confirm_proposal(conn, pid, now=NOW) is True
+    active = db.active_price_window(conn, "test:m")
+    assert active["input_per_1m"] == 5.0 and active["output_per_1m"] == 2.0
+
+
+def test_confirm_proposal_unknown_or_resolved_returns_false(conn):
+    assert store.confirm_proposal(conn, 99999, now=NOW) is False
+    _window(conn, "test:m", 1.0, 2.0, "2026-01-01", None)
+    pid = _stage(conn, model="test:m", field="input", new_value=5.0)
+    with db.transaction(conn):
+        store.resolve_proposal(conn, pid, "rejected", now=NOW)
+    assert store.confirm_proposal(conn, pid, now=NOW) is False   # already resolved
+
+
+def test_reject_proposal_opens_no_window(conn):
+    _window(conn, "test:m", 1.0, 2.0, "2026-01-01", None)
+    pid = _stage(conn, model="test:m", field="output", new_value=9.0)
+    before = len(_windows(conn, "test:m"))
+
+    assert store.reject_proposal(conn, pid, now=NOW) is True
+
+    assert len(_windows(conn, "test:m")) == before          # no window opened
+    assert store.fetch_proposal(conn, pid)["status"] == "rejected"
+    assert store.fetch_pending_proposals(conn) == []
+
+
+# --- price-change tolerance (single source) ---------------------------------
+
+def test_value_changed_ignores_sub_tolerance_jitter():
+    # A source/model emitting 0.9999996 for a published 1.000 (4e-7 < PRICE_ABS_TOL)
+    # is NOT a change — far below cent-level published precision.
+    assert store.value_changed(1.0, 0.9999996) is False
+    assert store.value_changed(0.05, 0.050000001) is False
+
+
+def test_value_changed_detects_real_sub_cent_move():
+    assert store.value_changed(1.0, 0.999) is True          # a real 0.1% move
+    assert store.value_changed(0.05, 0.06) is True
+
+
+def test_apply_price_noops_on_sub_tolerance_jitter(conn):
+    # The move detector and apply's idempotency guard share PRICE_ABS_TOL, so a jitter
+    # the detector calls "unchanged" also no-ops apply — no near-identical window opens.
+    _window(conn, "test:m", 1.0, 2.0, "2026-01-01", None)
+    result = store.apply_price(
+        conn, model="test:m", input_per_1m=0.9999996, output_per_1m=2.0, now=NOW)
+    assert result is None
+    assert len(_windows(conn, "test:m")) == 1

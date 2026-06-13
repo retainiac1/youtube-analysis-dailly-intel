@@ -16,10 +16,20 @@ import sqlite3
 import config
 import db
 
-# Cent-fraction tolerance for "the price did not change": daily extraction yields
-# e.g. 0.050000001 vs a stored 0.05, and raw float == would churn a needless window
-# every day. 1e-6 is far below any meaningful per-MTok move.
-_PRICE_ABS_TOL = 1e-6
+# THE single tolerance for "did this per-MTok price change?" — used by BOTH apply_price's
+# idempotency guard and run_daily's move detector, so they can never diverge (a drift
+# between two copies would let a jitter slip past one but not the other). Daily extraction
+# yields e.g. 0.050000001 vs a stored 0.05, and raw float == would churn a needless window
+# every day. 1e-6 USD/MTok is a hundredth of a cent — far below any published price
+# precision (sources publish at the cent/sub-cent level), so a real move always registers.
+PRICE_ABS_TOL = 1e-6
+
+
+def value_changed(old: float, new: float) -> bool:
+    """True when two per-MTok prices differ by more than PRICE_ABS_TOL — the one
+    definition of "the price moved", shared by the idempotency guard and the daily move
+    detector. Sub-tolerance float jitter (e.g. 0.9999996 vs 1.0) is NOT a change."""
+    return not math.isclose(old, new, rel_tol=0.0, abs_tol=PRICE_ABS_TOL)
 
 _RESOLVED_STATUSES = ("confirmed", "rejected")
 
@@ -47,13 +57,10 @@ def extractable_models(conn: sqlite3.Connection) -> set[str]:
 def _prices_equal(window: sqlite3.Row, input_per_1m: float,
                   output_per_1m: float) -> bool:
     """True when a window's stored prices already equal the proposed values within
-    tolerance (epsilon, not raw ==)."""
-    return (
-        math.isclose(window["input_per_1m"], input_per_1m,
-                     rel_tol=0.0, abs_tol=_PRICE_ABS_TOL)
-        and math.isclose(window["output_per_1m"], output_per_1m,
-                         rel_tol=0.0, abs_tol=_PRICE_ABS_TOL)
-    )
+    tolerance (epsilon, not raw ==). Routes through value_changed so the idempotency
+    guard and the daily move detector share one definition."""
+    return (not value_changed(window["input_per_1m"], input_per_1m)
+            and not value_changed(window["output_per_1m"], output_per_1m))
 
 
 def apply_price(conn: sqlite3.Connection, *, model: str, input_per_1m: float,
@@ -143,3 +150,77 @@ def resolve_proposal(conn: sqlite3.Connection, proposal_id: int, status: str, *,
         {"status": status, "now": now, "id": proposal_id},
     )
     return cur.rowcount
+
+
+def fetch_proposal(conn: sqlite3.Connection,
+                   proposal_id: int) -> sqlite3.Row | None:
+    """One proposal by id, or None when unknown. Read-only."""
+    return conn.execute(
+        "SELECT * FROM price_proposals WHERE id = ?", (proposal_id,)
+    ).fetchone()
+
+
+def fetch_pending_proposals(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """All pending (status='pending') proposals, ordered by (model, field) — the >10%
+    moves awaiting a human. Read-only."""
+    return conn.execute(
+        "SELECT * FROM price_proposals WHERE status = 'pending' "
+        "ORDER BY model, field"
+    ).fetchall()
+
+
+def _commit_resolve(conn: sqlite3.Connection, proposal_id: int, status: str,
+                    now: str) -> None:
+    db.run_with_db_retry(
+        lambda: _resolve_in_txn(conn, proposal_id, status, now))
+
+
+def _resolve_in_txn(conn: sqlite3.Connection, proposal_id: int, status: str,
+                    now: str) -> None:
+    with db.transaction(conn):
+        resolve_proposal(conn, proposal_id, status, now=now)
+
+
+def confirm_proposal(conn: sqlite3.Connection, proposal_id: int, *,
+                     now: str | None = None) -> bool:
+    """Apply a pending proposal and mark it confirmed. Returns False when the id is
+    unknown or the row is not pending. Opens (or supersedes today's) `model_prices`
+    window via apply_price with the proposal's field set to its new_value and the OTHER
+    field CARRIED FORWARD from the current active window; then marks the row confirmed.
+
+    apply-then-resolve, each idempotent (apply no-ops if unchanged; re-confirm re-marks),
+    so a crash between them is safe to re-run. Raises PriceRefreshError if the model has
+    no active window to carry forward from."""
+    if now is None:
+        now = config.now_local_iso()
+    prop = fetch_proposal(conn, proposal_id)
+    if prop is None or prop["status"] != "pending":
+        return False
+    field = prop["field"]
+    if field not in ("input", "output"):
+        raise PriceRefreshError(f"proposal {proposal_id}: bad field {field!r}")
+    active = db.active_price_window(conn, prop["model"])
+    if active is None:
+        raise PriceRefreshError(
+            f"{prop['model']}: no active price window to carry forward")
+    new_value = prop["new_value"]
+    apply_price(
+        conn, model=prop["model"], now=now,
+        input_per_1m=new_value if field == "input" else active["input_per_1m"],
+        output_per_1m=new_value if field == "output" else active["output_per_1m"],
+    )
+    _commit_resolve(conn, proposal_id, "confirmed", now)
+    return True
+
+
+def reject_proposal(conn: sqlite3.Connection, proposal_id: int, *,
+                    now: str | None = None) -> bool:
+    """Mark a pending proposal rejected; opens NO window. Returns False when the id is
+    unknown or the row is not pending."""
+    if now is None:
+        now = config.now_local_iso()
+    prop = fetch_proposal(conn, proposal_id)
+    if prop is None or prop["status"] != "pending":
+        return False
+    _commit_resolve(conn, proposal_id, "rejected", now)
+    return True
