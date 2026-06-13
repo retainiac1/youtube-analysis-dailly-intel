@@ -46,6 +46,12 @@ def make_good_config() -> SimpleNamespace:
             "warn_bg": "#4ADE80",
             "warn_fg": "#052E16",
         },
+        PRICE_REFRESH={
+            "magnitude_lo": 0.02,
+            "magnitude_hi": 200.0,
+            "cross_tol": 0.05,
+            "delta_threshold": 0.10,
+        },
     )
 
 
@@ -330,4 +336,75 @@ def test_bool_rejected_for_max_tokens_key():
     cfg = make_good_config()
     cfg.DEFAULT_MAX_TOKENS = True
     with pytest.raises(config.ConfigError, match="DEFAULT_MAX_TOKENS"):
+        config.validate_config(cfg)
+
+
+# --- price-refresh thresholds ([PRICE_REFRESH]) -----------------------------
+
+def test_price_refresh_well_formed_passes():
+    # Positive control: a good PRICE_REFRESH validates cleanly, so the negatives
+    # below are not passing for an unrelated reason.
+    config.validate_config(make_good_config())
+
+
+def test_real_module_price_refresh_values():
+    # The thresholds live in settings.toml and load onto the module.
+    pr = config.PRICE_REFRESH
+    assert pr["magnitude_lo"] == 0.02
+    assert pr["magnitude_hi"] == 200.0
+    assert pr["cross_tol"] == 0.05
+    assert pr["delta_threshold"] == 0.10
+
+
+def test_settings_toml_price_refresh_round_trips():
+    # Guards against a lowercase/dotted [PRICE_REFRESH] section name, which would
+    # silently fall back to DEFAULT_PRICE_REFRESH instead of applying the file.
+    pr = config.load_settings()["PRICE_REFRESH"]
+    assert pr is not config.DEFAULT_PRICE_REFRESH
+    assert pr["delta_threshold"] == 0.10
+
+
+def test_price_refresh_missing_key_raises_named_error():
+    cfg = make_good_config()
+    cfg.PRICE_REFRESH = {k: v for k, v in cfg.PRICE_REFRESH.items()
+                         if k != "delta_threshold"}
+    with pytest.raises(config.ConfigError, match="delta_threshold"):
+        config.validate_config(cfg)
+
+
+def test_price_refresh_bool_threshold_rejected():
+    # bool is an int subclass; a hand-edited `delta_threshold = true` must fail.
+    cfg = make_good_config()
+    cfg.PRICE_REFRESH = {**cfg.PRICE_REFRESH, "delta_threshold": True}
+    with pytest.raises(config.ConfigError, match="delta_threshold"):
+        config.validate_config(cfg)
+
+
+def test_price_refresh_non_positive_magnitude_lo_raises():
+    cfg = make_good_config()
+    cfg.PRICE_REFRESH = {**cfg.PRICE_REFRESH, "magnitude_lo": 0}
+    with pytest.raises(config.ConfigError, match="magnitude_lo"):
+        config.validate_config(cfg)
+
+
+def test_price_refresh_hi_not_above_lo_raises():
+    cfg = make_good_config()
+    cfg.PRICE_REFRESH = {**cfg.PRICE_REFRESH, "magnitude_lo": 5.0,
+                         "magnitude_hi": 5.0}
+    with pytest.raises(config.ConfigError, match="magnitude_hi"):
+        config.validate_config(cfg)
+
+
+def test_price_refresh_delta_threshold_out_of_range_raises():
+    # The delta boundary is a fraction in (0, 1); 1.5 (150%) is a typo.
+    cfg = make_good_config()
+    cfg.PRICE_REFRESH = {**cfg.PRICE_REFRESH, "delta_threshold": 1.5}
+    with pytest.raises(config.ConfigError, match="delta_threshold"):
+        config.validate_config(cfg)
+
+
+def test_price_refresh_cross_tol_out_of_range_raises():
+    cfg = make_good_config()
+    cfg.PRICE_REFRESH = {**cfg.PRICE_REFRESH, "cross_tol": 0}
+    with pytest.raises(config.ConfigError, match="cross_tol"):
         config.validate_config(cfg)

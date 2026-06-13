@@ -116,6 +116,19 @@ DEFAULT_SPEND_VIZ = {
     "warn_fg": "#052E16",
 }
 
+# Validation thresholds for the price-refresh agent (per-MTok magnitude band,
+# cross-source agreement tolerance, and the auto-apply vs stage-for-review delta
+# boundary). The agent's pure validation layers take these as explicit params (no
+# hardcoded defaults in their signatures); this dict is the one place the values
+# live, validated at startup like the rest. magnitude_lo < magnitude_hi; cross_tol
+# and delta_threshold are fractions in (0, 1).
+DEFAULT_PRICE_REFRESH = {
+    "magnitude_lo": 0.02,    # per-MTok floor (a value below this is a unit error)
+    "magnitude_hi": 200.0,   # per-MTok ceiling
+    "cross_tol": 0.05,       # cross-source agreement tolerance (fraction)
+    "delta_threshold": 0.10, # auto-apply (<) vs stage-for-review (>=) boundary
+}
+
 # name -> default, for every externalized tunable. load_settings() merges the
 # parsed TOML over these, so a missing key always resolves to its default.
 SETTINGS_DEFAULTS: dict[str, object] = {
@@ -132,6 +145,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "SEARCH_QUERIES": DEFAULT_SEARCH_QUERIES,
     "PRICES": DEFAULT_PRICES,
     "SPEND_VIZ": DEFAULT_SPEND_VIZ,
+    "PRICE_REFRESH": DEFAULT_PRICE_REFRESH,
 }
 
 # Resolve relative to THIS file, not CWD, so it works regardless of where the
@@ -217,6 +231,7 @@ CATEGORY_REGION = _settings["CATEGORY_REGION"]
 SEARCH_QUERIES = _settings["SEARCH_QUERIES"]
 PRICES = _settings["PRICES"]
 SPEND_VIZ = _settings["SPEND_VIZ"]
+PRICE_REFRESH = _settings["PRICE_REFRESH"]
 
 # The per-model max_tokens defaults — strict, no fallback (see load_required_settings).
 _required = load_required_settings()
@@ -568,6 +583,30 @@ def validate_config(cfg: object | None = None) -> None:
         raise ConfigError(
             "SPEND_VIZ['efficiency_good'] must be <= SPEND_VIZ['efficiency_warn']"
         )
+
+    # PRICE_REFRESH: the price-refresh agent's validation thresholds. Each of the
+    # four keys must be a number (bool rejected). magnitude_lo a positive per-MTok
+    # floor strictly below magnitude_hi; cross_tol and delta_threshold fractions in
+    # (0, 1). A hand-edit typo fails loud here, naming the offending key.
+    pr = getattr(cfg, "PRICE_REFRESH")
+    if not isinstance(pr, dict):
+        raise ConfigError(
+            f"Config key PRICE_REFRESH must be a dict, got {type(pr).__name__}"
+        )
+    for key in ("magnitude_lo", "magnitude_hi", "cross_tol", "delta_threshold"):
+        value = pr.get(key)
+        # bool is an int subclass; reject it where a number is required.
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ConfigError(f"PRICE_REFRESH['{key}'] must be a number, got {value!r}")
+    if pr["magnitude_lo"] <= 0:
+        raise ConfigError("PRICE_REFRESH['magnitude_lo'] must be a positive number")
+    if pr["magnitude_hi"] <= pr["magnitude_lo"]:
+        raise ConfigError(
+            "PRICE_REFRESH['magnitude_hi'] must be > PRICE_REFRESH['magnitude_lo']"
+        )
+    for key in ("cross_tol", "delta_threshold"):
+        if not (0 < pr[key] < 1):
+            raise ConfigError(f"PRICE_REFRESH['{key}'] must be a fraction in (0, 1)")
 
 
 # Validate the loaded settings at import. An external settings.toml means

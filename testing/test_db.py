@@ -16,6 +16,7 @@ EXPECTED_TABLES = {
     "app_preferences",
     "models",
     "model_prices",
+    "price_proposals",
 }
 
 EXPECTED_COLUMNS = {
@@ -63,6 +64,10 @@ EXPECTED_COLUMNS = {
     "model_prices": {
         "id", "model", "input_per_1m", "output_per_1m", "valid_from", "valid_to",
         "deleted", "recorded_at",
+    },
+    "price_proposals": {
+        "id", "model", "field", "old_value", "new_value", "pct_change",
+        "direction", "quote", "source_url", "status", "proposed_at", "resolved_at",
     },
 }
 
@@ -123,7 +128,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 9
+        assert version == db.SCHEMA_VERSION == 10
     finally:
         conn.close()
 
@@ -694,7 +699,9 @@ def test_v8_to_v9_adds_max_tokens_reasoning_aware(tmp_path):
     """A genuine v8 DB (models without max_tokens) gains a nullable max_tokens via
     ALTER, backfilled by is_reasoning: non-reasoning cloud -> lean default (no
     behavior change), reasoning cloud -> generous default (the one intended
-    512->5000 fix), local -> NULL (uncapped). Bumps to v9."""
+    512->5000 fix), local -> NULL (uncapped). The max_tokens ALTER is column-guarded,
+    not version-gated, so it still applies on the 8 -> current jump; init_db stamps the
+    current SCHEMA_VERSION (10)."""
     db_path = str(tmp_path / "test.db")
     _build_v8_db(db_path)
 
@@ -710,7 +717,7 @@ def test_v8_to_v9_adds_max_tokens_reasoning_aware(tmp_path):
     conn = db.get_connection(db_path)
     try:
         assert "max_tokens" in _columns(conn, "models")
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
         def mt(model):
             return conn.execute(
@@ -1658,6 +1665,82 @@ def test_insert_price_window_deleted_agnostic_prevents_double_count(tmp_path):
         assert row["invocations"] == 1          # not 2
         assert row["input_tokens"] == 1_000_000  # not doubled
         assert row["cost"] == pytest.approx(3.0)  # only the new window
+    finally:
+        conn.close()
+
+
+def test_price_proposals_partial_index_one_pending_per_model_field(tmp_path):
+    """ux_pending_proposal allows at most one PENDING row per (model, field); a
+    resolved row (confirmed/rejected) is outside the partial index, so it never
+    conflicts."""
+    import sqlite3
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        def _proposal(status):
+            conn.execute(
+                "INSERT INTO price_proposals (model, field, status) "
+                "VALUES ('test:m', 'input', ?)", (status,))
+        with db.transaction(conn):
+            _proposal("pending")
+        # A second PENDING for the same (model, field) violates the partial index.
+        with pytest.raises(sqlite3.IntegrityError):
+            with db.transaction(conn):
+                _proposal("pending")
+        # Resolved rows are outside the index — any number coexist.
+        with db.transaction(conn):
+            _proposal("confirmed")
+            _proposal("rejected")
+        cnt = conn.execute(
+            "SELECT COUNT(*) AS c FROM price_proposals WHERE model='test:m'"
+        ).fetchone()["c"]
+        assert cnt == 3
+    finally:
+        conn.close()
+
+
+def test_active_price_window_is_the_open_non_deleted_window(tmp_path):
+    """active_price_window returns the single open (valid_to IS NULL) non-deleted
+    window — NOT latest_price_window, which is deleted-agnostic and would surface a
+    soft-deleted-but-open row."""
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        assert db.active_price_window(conn, "test:m") is None
+        with db.transaction(conn):
+            _price_window(conn, "test:m", 1.0, 2.0, "2026-01-01", "2026-06-01")
+            _price_window(conn, "test:m", 3.0, 4.0, "2026-06-01", None)
+            # A soft-deleted-but-open window must be ignored by active.
+            _price_window(conn, "test:m", 9.9, 9.9, "2026-07-01", None, deleted=1)
+        active = db.active_price_window(conn, "test:m")
+        assert active["valid_from"] == "2026-06-01"
+        assert active["input_per_1m"] == 3.0 and active["output_per_1m"] == 4.0
+    finally:
+        conn.close()
+
+
+def test_update_price_window_replaces_values_in_place(tmp_path):
+    """update_price_window overwrites a window's prices + recorded_at by id, leaving
+    valid_from/valid_to untouched (the supersede primitive)."""
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        with db.transaction(conn):
+            _price_window(conn, "test:m", 1.0, 2.0, "2026-06-01", None)
+        win = db.active_price_window(conn, "test:m")
+        with db.transaction(conn):
+            rows = db.update_price_window(
+                conn, price_id=win["id"], input_per_1m=5.0, output_per_1m=6.0,
+                now="2026-06-02T00:00:00-04:00")
+        assert rows == 1
+        after = db.active_price_window(conn, "test:m")
+        assert after["id"] == win["id"]
+        assert after["input_per_1m"] == 5.0 and after["output_per_1m"] == 6.0
+        assert after["valid_from"] == "2026-06-01" and after["valid_to"] is None
+        assert after["recorded_at"] == "2026-06-02T00:00:00-04:00"
     finally:
         conn.close()
 

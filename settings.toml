@@ -110,3 +110,15 @@ mid_bg  = "#15803D"   # between cutoffs: mid green fill
 mid_fg  = "#ECFDF5"   # near-white text on mid green
 warn_bg = "#4ADE80"   # >= efficiency_warn: bright green fill
 warn_fg = "#052E16"   # very dark green text on bright green
+
+# Validation thresholds for the daily price-refresh agent. The agent's pure
+# validation layers take these as explicit params (no hardcoded defaults in their
+# signatures); this is the single source. Like [SPEND_VIZ], the section name MUST be
+# the UPPERCASE key the loader looks up (config.load_settings does
+# parsed.get("PRICE_REFRESH")); a lowercase or dotted name would silently fall back
+# to the in-code DEFAULT_PRICE_REFRESH instead of applying these edits.
+[PRICE_REFRESH]
+magnitude_lo    = 0.02    # per-MTok floor; positive number below magnitude_hi. A value under this is a unit/extraction error, not a real price.
+magnitude_hi    = 200.0   # per-MTok ceiling; number above magnitude_lo. Catches 1000x unit errors.
+cross_tol       = 0.05    # cross-source agreement tolerance; fraction in (0, 1). Two sources within 5% are considered to agree.
+delta_threshold = 0.10    # auto-apply (< this) vs stage-for-review (>= this) boundary; fraction in (0, 1). A >=10% move needs a human.

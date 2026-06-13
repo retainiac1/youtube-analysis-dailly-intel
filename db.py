@@ -42,7 +42,12 @@ import config
 # a fail-closed assertion that no non-local/unknown-provider row is left uncapped.
 # Local rows (ollama) stay NULL; the "never uncapped" guarantee for paid models is
 # enforced by validation, not the column. See config.default_max_tokens.
-SCHEMA_VERSION = 9
+# v10: added the `price_proposals` table + `ux_pending_proposal` partial unique index
+# (the price-refresh agent stages >10% price moves for a one-click human confirm). Both
+# are unconditional CREATE IF NOT EXISTS — additive, idempotent, and NOT gated on
+# current_version, so a version-number collision cannot strand them the way the
+# current_version<8 seed gate could. No data backfill: the table is born empty.
+SCHEMA_VERSION = 10
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -203,6 +208,29 @@ SCHEMA_STATEMENTS: list[str] = [
         deleted INTEGER DEFAULT 0,      -- soft-delete flag
         recorded_at TEXT
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS price_proposals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        model TEXT,
+        field TEXT,              -- 'input' or 'output'
+        old_value REAL,
+        new_value REAL,
+        pct_change REAL,
+        direction TEXT,          -- 'up' or 'down'
+        quote TEXT,              -- the extracted snippet justifying the number
+        source_url TEXT,
+        status TEXT,             -- 'pending' / 'confirmed' / 'rejected'
+        proposed_at TEXT,        -- Eastern ISO-8601 with offset
+        resolved_at TEXT         -- Eastern ISO-8601 with offset
+    )
+    """,
+    # At most one PENDING proposal per (model, field): a persisting >10% move upserts
+    # this single row rather than stacking a new pending one each day. Partial index —
+    # resolved (confirmed/rejected) rows are outside it and never conflict.
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_pending_proposal
+        ON price_proposals (model, field) WHERE status = 'pending'
     """,
 ]
 
@@ -979,6 +1007,22 @@ def latest_price_window(
     ).fetchone()
 
 
+def active_price_window(
+    conn: sqlite3.Connection, model: str
+) -> sqlite3.Row | None:
+    """The single OPEN, NON-DELETED window for `model` (valid_to IS NULL AND
+    deleted = 0), or None. By the non-overlap invariant there is at most one. Unlike
+    latest_price_window (deleted-agnostic, for the overlap guard), this is the current
+    EFFECTIVE price — the carry-forward and idempotency baseline the price-refresh
+    seam supersedes. Read-only."""
+    return conn.execute(
+        "SELECT * FROM model_prices "
+        "WHERE model = ? AND valid_to IS NULL AND deleted = 0 "
+        "ORDER BY valid_from DESC LIMIT 1",
+        (model,),
+    ).fetchone()
+
+
 def insert_price_window(conn: sqlite3.Connection, *, model: str,
                         input_per_1m: float, output_per_1m: float,
                         valid_from: str, now: str) -> int:
@@ -1003,6 +1047,23 @@ def insert_price_window(conn: sqlite3.Connection, *, model: str,
          "valid_from": valid_from, "now": now},
     )
     return cur.lastrowid
+
+
+def update_price_window(conn: sqlite3.Connection, *, price_id: int,
+                        input_per_1m: float, output_per_1m: float,
+                        now: str) -> int:
+    """Replace a window's prices (and recorded_at) IN PLACE by id, leaving
+    valid_from/valid_to untouched. The supersede primitive: when a same-day write
+    must update today's already-open window rather than append a new one (which would
+    trip the strictly-after valid_from guard). Returns rowcount (0 = unknown id).
+    Does not commit."""
+    cur = conn.execute(
+        "UPDATE model_prices SET input_per_1m = :inp, output_per_1m = :out, "
+        "recorded_at = :now WHERE id = :price_id",
+        {"inp": input_per_1m, "out": output_per_1m, "now": now,
+         "price_id": price_id},
+    )
+    return cur.rowcount
 
 
 def set_price_deleted(conn: sqlite3.Connection, *, price_id: int,
