@@ -570,9 +570,18 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .interpret-control.interpret-think.control-muted .interpret-think-box > input {
   cursor: not-allowed;
 }
-/* A modest extra gap before Run (on top of the row's 1rem gap) so it sits a clear,
-   normal distance after the Prompt Columns box — separated, not flung to the edge. */
-.interpret-run { padding: 0.55rem 1.5rem; margin-left: 1.5rem; }
+.interpret-run { padding: 0.55rem 1.5rem; }
+/* Run + run-time as one unit on their own row, flush-left so the button aligns with the
+   "Model" caption above and the panel title. flex-basis:100% claims the full row width,
+   so the pair always wraps to its own line at the row's left edge (relies on the parent
+   .interpret-controls-row keeping flex-wrap: wrap). The inline run-time still rides
+   directly to the button's right; the freed width is empty space to their right. */
+.interpret-run-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-basis: 100%;
+}
 /* Prompt-columns multi-select: a button that toggles an absolutely-positioned
    checkbox menu, so the controls row height doesn't jump when it opens. */
 .fields-dropdown { position: relative; }
@@ -643,16 +652,22 @@ html { scroll-padding-top: var(--header-h, 0px); }
   flex: none;
   cursor: pointer;
 }
-/* Labeled run-time readout: caption stacked above the value (mirrors the other
-   controls), so it reads as a field with a resting "—" rather than empty space. */
-.interpret-runtime { gap: 0.35rem; }
+/* Compact inline run-time readout: caption beside the value on one line (caption tone
+   comes from the shared .control-label), so it tucks next to the Run button rather
+   than reserving a tall stacked field. */
+.interpret-runtime {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
 .interpret-stopwatch {
   font-family: var(--font-display);
   font-variant-numeric: tabular-nums;
   font-size: 0.95rem;
   color: var(--text-primary);
-  min-width: 3.5rem;
-  padding: 0.5rem 0;
+  /* Holds a formatted duration (e.g. "12.3s") without the value jiggling as digits
+     change; no longer reserves a tall column now that it is inline. */
+  min-width: 2.5rem;
 }
 .interpret-error {
   margin: 0.85rem 0 0;

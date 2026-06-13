@@ -173,7 +173,9 @@ async function buildScaffold() {
   // never an invisible empty span. Ticks live during a run, then freezes to the
   // server's authoritative duration.
   const stopwatchEl = node("span", { class: "interpret-stopwatch", text: "—", attrs: { "aria-live": "polite" } });
-  const runtime = node("div", { class: "interpret-control interpret-runtime" }, [
+  // Compact inline readout (caption + value on one line), bundled with the Run button
+  // below so the pair stays adjacent and never orphans onto its own wrapped row.
+  const runtime = node("div", { class: "interpret-runtime" }, [
     node("span", { class: "control-label", text: "Run time" }),
     stopwatchEl,
   ]);
@@ -201,6 +203,9 @@ async function buildScaffold() {
   controls = { modelSelect, tempInput, seedInput, thinkInput, thinkControl, runBtn,
                errorEl, stopwatchEl, fieldsToggle, fieldsPanel, fieldsDropdown };
 
+  // Run + run-time travel together as one flex item so they wrap as a unit.
+  const runGroup = node("div", { class: "interpret-run-group" }, [runBtn, runtime]);
+
   const panel = node("section", { class: "glass-panel interpret-controls" }, [
     node("h2", { class: "heading-sm", text: "Generate interpretation" }),
     node("div", { class: "interpret-controls-row" }, [
@@ -209,8 +214,7 @@ async function buildScaffold() {
       labeled("Seed", seedInput),
       thinkControl,
       fieldsControl,
-      runBtn,
-      runtime,
+      runGroup,
     ]),
     errorEl,
   ]);
