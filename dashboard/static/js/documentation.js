@@ -15,10 +15,31 @@ let mountEl = null;
 let viewportEl = null;
 let loadSeq = 0; // guards against an out-of-order document fetch winning the viewport
 
+// The current native render's teardown handle (pdf.js holds a worker-side document +
+// in-flight render tasks that replaceChildren does not release). It is fired on the
+// PREVIOUS render before the next one loads, and on leaving the page (teardown). md/html
+// and docx shapes carry no destroy, so this stays null for them and every call is a
+// no-op. Format-agnostic here: it either exists or it does not.
+let activeDestroy = null;
+
 const state = { tabs: [], activeTabId: null, activeDocId: null };
 
 export function init(mount) {
   mountEl = mount;
+}
+
+// Run the previous native render's teardown, tolerating its absence (no-op for md/html/
+// docx). Wrapped so a faulty destroy never blocks the next load or the route change.
+function runActiveDestroy() {
+  if (!activeDestroy) return;
+  try { activeDestroy(); } catch (e) { /* best effort: never block teardown */ }
+}
+
+// Called by the router when leaving /documentation, so a PDF's worker handles do not
+// outlive the page. The next-doc-load path (loadActiveDoc) handles doc-to-doc switches.
+export function teardown() {
+  runActiveDestroy();
+  activeDestroy = null;
 }
 
 function el(tag, attrs = {}, children = []) {
@@ -199,10 +220,21 @@ async function loadActiveDoc() {
   }
   if (seq !== loadSeq) return; // a newer selection superseded this fetch
 
+  // Build the shape, then tear down the PREVIOUS native render before this one's
+  // replaceChildren runs inside presenter.render: a pending pdf render must be cancelled
+  // and its worker handle destroyed before the canvas it targets is replaced. Capture
+  // this render's destroy BEFORE awaiting render, so a render that throws (corrupt pdf)
+  // still leaves the handle owned and the next load/leave can release it (no leak on the
+  // failure path). The shape is built only here, past the seq guard, so a superseded
+  // fetch never creates a pdf handle in the first place.
+  const shape = ADAPTERS[doc.format](payload);
+  runActiveDestroy();
+  activeDestroy = shape.destroy || null;
+
   try {
-    // render returns a Promise for native (docx-preview); awaiting it routes a parse
-    // failure into the catch so the error notice replaces the half-rendered container.
-    await presenter.render(viewportEl, ADAPTERS[doc.format](payload));
+    // render returns a Promise for native (docx-preview / pdf.js); awaiting it routes a
+    // parse failure into the catch so the error notice replaces the half-rendered view.
+    await presenter.render(viewportEl, shape);
   } catch (err) {
     if (seq === loadSeq) {
       viewportEl.replaceChildren(notice(`Could not render ${doc.title}: ${err.message || err}`));

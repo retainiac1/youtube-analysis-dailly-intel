@@ -356,6 +356,12 @@ async function init() {
       "/models": enterModels,
       "/documentation": enterDocumentation,
     },
+    // Leaving Documentation tears down any live native render (a pdf.js worker handle
+    // outlives the hidden DOM otherwise); the page's own doc-to-doc switches are handled
+    // inside documentation.js.
+    leaves: {
+      "/documentation": documentation.teardown,
+    },
     links: pageNav,
     fallback: "/board",
   });

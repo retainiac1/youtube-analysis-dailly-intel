@@ -9,6 +9,7 @@
 // small; later phases add routes by extending the table passed to initRouter.
 
 let routes = {}; // path -> onEnter()
+let leaves = {}; // path -> onLeave(), fired when navigating away from that route
 let links = []; // page-nav anchors
 let fallback = "/"; // where "/" and unknown paths resolve
 let currentPath = null;
@@ -32,6 +33,11 @@ function setTabStop(target) {
 function dispatch(path) {
   const route = resolve(path);
   if (!routes[route]) return;
+  // Fire the outgoing route's leave handler before swapping pages, but only on a real
+  // route change (re-dispatching the same path, e.g. a refresh, must not tear down).
+  // Lets a page release resources that outlive its DOM (the Documentation page's pdf.js
+  // worker handles); pages without a leave handler are unaffected.
+  if (currentPath && currentPath !== route && leaves[currentPath]) leaves[currentPath]();
   currentPath = route;
   for (const a of links) {
     const active = pathFor(a.getAttribute("href")) === route;
@@ -56,6 +62,7 @@ export function current() {
 
 export function initRouter(config) {
   routes = config.routes;
+  leaves = config.leaves || {};
   links = config.links || [];
   fallback = config.fallback || "/";
 

@@ -131,15 +131,18 @@
   </div>
 
   <!-- Vendored offline; pinned. Loaded before the ES module so their globals
-       (echarts, marked, DOMPurify, JSZip, docx) exist when the modules run. marked +
-       DOMPurify back the Documentation page's markdown/html reading adapters; JSZip +
-       docx-preview back its docx native adapter (JSZip first: docx-preview reads the
-       global JSZip). -->
+       (echarts, marked, DOMPurify, JSZip, docx, pdfjsLib) exist when the modules run.
+       marked + DOMPurify back the Documentation page's markdown/html reading adapters;
+       JSZip + docx-preview back its docx native adapter (JSZip first: docx-preview reads
+       the global JSZip); pdf.js backs its pdf native adapter. The pdf worker is NOT a
+       script tag: pdf.js loads it itself from the path set in GlobalWorkerOptions.workerSrc
+       (see doc-adapters.js). -->
   <script src="/vendor/echarts-5.5.1.min.js"></script>
   <script src="/vendor/marked-12.0.2.min.js"></script>
   <script src="/vendor/dompurify-3.1.7.min.js"></script>
   <script src="/vendor/jszip-3.10.1.min.js"></script>
   <script src="/vendor/docx-preview-0.3.7.min.js"></script>
+  <script src="/vendor/pdf-3.11.174.min.js"></script>
   <script type="module" src="/js/main.js"></script>
 </body>
 </html>

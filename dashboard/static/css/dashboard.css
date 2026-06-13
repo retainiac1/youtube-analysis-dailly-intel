@@ -1160,6 +1160,16 @@ html { scroll-padding-top: var(--header-h, 0px); }
 /* Style sink for the document's injected <style>/@font-face: its children apply
    globally and the element itself renders nothing. */
 .doc-native-styles { display: none; }
+/* Native view (pdf): pdf.js paints each page to its own canvas (no injected stylesheet,
+   so the style sink stays empty). Give the stacked canvases the same page metaphor as the
+   docx pages - centered, a white paper surface, a soft shadow, and vertical gaps - so they
+   read as pages floating on the dark Glass chrome. Width/height are set inline from the
+   rendered viewport (the faithful page size); here we only add chrome. The white surface
+   and shadow are the page's own look, the faithful-native convention, not Glass tokens. */
+.doc-pdf-page {
+  display: block; margin: 0 auto 1.5rem; background: #fff;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
+}
 /* The TOC sits below the pinned header AND sub-nav, so both measured heights anchor
    it. The edge gap is defined once and consumed twice: the top offset is
    header + subnav + gap, and the max-height subtracts the same plus a second gap (top
