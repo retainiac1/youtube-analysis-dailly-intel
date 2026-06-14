@@ -17,6 +17,7 @@ EXPECTED_TABLES = {
     "models",
     "model_prices",
     "price_proposals",
+    "price_cross_check",
 }
 
 EXPECTED_COLUMNS = {
@@ -128,7 +129,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 10
+        assert version == db.SCHEMA_VERSION == 11
     finally:
         conn.close()
 
@@ -187,7 +188,7 @@ def test_init_db_seeds_baseline_models(tmp_path):
         }
         assert set(models) == {
             "anthropic:claude-haiku-4-5", "openai:gpt-5.4-nano",
-            "xai:grok-4-fast", "google:gemini-2.5-flash-lite",
+            "xai:grok-4.3", "google:gemini-2.5-flash-lite",
             "ollama:qwen3.5:9b",
         }
         # Capability flags as data: anthropic omits seed; the gpt-5 reasoning model
@@ -201,7 +202,7 @@ def test_init_db_seeds_baseline_models(tmp_path):
         assert nano["supports_temperature"] == 0
         assert nano["supports_seed"] == 1
         assert nano["is_reasoning"] == 1
-        grok = models["xai:grok-4-fast"]
+        grok = models["xai:grok-4.3"]
         assert grok["supports_temperature"] == 1 and grok["supports_seed"] == 1
         # The local Ollama thinking model: temperature + seed honored, is_reasoning.
         ollama = models["ollama:qwen3.5:9b"]
@@ -241,10 +242,10 @@ def test_init_db_seed_is_insert_if_empty(tmp_path):
         with db.transaction(conn):
             conn.execute(
                 "UPDATE models SET deleted = 1, enabled = 0, notes = 'retired' "
-                "WHERE model = 'xai:grok-4-fast'"
+                "WHERE model = 'xai:grok-4.3'"
             )
         before = conn.execute(
-            "SELECT count(*) c FROM model_prices WHERE model = 'xai:grok-4-fast'"
+            "SELECT count(*) c FROM model_prices WHERE model = 'xai:grok-4.3'"
         ).fetchone()["c"]
     finally:
         conn.close()
@@ -254,12 +255,12 @@ def test_init_db_seed_is_insert_if_empty(tmp_path):
     conn = db.get_connection(db_path)
     try:
         row = conn.execute(
-            "SELECT deleted, enabled, notes FROM models WHERE model = 'xai:grok-4-fast'"
+            "SELECT deleted, enabled, notes FROM models WHERE model = 'xai:grok-4.3'"
         ).fetchone()
         assert row["deleted"] == 1 and row["enabled"] == 0
         assert row["notes"] == "retired"  # operator edit preserved, not re-seeded
         after = conn.execute(
-            "SELECT count(*) c FROM model_prices WHERE model = 'xai:grok-4-fast'"
+            "SELECT count(*) c FROM model_prices WHERE model = 'xai:grok-4.3'"
         ).fetchone()["c"]
         assert after == before  # no duplicate window
     finally:
@@ -701,7 +702,7 @@ def test_v8_to_v9_adds_max_tokens_reasoning_aware(tmp_path):
     behavior change), reasoning cloud -> generous default (the one intended
     512->5000 fix), local -> NULL (uncapped). The max_tokens ALTER is column-guarded,
     not version-gated, so it still applies on the 8 -> current jump; init_db stamps the
-    current SCHEMA_VERSION (10)."""
+    current SCHEMA_VERSION (11)."""
     db_path = str(tmp_path / "test.db")
     _build_v8_db(db_path)
 
@@ -727,6 +728,65 @@ def test_v8_to_v9_adds_max_tokens_reasoning_aware(tmp_path):
         assert mt("anthropic:claude-haiku-4-5") == config.DEFAULT_MAX_TOKENS
         assert mt("openai:gpt-5.4-nano") == config.DEFAULT_MAX_TOKENS_REASONING
         assert mt("ollama:qwen3.5:9b") is None
+    finally:
+        conn.close()
+
+
+# --- price_cross_check (v11): per-run cross-check provenance snapshots -------
+
+def test_cross_check_latest_returns_newest_run(tmp_path):
+    db_path = str(tmp_path / "cc.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        def _ins():
+            with db.transaction(conn):
+                db.insert_cross_check(
+                    conn, run_at="2026-06-14T10:00:00-04:00",
+                    validator_name="litellm", source_outcomes="[]", cells="{}")
+                db.insert_cross_check(
+                    conn, run_at="2026-06-14T12:00:00-04:00",
+                    validator_name="openrouter",
+                    source_outcomes='[{"role": "validator"}]',
+                    cells='{"m": 1}')
+        db.run_with_db_retry(_ins)
+        row = db.latest_cross_check(conn)
+        assert row["validator_name"] == "openrouter"       # newest run_at wins
+        assert row["run_at"] == "2026-06-14T12:00:00-04:00"
+        assert row["cells"] == '{"m": 1}'
+        # History is retained (append, not latest-wins overwrite).
+        n = conn.execute("SELECT COUNT(*) c FROM price_cross_check").fetchone()["c"]
+        assert n == 2
+    finally:
+        conn.close()
+
+
+def test_cross_check_latest_none_when_empty(tmp_path):
+    db_path = str(tmp_path / "cc.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        assert db.latest_cross_check(conn) is None
+    finally:
+        conn.close()
+
+
+def test_cross_check_id_tiebreak_on_equal_run_at(tmp_path):
+    # Two rows sharing a run_at: the later INSERT (higher id) is the latest.
+    db_path = str(tmp_path / "cc.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        same = "2026-06-14T12:00:00-04:00"
+
+        def _ins():
+            with db.transaction(conn):
+                db.insert_cross_check(conn, run_at=same, validator_name="litellm",
+                                      source_outcomes="[]", cells='{"first": 1}')
+                db.insert_cross_check(conn, run_at=same, validator_name="litellm",
+                                      source_outcomes="[]", cells='{"second": 1}')
+        db.run_with_db_retry(_ins)
+        assert db.latest_cross_check(conn)["cells"] == '{"second": 1}'
     finally:
         conn.close()
 
@@ -775,7 +835,8 @@ def test_init_db_seeds_max_tokens_reasoning_aware(tmp_path):
 
         assert mt("openai:gpt-5.4-nano") == config.DEFAULT_MAX_TOKENS_REASONING
         assert mt("anthropic:claude-haiku-4-5") == config.DEFAULT_MAX_TOKENS
-        assert mt("xai:grok-4-fast") == config.DEFAULT_MAX_TOKENS
+        # grok-4.3 is reasoning-capable (Reasoning: Configurable), so the generous cap.
+        assert mt("xai:grok-4.3") == config.DEFAULT_MAX_TOKENS_REASONING
         assert mt("google:gemini-2.5-flash-lite") == config.DEFAULT_MAX_TOKENS
         assert mt("ollama:qwen3.5:9b") is None
     finally:
@@ -808,9 +869,9 @@ def test_fetch_model_ignores_enabled_and_deleted(tmp_path):
         with db.transaction(conn):
             conn.execute(
                 "UPDATE models SET deleted = 1, enabled = 0 "
-                "WHERE model = 'xai:grok-4-fast'"
+                "WHERE model = 'xai:grok-4.3'"
             )
-        row = db.fetch_model(conn, "xai:grok-4-fast")
+        row = db.fetch_model(conn, "xai:grok-4.3")
         assert row is not None
         assert row["deleted"] == 1 and row["enabled"] == 0
     finally:
@@ -831,7 +892,7 @@ def test_fetch_dropdown_models_filters_enabled_deleted_and_priced(tmp_path):
                 "UPDATE models SET enabled = 0 WHERE model = 'openai:gpt-5.4-nano'"
             )
             conn.execute(
-                "UPDATE models SET deleted = 1 WHERE model = 'xai:grok-4-fast'"
+                "UPDATE models SET deleted = 1 WHERE model = 'xai:grok-4.3'"
             )
             # A model with attributes but no current price window.
             conn.execute(

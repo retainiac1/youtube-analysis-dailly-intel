@@ -922,14 +922,30 @@ def api_price_invocation_count(
 # docs/dashboard-plan.MD), mirroring the interpret-write carve-out: one read, two
 # proposal writes, get/set the active extraction model, and one run trigger.
 
+def _cross_check_payload(conn: sqlite3.Connection):
+    """The latest cross-check provenance snapshot (validator that answered, per-URL
+    outcomes, per-model/field cells), parsed from the stored JSON, or None when no run
+    has recorded one. The /prices panel renders from this and never refetches the
+    validators."""
+    row = db.run_with_db_retry(lambda: db.latest_cross_check(conn))
+    if row is None:
+        return None
+    return {"run_at": row["run_at"], "validator_name": row["validator_name"],
+            "cells": json.loads(row["cells"]),
+            "source_outcomes": json.loads(row["source_outcomes"])}
+
+
 @app.get("/api/price-refresh")
 def api_price_refresh(conn: sqlite3.Connection = Depends(get_conn)):
-    """Current prices + day-over-day deltas per priced model, and the pending (>=10%)
-    proposals awaiting a human. Read-only; empty -> empty lists, never 404."""
+    """Current prices + day-over-day deltas per priced model, the pending (>=10%)
+    proposals awaiting a human, and the latest cross-check snapshot (validator agreement
+    per field + the sources-this-run provenance). Read-only; empty -> empty lists /
+    null cross_check, never 404."""
     prices = db.run_with_db_retry(lambda: store.fetch_price_overview(conn))
     proposals = db.run_with_db_retry(
         lambda: _rows(store.fetch_pending_proposals(conn)))
-    return {"prices": prices, "proposals": proposals}
+    return {"prices": prices, "proposals": proposals,
+            "cross_check": _cross_check_payload(conn)}
 
 
 @app.post("/api/price-proposals/{proposal_id}/confirm")
@@ -1012,7 +1028,8 @@ def api_price_refresh_run(conn: sqlite3.Connection = Depends(get_conn)):
     duration_ms = int((time.monotonic() - start) * 1000)
     return {"applied": summary.applied, "staged": summary.staged,
             "rejected": summary.rejected, "skipped": summary.skipped,
-            "errors": summary.errors, "duration_ms": duration_ms}
+            "errors": summary.errors, "duration_ms": duration_ms,
+            "cross_check": _cross_check_payload(conn)}
 
 
 # --- Documentation page: filesystem-discovered docs (read-only) -------------

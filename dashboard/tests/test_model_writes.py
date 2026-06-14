@@ -24,7 +24,7 @@ def test_dashboard_startup_self_heals_unmigrated_db(tmp_path, monkeypatch):
         assert resp.status_code == 200
         assert {m["model"] for m in resp.json()["models"]} == {
             "anthropic:claude-haiku-4-5", "openai:gpt-5.4-nano",
-            "xai:grok-4-fast", "google:gemini-2.5-flash-lite",
+            "xai:grok-4.3", "google:gemini-2.5-flash-lite",
             "ollama:qwen3.5:9b",
         }
 
@@ -89,16 +89,16 @@ def test_get_models_lists_seeded_with_and_without_deleted(client, seeded_db_path
     models = {m["model"] for m in body["models"]}
     assert models == {
         "anthropic:claude-haiku-4-5", "openai:gpt-5.4-nano",
-        "xai:grok-4-fast", "google:gemini-2.5-flash-lite",
+        "xai:grok-4.3", "google:gemini-2.5-flash-lite",
         "ollama:qwen3.5:9b",
     }
     # Soft-delete one; default read hides it, include_deleted surfaces it.
-    assert client.post("/api/models/xai:grok-4-fast/delete").status_code == 200
+    assert client.post("/api/models/xai:grok-4.3/delete").status_code == 200
     live = {m["model"] for m in client.get("/api/models").json()["models"]}
-    assert "xai:grok-4-fast" not in live
+    assert "xai:grok-4.3" not in live
     allm = {m["model"] for m in
             client.get("/api/models", params={"include_deleted": "true"}).json()["models"]}
-    assert "xai:grok-4-fast" in allm
+    assert "xai:grok-4.3" in allm
 
 
 # --- PUT /api/models/{model} ------------------------------------------------

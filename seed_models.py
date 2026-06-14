@@ -1,12 +1,17 @@
-"""seed_models.py — live-verify and correct the xAI model string (operator-run).
+"""seed_models.py — live-VERIFY the configured xAI model string (operator-run).
 
-db.init_db already OFFLINE-seeds the four baseline models, including the retired
-`xai:grok-4-fast`, so the app is never broken on a fresh DB. This one-time script
-does the LIVE correction the offline seed cannot: it lists xAI's current models,
-picks the cheapest suitable grok, runs ONE real generation to confirm the string
-works end-to-end, then reconciles the registry to that confirmed string. It also
-read-only cross-checks the Anthropic string against the live invocation log (the
-Phase-0 cross-check, expected to confirm no drift).
+db.init_db already OFFLINE-seeds the baseline models, including the canonical
+`xai:grok-4.3`, so the app is never broken on a fresh DB. This one-time script does
+the LIVE check the offline seed cannot: it confirms the CANONICAL configured grok
+(`config.SEED_MODELS`) is offered by xAI's /v1/models and runs ONE real generation to
+prove the string works end-to-end, then reconciles the registry to it (a no-op when
+the configured string is already seeded). It also read-only cross-checks the Anthropic
+string against the live invocation log (the Phase-0 cross-check, expected to confirm
+no drift).
+
+This VERIFIES the configured model; it never auto-picks a different grok. Registry
+models are user-managed on the /models page (the add-model flow), so this tool must
+never silently switch the registry to another string.
 
 Operator run-order (see docs/model-price-plan.MD):
   1. VACUUM INTO backup of the live swipefile.db; verify it.
@@ -23,22 +28,25 @@ import db
 import llm
 
 # Fallback price for a newly-confirmed grok string: the xAI API does not return
-# prices, so a corrected model is seeded at the retired grok-4-fast rate and the
-# operator adjusts it on the /models page (Phase 2). A no-op correction (string
-# unchanged) keeps the already-seeded price untouched.
-XAI_PRICE_FALLBACK = config.DEFAULT_PRICES["xai:grok-4-fast"]
+# prices, so a corrected model is seeded at the canonical grok rate and the operator
+# adjusts it on the /models page (Phase 2). A no-op correction (string unchanged)
+# keeps the already-seeded price untouched.
+XAI_PRICE_FALLBACK = config.DEFAULT_PRICES["xai:grok-4.3"]
 
 
-def pick_grok_model(model_ids: list[str]) -> str | None:
-    """Choose the cheapest suitable grok from xAI's live model ids. The /v1/models
-    API returns no prices, so 'cheapest suitable' is a documented heuristic: prefer a
-    'fast' / 'mini' variant (xAI's cheap tier), else the lexically-smallest grok.
-    Returns the bare model id (no provider prefix), or None if no grok is offered."""
-    groks = sorted(m for m in model_ids if m.startswith("grok"))
-    if not groks:
-        return None
-    cheap = sorted(m for m in groks if "fast" in m or "mini" in m)
-    return (cheap or groks)[0]
+def canonical_xai_model() -> str:
+    """The single canonical xai model string from config.SEED_MODELS (the registry
+    bootstrap). The live gate CONFIRMS this string is offered; it never auto-picks a
+    different grok. Registry models are user-managed on the /models page, so the
+    canonical string is whatever the bootstrap declares. Raises ValueError if the
+    bootstrap does not carry exactly one xai model (a malformed config, surfaced
+    loudly rather than silently resolved)."""
+    xai = [m["model"] for m in config.SEED_MODELS if m["provider"] == "xai"]
+    if len(xai) != 1:
+        raise ValueError(
+            f"expected exactly one xai model in config.SEED_MODELS, got {xai}"
+        )
+    return xai[0]
 
 
 def correct_xai(conn, confirmed_model: str, *, input_per_1m: float,
@@ -115,22 +123,26 @@ def verify_anthropic(conn) -> tuple[str | None, str | None]:
 
 
 def verify_xai_live() -> str:
-    """LIVE: list xAI's models, pick the cheapest suitable grok, and run ONE real
-    generation to confirm the string works end-to-end. Returns the confirmed
-    canonical 'xai:<id>' string. Raises llm.LLMError on any provider failure (a
-    clean, provider-named message via the adapter wrap)."""
+    """LIVE: confirm the CANONICAL config xai model is offered by xAI's /v1/models
+    and runs ONE real generation end-to-end. Returns that canonical 'xai:<id>'
+    string. Does NOT auto-pick: the registry model is user-managed (the /models
+    page), so this only VERIFIES the configured string and never switches to a
+    different grok. Raises llm.LLMError on any provider failure or if the canonical
+    model is not in the live list (a clean, provider-named message)."""
     import openai
 
+    model = canonical_xai_model()
+    bare = model.split(":", 1)[1]
     key = llm._require_key("XAI_API_KEY", "xai")
     client = openai.OpenAI(api_key=key, base_url="https://api.x.ai/v1")
     try:
         ids = [m.id for m in client.models.list().data]
     except openai.OpenAIError as e:
         raise llm.LLMError(f"xai: {e}") from e
-    grok = pick_grok_model(ids)
-    if grok is None:
-        raise llm.LLMError("xai: no grok model offered by /v1/models")
-    model = f"xai:{grok}"
+    if bare not in ids:
+        raise llm.LLMError(
+            f"xai: canonical model {bare!r} not offered by /v1/models"
+        )
     # One real generation confirms the string actually works (the whole point of the
     # live gate); grok honors both temperature and seed.
     llm.generate(model, "Reply with the single word OK", temperature=0.5, seed=7,
@@ -161,7 +173,7 @@ def main() -> None:
     print(f"  xAI confirmed live: {confirmed}")
     if result["retired"]:
         print(f"  retired (soft-deleted) stale xAI rows: {result['retired']}")
-        print(f"  NOTE: priced {confirmed} at the grok-4-fast fallback "
+        print(f"  NOTE: priced {confirmed} at the canonical fallback "
               f"{XAI_PRICE_FALLBACK}; verify/adjust on the /models page.")
     else:
         print("  no change: the offline-seeded xAI string was already current.")

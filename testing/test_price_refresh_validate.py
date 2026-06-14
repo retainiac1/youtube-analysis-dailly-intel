@@ -25,10 +25,10 @@ def test_check_structure_missing_key_fails_naming_key():
 
 
 def test_check_structure_extra_key_fails_naming_key():
-    payload = {**GOOD, "xai:grok-4-fast": {"input": 0.20, "output": 0.50}}
+    payload = {**GOOD, "xai:grok-4.3": {"input": 0.20, "output": 0.50}}
     res = v.check_structure(payload, CANON)
     assert not res.ok
-    assert "xai:grok-4-fast" in res.reason
+    assert "xai:grok-4.3" in res.reason
 
 
 def test_check_structure_non_float_value_fails_naming_key():
@@ -152,3 +152,82 @@ def test_classify_price_soft_flag_upgrades_auto_to_review():
     # small move to REVIEW, but never rescues a REJECT.
     res = v.classify_price(5.2, 5.0, lo=0.02, hi=200.0, threshold=0.10, flagged=True)
     assert res.outcome == v.REVIEW
+
+
+# --- to_per_1m (unit normalization, the ONE conversion path) ----------------
+
+def test_to_per_1m_page_value_unchanged():
+    # Provider pages already quote per-1M-tokens.
+    assert v.to_per_1m(1.25, v.UNIT_PER_1M) == pytest.approx(1.25)
+
+
+def test_to_per_1m_per_token_float_scales_to_1m():
+    # LiteLLM quotes a per-token float.
+    assert v.to_per_1m(1.25e-6, v.UNIT_PER_TOKEN) == pytest.approx(1.25)
+
+
+def test_to_per_1m_per_token_string_scales_identically():
+    # OpenRouter quotes per-token as a STRING; it normalizes to the same per-1M number.
+    assert v.to_per_1m("0.00000125", v.UNIT_PER_TOKEN) == pytest.approx(1.25)
+
+
+def test_to_per_1m_all_three_shapes_agree():
+    # The whole point: page / LiteLLM-float / OpenRouter-string land on one value.
+    page = v.to_per_1m(2.5, v.UNIT_PER_1M)
+    litellm = v.to_per_1m(2.5e-6, v.UNIT_PER_TOKEN)
+    openrouter = v.to_per_1m("0.0000025", v.UNIT_PER_TOKEN)
+    assert page == pytest.approx(litellm) == pytest.approx(openrouter)
+
+
+def test_to_per_1m_rejects_bool():
+    with pytest.raises(ValueError):
+        v.to_per_1m(True, v.UNIT_PER_1M)
+
+
+def test_to_per_1m_rejects_non_numeric():
+    with pytest.raises(ValueError):
+        v.to_per_1m("cheap", v.UNIT_PER_TOKEN)
+
+
+def test_to_per_1m_unknown_unit_raises():
+    with pytest.raises(ValueError, match="unit"):
+        v.to_per_1m(1.0, "per_kilo")
+
+
+# --- classify_cell (match / drift / mismatch for one field pair) ------------
+
+def test_classify_cell_within_tolerance_is_match():
+    # 1% apart, tolerance 2% -> match.
+    assert v.classify_cell(
+        1.00, 1.01, tolerance_pct=0.02, review_band_pct=0.10) == v.CELL_MATCH
+
+
+def test_classify_cell_outside_tolerance_within_band_is_drift():
+    # 5% apart: beyond the 2% tolerance, within the 10% band -> drift.
+    assert v.classify_cell(
+        1.00, 1.05, tolerance_pct=0.02, review_band_pct=0.10) == v.CELL_DRIFT
+
+
+def test_classify_cell_beyond_review_band_is_mismatch():
+    # 20% apart -> mismatch (a real conflict, the alarm state).
+    assert v.classify_cell(
+        1.00, 1.20, tolerance_pct=0.02, review_band_pct=0.10) == v.CELL_MISMATCH
+
+
+def test_classify_cell_fields_classify_independently():
+    # The input cell and output cell are scored separately: a clean input and a
+    # conflicting output never contaminate each other (the per-field requirement).
+    input_flag = v.classify_cell(
+        1.00, 1.00, tolerance_pct=0.02, review_band_pct=0.10)
+    output_flag = v.classify_cell(
+        5.00, 6.50, tolerance_pct=0.02, review_band_pct=0.10)
+    assert input_flag == v.CELL_MATCH
+    assert output_flag == v.CELL_MISMATCH
+
+
+def test_cell_states_are_five_distinct_constants():
+    # match / drift / mismatch / unverified / no-key-mapping are all distinct; the last
+    # two are deliberately NOT the same as mismatch.
+    states = {v.CELL_MATCH, v.CELL_DRIFT, v.CELL_MISMATCH,
+              v.CELL_UNVERIFIED, v.CELL_NO_KEY_MAPPING}
+    assert len(states) == 5

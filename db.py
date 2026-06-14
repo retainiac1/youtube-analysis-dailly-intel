@@ -47,7 +47,12 @@ import config
 # are unconditional CREATE IF NOT EXISTS — additive, idempotent, and NOT gated on
 # current_version, so a version-number collision cannot strand them the way the
 # current_version<8 seed gate could. No data backfill: the table is born empty.
-SCHEMA_VERSION = 10
+# v11: added the `price_cross_check` table (one row per price-refresh run: the validator
+# that answered, the per-URL fetch outcomes, and the per-model/field cross-check cells,
+# stored as JSON). An APPEND history (designed for mismatch-trend-over-time), so the
+# /prices panel reads the latest with ORDER BY run_at DESC. Unconditional CREATE IF NOT
+# EXISTS + an index — additive, idempotent, born empty, not version-gated.
+SCHEMA_VERSION = 11
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -231,6 +236,21 @@ SCHEMA_STATEMENTS: list[str] = [
     """
     CREATE UNIQUE INDEX IF NOT EXISTS ux_pending_proposal
         ON price_proposals (model, field) WHERE status = 'pending'
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS price_cross_check (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_at TEXT,                -- Eastern ISO-8601 with offset (config.now_local_iso)
+        validator_name TEXT,        -- which validator answered, or NULL if all failed
+        source_outcomes TEXT,       -- JSON: every URL attempted (role/url/ok/reason/...)
+        cells TEXT                  -- JSON: per model -> {input/output: {scraped, validator, flag}}
+    )
+    """,
+    # Latest-run lookup for the /prices panel is ORDER BY run_at DESC (id tiebreak); the
+    # index keeps that fast as the history grows.
+    """
+    CREATE INDEX IF NOT EXISTS ix_cross_check_run_at
+        ON price_cross_check (run_at DESC)
     """,
 ]
 
@@ -1093,6 +1113,36 @@ def set_price_deleted(conn: sqlite3.Connection, *, price_id: int,
         {"price_id": price_id, "deleted": 1 if deleted else 0},
     )
     return cur.rowcount
+
+
+# --- price cross-check provenance (Phase B, v11) ----------------------------
+
+def insert_cross_check(conn: sqlite3.Connection, *, run_at: str,
+                       validator_name: str | None, source_outcomes: str,
+                       cells: str) -> int:
+    """Append one cross-check snapshot for a price-refresh run. `source_outcomes` and
+    `cells` are pre-serialized JSON strings (the caller owns the shape). validator_name
+    is the validator that answered, or None if all feeds failed. Returns the new row id.
+    Append-only (history) — never an upsert; the latest read orders by run_at. Does not
+    commit."""
+    cur = conn.execute(
+        """
+        INSERT INTO price_cross_check (run_at, validator_name, source_outcomes, cells)
+        VALUES (:run_at, :validator_name, :source_outcomes, :cells)
+        """,
+        {"run_at": run_at, "validator_name": validator_name,
+         "source_outcomes": source_outcomes, "cells": cells},
+    )
+    return cur.lastrowid
+
+
+def latest_cross_check(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """The most recent cross-check snapshot (greatest run_at, id tiebreak), or None when
+    no run has recorded one. The /prices panel renders from this and never refetches the
+    validators. Read-only."""
+    return conn.execute(
+        "SELECT * FROM price_cross_check ORDER BY run_at DESC, id DESC LIMIT 1"
+    ).fetchone()
 
 
 def count_invocations_for_model(conn: sqlite3.Connection, model: str) -> int:

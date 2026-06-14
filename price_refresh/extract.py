@@ -92,13 +92,18 @@ def _html_to_text(html: str) -> str:
 
 
 def fetch_page(url: str, *, timeout: float = DEFAULT_FETCH_TIMEOUT,
-               http_get=None) -> str:
-    """GET `url` and return its visible text. `http_get` is injectable (a
+               user_agent: str | None = None, http_get=None) -> str:
+    """GET `url` and return its visible text. `user_agent`, when set, is sent as the
+    User-Agent header (several provider pricing pages 403 a default httpx client); it has
+    NO literal default here, the value flows in from config. `http_get` is injectable (a
     `(url) -> response` with `.raise_for_status()` and `.text`); defaults to httpx with
     redirects. Any fetch/HTTP failure is wrapped as ExtractionError (never a raw httpx
-    error). Note: no JS is executed — sources must be server-rendered."""
+    error). Note: no JS is executed, so sources must be server-rendered."""
+    headers = {"User-Agent": user_agent} if user_agent else None
+
     def _default_get(target: str):
-        return httpx.get(target, timeout=timeout, follow_redirects=True)
+        return httpx.get(target, timeout=timeout, follow_redirects=True,
+                         headers=headers)
 
     getter = http_get if http_get is not None else _default_get
     try:
@@ -130,17 +135,18 @@ def extract_source(*, provider: str, expected_models: set[str], source_url: str,
 
 def extract_prices(source_map: dict, expected_by_provider: dict, *,
                    fetch, generate_text) -> list[ExtractionResult]:
-    """Extract every source for every provider -> one ExtractionResult per source URL.
-    Phase 2 groups the two-per-provider results and runs check_cross_source per
-    model/field. `expected_by_provider` maps provider -> its canonical model set."""
-    results: list[ExtractionResult] = []
-    for provider, urls in source_map.items():
-        expected = expected_by_provider.get(provider, set())
-        for url in urls:
-            results.append(extract_source(
-                provider=provider, expected_models=expected, source_url=url,
-                fetch=fetch, generate_text=generate_text))
-    return results
+    """Extract the ONE official source per provider -> one ExtractionResult per provider.
+    The scrape is the value-of-record, cross-checked against a third-party validator feed
+    (not a second scrape), so `source_map` is provider -> a single URL string.
+    `expected_by_provider` maps provider -> its canonical model set. One failed provider
+    never aborts the others (its result is ok=False with the error captured)."""
+    return [
+        extract_source(
+            provider=provider,
+            expected_models=expected_by_provider.get(provider, set()),
+            source_url=url, fetch=fetch, generate_text=generate_text)
+        for provider, url in source_map.items()
+    ]
 
 
 def _strip_fences(text: str) -> str:

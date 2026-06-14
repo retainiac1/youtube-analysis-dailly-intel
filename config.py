@@ -56,7 +56,7 @@ DEFAULT_SEARCH_QUERIES = [
 DEFAULT_PRICES = {
     "anthropic:claude-haiku-4-5": {"input": 1.00, "output": 5.00},
     "openai:gpt-5.4-nano": {"input": 0.20, "output": 1.25},
-    "xai:grok-4-fast": {"input": 0.20, "output": 0.50},
+    "xai:grok-4.3": {"input": 1.25, "output": 2.50},
     "google:gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
     # Local Ollama inference is free: a $0/$0 window so spend prices it to exactly 0.
     "ollama:qwen3.5:9b": {"input": 0.0, "output": 0.0},
@@ -69,15 +69,16 @@ DEFAULT_PRICES = {
 # tables replace: Anthropic's Messages API has no seed (supports_seed=0); the
 # gpt-5 reasoning model rejects a non-default temperature (supports_temperature=0)
 # and is flagged is_reasoning; xAI and Gemini honor both. Prices are NOT duplicated
-# here — the seed reads them from DEFAULT_PRICES so prices keep one home. The xAI
-# string is the retired `grok-4-fast`; seed_models.py live-corrects it post-migrate.
+# here: the seed reads them from DEFAULT_PRICES so prices keep one home. The xAI model
+# is xai:grok-4.3, live-verified on docs.x.ai (Reasoning: Configurable, so is_reasoning=1;
+# $1.25/$2.50 per MTok).
 SEED_MODELS = [
     {"model": "anthropic:claude-haiku-4-5", "provider": "anthropic",
      "supports_temperature": 1, "supports_seed": 0, "is_reasoning": 0},
     {"model": "openai:gpt-5.4-nano", "provider": "openai",
      "supports_temperature": 0, "supports_seed": 1, "is_reasoning": 1},
-    {"model": "xai:grok-4-fast", "provider": "xai",
-     "supports_temperature": 1, "supports_seed": 1, "is_reasoning": 0},
+    {"model": "xai:grok-4.3", "provider": "xai",
+     "supports_temperature": 1, "supports_seed": 1, "is_reasoning": 1},
     {"model": "google:gemini-2.5-flash-lite", "provider": "google",
      "supports_temperature": 1, "supports_seed": 1, "is_reasoning": 0},
     # Local Ollama thinking model. Phase 0/Step 0 verified live: temperature and
@@ -127,6 +128,11 @@ DEFAULT_PRICE_REFRESH = {
     "magnitude_hi": 200.0,   # per-MTok ceiling
     "cross_tol": 0.05,       # cross-source agreement tolerance (fraction)
     "delta_threshold": 0.10, # auto-apply (<) vs stage-for-review (>=) boundary
+    # User-Agent the fetcher sends. Some provider pricing pages 403 a default httpx
+    # client; a browser UA clears them. Lives here (config), never a literal in the
+    # fetcher, so it is tunable without a code change.
+    "user_agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
 }
 
 # The model that powers price extraction (canonical provider:model). Reads pricing
@@ -134,14 +140,50 @@ DEFAULT_PRICE_REFRESH = {
 # fallback — settings.toml overrides it.
 DEFAULT_EXTRACTION_MODEL = "anthropic:claude-haiku-4-5"
 
-# Two independent pricing sources per non-local provider so check_cross_source has
-# something to compare. Fresh-checkout fallback; settings.toml overrides it. Real,
-# SSR-friendly URLs and matching golden fixtures are filled during build.
+# ONE official, server-rendered pricing page per non-local provider (the fetcher runs
+# no JS). The scrape is the value-of-record; it is cross-checked against a third-party
+# validator feed (PRICE_VALIDATION), not a second scrape. Fresh-checkout fallback;
+# settings.toml overrides it. Live-verified SSR URLs (the openai marketing page and the
+# xai cards page are JS-rendered, so the docs URLs are used instead).
 DEFAULT_PRICE_SOURCES = {
-    "anthropic": ["https://www.anthropic.com/pricing", "https://www.anthropic.com/pricing"],
-    "openai": ["https://openai.com/api/pricing/", "https://openai.com/api/pricing/"],
-    "xai": ["https://x.ai/api", "https://x.ai/api"],
-    "google": ["https://ai.google.dev/pricing", "https://ai.google.dev/pricing"],
+    "anthropic": "https://www.anthropic.com/pricing",
+    "openai": "https://platform.openai.com/docs/pricing",
+    "xai": "https://docs.x.ai/docs/models",
+    "google": "https://ai.google.dev/pricing",
+}
+
+# Third-party validator feeds that cross-check the scraped price (a SECOND, independent
+# opinion, not a scrape mirror). LiteLLM is tried first, OpenRouter is the fetch-failure
+# fallback. tolerance_pct = the match band; review_band_pct = the drift-vs-mismatch
+# boundary (tolerance strictly tighter than review_band). model_keys maps each canonical
+# 'provider:model' to its NON-byte-equal id in each feed (explicit map, never a transform
+# heuristic): LiteLLM mostly uses the bare model_id but prefixes grok with 'xai/';
+# OpenRouter uses its own 'vendor/model' ids (dot in claude-haiku-4.5, 'x-ai' for grok).
+# The *_display_url values are the human-friendly link targets (raw endpoints render as
+# raw JSON); the page links to these while the fetcher reads the raw endpoints.
+DEFAULT_PRICE_VALIDATION = {
+    "litellm_url": ("https://raw.githubusercontent.com/BerriAI/litellm/main/"
+                    "model_prices_and_context_window.json"),
+    "openrouter_url": "https://openrouter.ai/api/v1/models",
+    "litellm_display_url": ("https://github.com/BerriAI/litellm/blob/main/"
+                            "model_prices_and_context_window.json"),
+    "openrouter_display_url": "https://openrouter.ai/models",
+    "tolerance_pct": 0.02,      # within this on BOTH fields -> match
+    "review_band_pct": 0.10,    # beyond this on either field -> mismatch (real conflict)
+    "model_keys": {
+        "anthropic:claude-haiku-4-5": {
+            "litellm": "claude-haiku-4-5",
+            "openrouter": "anthropic/claude-haiku-4.5"},
+        "openai:gpt-5.4-nano": {
+            "litellm": "gpt-5.4-nano",
+            "openrouter": "openai/gpt-5.4-nano"},
+        "xai:grok-4.3": {
+            "litellm": "xai/grok-4.3",
+            "openrouter": "x-ai/grok-4.3"},
+        "google:gemini-2.5-flash-lite": {
+            "litellm": "gemini-2.5-flash-lite",
+            "openrouter": "google/gemini-2.5-flash-lite"},
+    },
 }
 
 # name -> default, for every externalized tunable. load_settings() merges the
@@ -163,6 +205,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "PRICE_REFRESH": DEFAULT_PRICE_REFRESH,
     "EXTRACTION_MODEL": DEFAULT_EXTRACTION_MODEL,
     "PRICE_SOURCES": DEFAULT_PRICE_SOURCES,
+    "PRICE_VALIDATION": DEFAULT_PRICE_VALIDATION,
 }
 
 # Resolve relative to THIS file, not CWD, so it works regardless of where the
@@ -251,6 +294,7 @@ SPEND_VIZ = _settings["SPEND_VIZ"]
 PRICE_REFRESH = _settings["PRICE_REFRESH"]
 EXTRACTION_MODEL = _settings["EXTRACTION_MODEL"]
 PRICE_SOURCES = _settings["PRICE_SOURCES"]
+PRICE_VALIDATION = _settings["PRICE_VALIDATION"]
 
 # The per-model max_tokens defaults — strict, no fallback (see load_required_settings).
 _required = load_required_settings()
@@ -626,6 +670,10 @@ def validate_config(cfg: object | None = None) -> None:
     for key in ("cross_tol", "delta_threshold"):
         if not (0 < pr[key] < 1):
             raise ConfigError(f"PRICE_REFRESH['{key}'] must be a fraction in (0, 1)")
+    ua = pr.get("user_agent")
+    if not isinstance(ua, str) or not ua.strip():
+        raise ConfigError(
+            "PRICE_REFRESH['user_agent'] must be a non-empty string (the fetcher's UA)")
 
     # EXTRACTION_MODEL: the canonical provider:model that powers price extraction. A
     # non-empty string carrying a ':' (so split_model can dispatch a provider).
@@ -636,9 +684,10 @@ def validate_config(cfg: object | None = None) -> None:
             f"got {extraction_model!r}"
         )
 
-    # PRICE_SOURCES: two+ independent pricing-page URLs per NON-LOCAL seeded provider
-    # (local providers have no pricing page). A hand-edit typo fails loud, naming the
-    # offending provider.
+    # PRICE_SOURCES: ONE official pricing-page URL per NON-LOCAL seeded provider (local
+    # providers have no pricing page). The scrape is cross-checked against a validator
+    # feed, not a second scrape, so one URL is correct. A hand-edit typo (or a stale
+    # list-of-2 from the old format) fails loud, naming the offending provider.
     sources = getattr(cfg, "PRICE_SOURCES")
     if not isinstance(sources, dict):
         raise ConfigError(
@@ -646,16 +695,57 @@ def validate_config(cfg: object | None = None) -> None:
         )
     required = {m["provider"] for m in SEED_MODELS} - LOCAL_PROVIDERS
     for provider in sorted(required):
-        urls = sources.get(provider)
-        if not isinstance(urls, list) or len(urls) < 2:
+        url = sources.get(provider)
+        if not isinstance(url, str) or not url.strip():
             raise ConfigError(
-                f"PRICE_SOURCES['{provider}'] must list at least 2 source URLs"
+                f"PRICE_SOURCES['{provider}'] must be one non-empty URL string"
             )
-        for i, url in enumerate(urls):
-            if not isinstance(url, str) or not url.strip():
+
+    # PRICE_VALIDATION: the third-party validator feeds + bands + model-key map. urls
+    # non-empty strings; tolerance_pct/review_band_pct fractions in (0, 1) with tolerance
+    # STRICTLY tighter than the review band (else the drift zone collapses); model_keys a
+    # dict mapping each canonical 'provider:model' to BOTH a 'litellm' and 'openrouter'
+    # non-empty id. Coverage of the live registry is a RUNTIME guard (needs a conn), not
+    # checked here; this validates shape only. A hand-edit typo fails loud, naming the key.
+    pv = getattr(cfg, "PRICE_VALIDATION")
+    if not isinstance(pv, dict):
+        raise ConfigError(
+            f"Config key PRICE_VALIDATION must be a dict, got {type(pv).__name__}"
+        )
+    for key in ("litellm_url", "openrouter_url", "litellm_display_url",
+                "openrouter_display_url"):
+        val = pv.get(key)
+        if not isinstance(val, str) or not val.strip():
+            raise ConfigError(
+                f"PRICE_VALIDATION['{key}'] must be a non-empty URL string")
+    for key in ("tolerance_pct", "review_band_pct"):
+        value = pv.get(key)
+        # bool is an int subclass; reject it where a fraction is required.
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ConfigError(
+                f"PRICE_VALIDATION['{key}'] must be a number, got {value!r}")
+        if not (0 < value < 1):
+            raise ConfigError(
+                f"PRICE_VALIDATION['{key}'] must be a fraction in (0, 1)")
+    if pv["tolerance_pct"] >= pv["review_band_pct"]:
+        raise ConfigError(
+            "PRICE_VALIDATION['tolerance_pct'] must be < "
+            "PRICE_VALIDATION['review_band_pct']")
+    keys_map = pv.get("model_keys")
+    if not isinstance(keys_map, dict):
+        raise ConfigError(
+            "PRICE_VALIDATION['model_keys'] must be a dict of "
+            "'provider:model' -> {litellm, openrouter}")
+    for model, entry in keys_map.items():
+        if not isinstance(entry, dict):
+            raise ConfigError(
+                f"PRICE_VALIDATION['model_keys']['{model}'] must be a dict")
+        for vkey in ("litellm", "openrouter"):
+            vid = entry.get(vkey)
+            if not isinstance(vid, str) or not vid.strip():
                 raise ConfigError(
-                    f"PRICE_SOURCES['{provider}'][{i}] must be a non-empty URL string"
-                )
+                    f"PRICE_VALIDATION['model_keys']['{model}']['{vkey}'] "
+                    "must be a non-empty validator id string")
 
 
 # Validate the loaded settings at import. An external settings.toml means

@@ -26,6 +26,24 @@ CROSS_AGREE = "agree"
 CROSS_PASSTHROUGH = "passthrough"
 CROSS_CONFLICT = "conflict"
 
+# Price-quote units, for to_per_1m. Provider pages quote per-1M-tokens already; the
+# validator feeds quote per-token (LiteLLM as a float, OpenRouter as a string).
+UNIT_PER_1M = "per_1m"
+UNIT_PER_TOKEN = "per_token"
+_TOKENS_PER_1M = 1_000_000
+
+# Cross-check cell flags (scrape vs validator, per field). FIVE deliberately-distinct
+# states: the last two are NOT mismatch. mismatch is a real price CONFLICT; unverified
+# is "the validator does not carry this model" (no signal); no_key_mapping is "we have
+# no model_keys entry for it" (our config gap) — kept loud and separate so a mapping
+# drift can never hide as a benign unverified. match/drift/mismatch come from
+# classify_cell; unverified/no_key_mapping are set by the caller from the lookup reason.
+CELL_MATCH = "match"
+CELL_DRIFT = "drift"
+CELL_MISMATCH = "mismatch"
+CELL_UNVERIFIED = "unverified"
+CELL_NO_KEY_MAPPING = "no_key_mapping"
+
 _FIELDS = ("input", "output")
 
 
@@ -69,6 +87,43 @@ def _is_number(value: object) -> bool:
     """True for a real int/float, rejecting bool (an int subclass) and everything
     else — the same external-typo guard the config validator uses."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def to_per_1m(value: object, unit: str) -> float:
+    """Normalize ONE price quote to per-1M-tokens (the DB's input/output_per_1m unit).
+
+    The single conversion path so no scattered ``* 1e6`` can drift: a provider page is
+    already per-1M (returned unchanged); a validator per-token quote (LiteLLM float or
+    OpenRouter string) scales up by 1e6. Accepts a numeric string for the per-token case
+    (OpenRouter quotes strings) but rejects bool and non-numeric junk loudly so a bad
+    feed value cannot silently become a price. Raises ValueError on an unknown unit."""
+    if isinstance(value, bool):
+        raise ValueError(f"price value must be numeric, not bool: {value!r}")
+    try:
+        num = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"price value is not numeric: {value!r}") from e
+    if unit == UNIT_PER_1M:
+        return num
+    if unit == UNIT_PER_TOKEN:
+        return num * _TOKENS_PER_1M
+    raise ValueError(f"unknown price unit {unit!r}")
+
+
+def classify_cell(scraped: float, validator: float, *, tolerance_pct: float,
+                  review_band_pct: float) -> str:
+    """Cross-check ONE field (input or output) of the scrape against the validator,
+    both already normalized to per-1M. Returns CELL_MATCH (within tolerance_pct),
+    CELL_DRIFT (beyond tolerance but within review_band_pct), or CELL_MISMATCH (beyond
+    the review band — a real conflict). Per FIELD: the caller scores input and output
+    separately so one clean field never masks a conflicting one. UNVERIFIED /
+    NO_KEY_MAPPING are NOT decided here — they are no-validator-value states the caller
+    sets from the lookup reason, kept distinct from this real-conflict mismatch."""
+    if math.isclose(scraped, validator, rel_tol=tolerance_pct):
+        return CELL_MATCH
+    if math.isclose(scraped, validator, rel_tol=review_band_pct):
+        return CELL_DRIFT
+    return CELL_MISMATCH
 
 
 def check_structure(payload: object, canonical_models: set[str]) -> CheckResult:

@@ -1336,7 +1336,15 @@ html { scroll-padding-top: var(--header-h, 0px); }
   padding: 1rem 1.25rem;
 }
 .prices-model-field { display: flex; flex-direction: column; gap: 0.3rem; }
-.prices-run-group { display: inline-flex; align-items: center; gap: 1rem; }
+.prices-run-group { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }
+/* The run-summary line by the stopwatch: base counts muted, a degraded run's error count
+   in red, hidden at rest. summaryEl is a direct child of .prices-run-group so it wraps
+   under the button+timer. */
+.prices-run-summary {
+  color: var(--text-secondary); font-size: 0.8rem; font-variant-numeric: tabular-nums;
+}
+.prices-run-summary:empty { display: none; }
+.prices-run-summary-error { color: var(--accent-red); }
 
 .prices-panel { padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.6rem; }
 .prices-table, .prices-review { display: flex; flex-direction: column; gap: 0.4rem; }
@@ -1350,7 +1358,16 @@ html { scroll-padding-top: var(--header-h, 0px); }
   font-family: var(--font-display); color: var(--text-primary);
   min-width: 16rem; flex: 1 1 auto;
 }
-.prices-field { display: inline-flex; align-items: baseline; gap: 0.5rem; min-width: 12rem; }
+.prices-field { display: inline-flex; align-items: baseline; gap: 0.5rem; min-width: 15rem; }
+/* the prior value, muted, so the current $value reads as primary; empty-history italic */
+.prices-prior {
+  color: var(--text-secondary); font-size: 0.8rem; font-variant-numeric: tabular-nums;
+}
+.prices-prior-empty { font-style: italic; }
+/* one panel-level units caption under the prices heading (not per cell) */
+.prices-caption {
+  color: var(--text-secondary); font-size: 0.78rem; margin: -0.2rem 0 0.4rem;
+}
 .prices-value { font-variant-numeric: tabular-nums; color: var(--text-primary); }
 
 .prices-delta {
@@ -1376,3 +1393,40 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .prices-error { color: var(--accent-red); font-size: 0.8rem; flex-basis: 100%; }
 .prices-error:empty { display: none; }
 .prices-empty { color: var(--text-secondary); font-size: 0.9rem; margin: 0.3rem 0; }
+
+/* the per-row model head: id + its provider pricing-page link */
+.prices-model-head { display: inline-flex; align-items: baseline; gap: 0.5rem; }
+
+/* Cross-check cell flags (scrape vs validator). FIVE deliberately-distinct states:
+   mismatch is the ONLY alarm (red); unverified (the validator does not carry the model) is
+   no-signal and muted, NEVER red; no-key-mapping (our config gap) is its own loud state
+   (blue, dashed), never folded into mismatch or unverified. */
+.prices-flag {
+  font-size: 0.72rem; font-variant-numeric: tabular-nums;
+  padding: 0.05rem 0.4rem; border-radius: var(--radius-sm);
+  text-transform: uppercase; letter-spacing: 0.02em;
+}
+.prices-flag-match    { color: var(--accent-cyan);  background: rgba(0, 242, 169, 0.12); }
+.prices-flag-drift    { color: var(--accent-amber); background: rgba(245, 158, 11, 0.14); }
+.prices-flag-mismatch {
+  color: var(--accent-red); background: rgba(239, 68, 68, 0.16); font-weight: 600;
+}
+.prices-flag-unverified {
+  color: var(--text-secondary); border: 1px solid var(--border-glass); font-style: italic;
+}
+.prices-flag-no-key-mapping {
+  color: var(--accent-blue); background: rgba(45, 124, 255, 0.16);
+  font-weight: 600; outline: 1px dashed var(--accent-blue);
+}
+
+/* "Sources this run" provenance list (every URL attempted, with its outcome) */
+.prices-sources { display: flex; flex-direction: column; gap: 0.3rem; }
+.prices-source-row {
+  display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap;
+}
+.prices-source-role {
+  color: var(--text-secondary); font-size: 0.8rem; min-width: 11rem;
+}
+.prices-source-ok  { color: var(--accent-cyan); font-size: 0.78rem; }
+.prices-source-bad { color: var(--accent-red);  font-size: 0.78rem; }
+.prices-source-row-failed .prices-source-role { color: var(--accent-red); }

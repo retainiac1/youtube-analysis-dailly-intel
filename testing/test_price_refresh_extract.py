@@ -174,6 +174,32 @@ def test_fetch_page_wraps_http_status_error():
         extract.fetch_page("https://x", http_get=lambda u: resp)
 
 
+def test_fetch_page_sends_configured_user_agent(monkeypatch):
+    # The UA flows in as a param (from config), never a literal in fetch_page. Verify the
+    # default httpx path forwards it as the User-Agent header.
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["headers"] = kwargs.get("headers") or {}
+        return _FakeResp("<body>ok</body>")
+
+    monkeypatch.setattr(extract.httpx, "get", fake_get)
+    extract.fetch_page("https://x", user_agent="UA-TEST/9.9")
+    assert captured["headers"].get("User-Agent") == "UA-TEST/9.9"
+
+
+def test_fetch_page_omits_user_agent_when_none(monkeypatch):
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["headers"] = kwargs.get("headers")
+        return _FakeResp("<body>ok</body>")
+
+    monkeypatch.setattr(extract.httpx, "get", fake_get)
+    extract.fetch_page("https://x")            # no user_agent -> no UA header forced
+    assert not (captured["headers"] or {}).get("User-Agent")
+
+
 # --- extract_source (fetch -> prompt -> generate -> parse) ------------------
 
 def _good_generate(_prompt):
@@ -215,24 +241,38 @@ def test_extract_source_generate_failure_isolated():
     assert res.ok is False and "rate limit" in res.error
 
 
-# --- extract_prices (iterate providers x sources) ---------------------------
+# --- extract_prices (ONE source per provider) -------------------------------
 
-def test_extract_prices_one_result_per_source_and_isolates_failures():
-    source_map = {"anthropic": ["https://a1", "https://a2"]}
-    expected_by_provider = {"anthropic": CANON}
+def test_extract_prices_one_result_per_provider():
+    # One official URL string per provider (the scrape is cross-checked against a
+    # validator feed, not a second scrape).
+    source_map = {"anthropic": "https://a1", "openai": "https://o1"}
+    expected_by_provider = {"anthropic": CANON, "openai": CANON}
+
+    results = extract.extract_prices(
+        source_map, expected_by_provider, fetch=lambda url: "PAGE",
+        generate_text=_good_generate)
+    assert len(results) == 2                        # one per provider
+    by_url = {r.source_url: r for r in results}
+    assert by_url["https://a1"].ok is True
+    assert by_url["https://o1"].ok is True
+
+
+def test_extract_prices_isolates_a_failed_provider():
+    source_map = {"anthropic": "https://a1", "openai": "https://o-bad"}
+    expected_by_provider = {"anthropic": CANON, "openai": CANON}
 
     def fetch(url):
-        if url == "https://a2":
-            raise extract.ExtractionError("fetch failed for a2")
+        if url == "https://o-bad":
+            raise extract.ExtractionError("fetch failed for o-bad")
         return "PAGE"
 
     results = extract.extract_prices(
         source_map, expected_by_provider, fetch=fetch,
         generate_text=_good_generate)
-    assert len(results) == 2                       # one per source URL
     by_url = {r.source_url: r for r in results}
     assert by_url["https://a1"].ok is True
-    assert by_url["https://a2"].ok is False        # failure did not abort the other
+    assert by_url["https://o-bad"].ok is False      # failure did not abort the other
 
 
 # --- golden fixtures: wellformed + deterministic dev loop -------------------

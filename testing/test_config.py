@@ -51,13 +51,35 @@ def make_good_config() -> SimpleNamespace:
             "magnitude_hi": 200.0,
             "cross_tol": 0.05,
             "delta_threshold": 0.10,
+            "user_agent": "Mozilla/5.0 (Test) Chrome/124.0",
         },
         EXTRACTION_MODEL="anthropic:claude-haiku-4-5",
         PRICE_SOURCES={
-            "anthropic": ["https://a/official", "https://a/aggregator"],
-            "openai": ["https://o/official", "https://o/aggregator"],
-            "xai": ["https://x/official", "https://x/aggregator"],
-            "google": ["https://g/official", "https://g/aggregator"],
+            "anthropic": "https://a/official",
+            "openai": "https://o/official",
+            "xai": "https://x/official",
+            "google": "https://g/official",
+        },
+        PRICE_VALIDATION={
+            "litellm_url": "https://raw.example/litellm.json",
+            "openrouter_url": "https://openrouter.example/api/v1/models",
+            "litellm_display_url": "https://github.example/litellm",
+            "openrouter_display_url": "https://openrouter.example/models",
+            "tolerance_pct": 0.02,
+            "review_band_pct": 0.10,
+            "model_keys": {
+                "anthropic:claude-haiku-4-5":
+                    {"litellm": "claude-haiku-4-5",
+                     "openrouter": "anthropic/claude-haiku-4.5"},
+                "openai:gpt-5.4-nano":
+                    {"litellm": "gpt-5.4-nano",
+                     "openrouter": "openai/gpt-5.4-nano"},
+                "xai:grok-4.3":
+                    {"litellm": "xai/grok-4.3", "openrouter": "x-ai/grok-4.3"},
+                "google:gemini-2.5-flash-lite":
+                    {"litellm": "gemini-2.5-flash-lite",
+                     "openrouter": "google/gemini-2.5-flash-lite"},
+            },
         },
     )
 
@@ -215,7 +237,7 @@ def test_settings_toml_has_quoted_price_keys():
     for key in (
         "anthropic:claude-haiku-4-5",
         "openai:gpt-5.4-nano",
-        "xai:grok-4-fast",
+        "xai:grok-4.3",
         "google:gemini-2.5-flash-lite",
     ):
         assert key in prices, key
@@ -417,6 +439,19 @@ def test_price_refresh_cross_tol_out_of_range_raises():
         config.validate_config(cfg)
 
 
+def test_price_refresh_user_agent_required_non_empty():
+    cfg = make_good_config()
+    cfg.PRICE_REFRESH = {**cfg.PRICE_REFRESH, "user_agent": "  "}
+    with pytest.raises(config.ConfigError, match="user_agent"):
+        config.validate_config(cfg)
+
+
+def test_real_module_price_refresh_has_user_agent():
+    # The fetcher's UA lives in settings.toml, not a code literal.
+    ua = config.PRICE_REFRESH["user_agent"]
+    assert isinstance(ua, str) and ua.strip()
+
+
 # --- extraction model + price sources (Phase 1) -----------------------------
 
 def test_extraction_config_well_formed_passes():
@@ -431,8 +466,8 @@ def test_real_module_extraction_model_value():
 def test_real_module_price_sources_cover_seeded_providers():
     seeded = {m["provider"] for m in config.SEED_MODELS} - config.LOCAL_PROVIDERS
     for provider in seeded:
-        urls = config.PRICE_SOURCES[provider]
-        assert isinstance(urls, list) and len(urls) >= 2, provider
+        url = config.PRICE_SOURCES[provider]
+        assert isinstance(url, str) and url.strip(), provider
 
 
 def test_settings_toml_price_sources_round_trips():
@@ -465,7 +500,8 @@ def test_price_sources_missing_seeded_provider_raises():
         config.validate_config(cfg)
 
 
-def test_price_sources_fewer_than_two_urls_raises():
+def test_price_sources_non_string_raises():
+    # One URL string per provider now (not a list). A list is a stale-format typo.
     cfg = make_good_config()
     cfg.PRICE_SOURCES = {**cfg.PRICE_SOURCES, "openai": ["https://only-one"]}
     with pytest.raises(config.ConfigError, match="openai"):
@@ -474,7 +510,7 @@ def test_price_sources_fewer_than_two_urls_raises():
 
 def test_price_sources_blank_url_raises():
     cfg = make_good_config()
-    cfg.PRICE_SOURCES = {**cfg.PRICE_SOURCES, "xai": ["https://ok", "  "]}
+    cfg.PRICE_SOURCES = {**cfg.PRICE_SOURCES, "xai": "  "}
     with pytest.raises(config.ConfigError, match="xai"):
         config.validate_config(cfg)
 
@@ -485,3 +521,69 @@ def test_price_sources_excludes_local_providers():
     cfg = make_good_config()
     assert "ollama" not in cfg.PRICE_SOURCES
     config.validate_config(cfg)  # does not raise
+
+
+# --- price validation feed config ([PRICE_VALIDATION], Phase B) --------------
+
+def test_price_validation_well_formed_passes():
+    config.validate_config(make_good_config())
+
+
+def test_real_module_price_validation_round_trips():
+    # Guards against a lowercase/dotted [PRICE_VALIDATION] section name silently
+    # falling back to DEFAULT_PRICE_VALIDATION.
+    pv = config.load_settings()["PRICE_VALIDATION"]
+    assert pv is not config.DEFAULT_PRICE_VALIDATION
+    assert pv["litellm_url"].strip() and pv["openrouter_url"].strip()
+
+
+def test_real_module_price_validation_model_keys_cover_seeded():
+    # Every non-local seeded model needs a model_keys entry carrying BOTH validator
+    # ids, or the runtime completeness guard would flag it as "no key mapping".
+    pv = config.PRICE_VALIDATION
+    seeded = {m["model"] for m in config.SEED_MODELS
+              if m["provider"] not in config.LOCAL_PROVIDERS}
+    for model in seeded:
+        entry = pv["model_keys"][model]
+        assert entry["litellm"].strip() and entry["openrouter"].strip(), model
+
+
+def test_price_validation_blank_url_raises():
+    cfg = make_good_config()
+    cfg.PRICE_VALIDATION = {**cfg.PRICE_VALIDATION, "litellm_url": "  "}
+    with pytest.raises(config.ConfigError, match="litellm_url"):
+        config.validate_config(cfg)
+
+
+def test_price_validation_bool_band_rejected():
+    # bool is an int subclass; reject it where a fraction is required.
+    cfg = make_good_config()
+    cfg.PRICE_VALIDATION = {**cfg.PRICE_VALIDATION, "tolerance_pct": True}
+    with pytest.raises(config.ConfigError, match="tolerance_pct"):
+        config.validate_config(cfg)
+
+
+def test_price_validation_band_out_of_range_raises():
+    cfg = make_good_config()
+    cfg.PRICE_VALIDATION = {**cfg.PRICE_VALIDATION, "review_band_pct": 1.5}
+    with pytest.raises(config.ConfigError, match="review_band_pct"):
+        config.validate_config(cfg)
+
+
+def test_price_validation_tolerance_not_below_review_band_raises():
+    # tolerance (match) must be strictly tighter than the review band, else the
+    # drift zone collapses.
+    cfg = make_good_config()
+    cfg.PRICE_VALIDATION = {**cfg.PRICE_VALIDATION,
+                            "tolerance_pct": 0.10, "review_band_pct": 0.10}
+    with pytest.raises(config.ConfigError, match="tolerance_pct"):
+        config.validate_config(cfg)
+
+
+def test_price_validation_model_keys_missing_validator_id_raises():
+    cfg = make_good_config()
+    broken = {**cfg.PRICE_VALIDATION["model_keys"],
+              "xai:grok-4.3": {"litellm": "xai/grok-4.3"}}  # no openrouter
+    cfg.PRICE_VALIDATION = {**cfg.PRICE_VALIDATION, "model_keys": broken}
+    with pytest.raises(config.ConfigError, match="openrouter"):
+        config.validate_config(cfg)

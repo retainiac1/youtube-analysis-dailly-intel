@@ -79,7 +79,7 @@ bucket = "health"
 [prices]
 "anthropic:claude-haiku-4-5"   = { input = 1.00, output = 5.00 }
 "openai:gpt-5.4-nano"          = { input = 0.20, output = 1.25 }
-"xai:grok-4-fast"              = { input = 0.20, output = 0.50 }
+"xai:grok-4.3"                 = { input = 1.25, output = 2.50 }
 "google:gemini-2.5-flash-lite" = { input = 0.10, output = 0.40 }
 "ollama:qwen3.5:9b"            = { input = 0.00, output = 0.00 }  # local inference is free
 
@@ -122,6 +122,9 @@ magnitude_lo    = 0.02    # per-MTok floor; positive number below magnitude_hi. 
 magnitude_hi    = 200.0   # per-MTok ceiling; number above magnitude_lo. Catches 1000x unit errors.
 cross_tol       = 0.05    # cross-source agreement tolerance; fraction in (0, 1). Two sources within 5% are considered to agree.
 delta_threshold = 0.10    # auto-apply (< this) vs stage-for-review (>= this) boundary; fraction in (0, 1). A >=10% move needs a human.
+# User-Agent the price fetcher sends. Several provider pricing pages 403 a default httpx
+# client; a real browser UA clears them. Edit here, never in code.
+user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 # The model that powers price extraction (canonical provider:model). Reads pricing
 # page text and emits strict JSON. Capability flags are read from the models table at
@@ -129,15 +132,45 @@ delta_threshold = 0.10    # auto-apply (< this) vs stage-for-review (>= this) bo
 # per-model accuracy baseline in the fixtures (see price_refresh/fixtures).
 EXTRACTION_MODEL = "anthropic:claude-haiku-4-5"
 
-# Two independent pricing sources per NON-LOCAL provider (official page + an aggregator,
-# or two aggregators) so the price-refresh cross-source check has something to compare.
-# UPPERCASE section name per the loader convention (a lowercase/dotted name silently
-# falls back to DEFAULT_PRICE_SOURCES). Sources MUST be server-rendered (the fetcher
-# runs no JS). TODO(build): verify each URL is SSR + capture a golden fixture before
-# trusting the live gate; the second source per provider is a placeholder until an
-# aggregator is chosen.
+# ONE official, server-rendered pricing page per NON-LOCAL provider (the fetcher runs no
+# JS). The scrape is the value-of-record, cross-checked against the [PRICE_VALIDATION]
+# feed below (not a second scrape). UPPERCASE section name per the loader convention (a
+# lowercase/dotted name silently falls back to DEFAULT_PRICE_SOURCES). Live-verified SSR;
+# the openai marketing page and the xai cards page are JS-rendered, so the docs URLs are
+# used instead.
 [PRICE_SOURCES]
-anthropic = ["https://www.anthropic.com/pricing", "https://www.anthropic.com/pricing"]
-openai    = ["https://openai.com/api/pricing/", "https://openai.com/api/pricing/"]
-xai       = ["https://x.ai/api", "https://x.ai/api"]
-google    = ["https://ai.google.dev/pricing", "https://ai.google.dev/pricing"]
+anthropic = "https://www.anthropic.com/pricing"
+openai    = "https://platform.openai.com/docs/pricing"
+xai       = "https://docs.x.ai/docs/models"
+google    = "https://ai.google.dev/pricing"
+
+# Third-party validator feeds that cross-check the scraped price (an independent second
+# opinion, not a scrape mirror). LiteLLM is tried first; OpenRouter is the fetch-failure
+# fallback. tolerance_pct = match band; review_band_pct = drift-vs-mismatch boundary
+# (tolerance strictly tighter). The *_display_url are the human link targets (the raw
+# endpoints render as raw JSON). model_keys maps each canonical 'provider:model' to its
+# NON-byte-equal id in each feed (explicit, no transform heuristic). UPPERCASE section
+# name per the loader convention. Edit here, never in code.
+[PRICE_VALIDATION]
+litellm_url            = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+openrouter_url         = "https://openrouter.ai/api/v1/models"
+litellm_display_url    = "https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json"
+openrouter_display_url = "https://openrouter.ai/models"
+tolerance_pct          = 0.02    # within this on BOTH fields -> match
+review_band_pct        = 0.10    # beyond this on either field -> mismatch (real conflict)
+
+[PRICE_VALIDATION.model_keys."anthropic:claude-haiku-4-5"]
+litellm    = "claude-haiku-4-5"
+openrouter = "anthropic/claude-haiku-4.5"
+
+[PRICE_VALIDATION.model_keys."openai:gpt-5.4-nano"]
+litellm    = "gpt-5.4-nano"
+openrouter = "openai/gpt-5.4-nano"
+
+[PRICE_VALIDATION.model_keys."xai:grok-4.3"]
+litellm    = "xai/grok-4.3"
+openrouter = "x-ai/grok-4.3"
+
+[PRICE_VALIDATION.model_keys."google:gemini-2.5-flash-lite"]
+litellm    = "gemini-2.5-flash-lite"
+openrouter = "google/gemini-2.5-flash-lite"

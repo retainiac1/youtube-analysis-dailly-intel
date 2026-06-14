@@ -11,7 +11,9 @@ import * as api from "./api.js";
 let el = null;             // the page mount (<main id="prices">)
 let pricesPanel = null;    // the prices/deltas panel body (repainted on reload)
 let reviewPanel = null;    // the review panel body (repainted on reload)
+let sourcesPanel = null;   // the "sources this run" provenance body (repainted on reload)
 let stopwatchEl = null;    // frozen across panel reloads (only Run touches it)
+let summaryEl = null;      // the run-summary line by the stopwatch (cleared on the next Run)
 let activeModel = null;    // the persisted selection (to revert the select on a failed save)
 
 export function init(mount) {
@@ -64,6 +66,7 @@ export async function refresh() {
   activeModel = modelData.model;
   pricesPanel = node("div", { class: "prices-table" });
   reviewPanel = node("div", { class: "prices-review" });
+  sourcesPanel = node("div", { class: "prices-sources" });
 
   el.replaceChildren(node("div", { class: "prices-page" }, [
     node("header", { class: "prices-head" }, [
@@ -72,11 +75,17 @@ export async function refresh() {
     controlsRow(modelData),
     node("section", { class: "glass-panel prices-panel" }, [
       node("h3", { class: "heading-sm", text: "Prices (vs prior window)" }),
+      node("p", { class: "prices-caption",
+                  text: "$ / 1M tokens · each cell cross-checked against a validator feed" }),
       pricesPanel,
     ]),
     node("section", { class: "glass-panel prices-panel" }, [
       node("h3", { class: "heading-sm", text: "Pending review" }),
       reviewPanel,
+    ]),
+    node("section", { class: "glass-panel prices-panel" }, [
+      node("h3", { class: "heading-sm", text: "Sources this run" }),
+      sourcesPanel,
     ]),
   ]));
 
@@ -112,6 +121,8 @@ function controlsRow(modelData) {
     class: "btn-primary prices-run", type: "button", text: "Run" });
   stopwatchEl = node("span", {
     class: "interpret-stopwatch", text: "—", attrs: { "aria-live": "polite" } });
+  summaryEl = node("span", {
+    class: "prices-run-summary", attrs: { "aria-live": "polite" } });
   const runError = node("span", { class: "prices-error", attrs: { role: "alert" } });
   runBtn.addEventListener("click", () => onRun(runBtn, runError));
 
@@ -126,6 +137,7 @@ function controlsRow(modelData) {
         node("span", { class: "control-label", text: "Run time" }),
         stopwatchEl,
       ]),
+      summaryEl,
     ]),
     modelError,
     runError,
@@ -137,6 +149,7 @@ function controlsRow(modelData) {
 // controls + frozen stopwatch stay put).
 async function onRun(runBtn, runError) {
   runError.textContent = "";
+  summaryEl.replaceChildren();          // same lifecycle as the timer reset
   runBtn.disabled = true;
   const start = performance.now();
   const tick = () => { stopwatchEl.textContent = formatDuration(performance.now() - start); };
@@ -146,6 +159,7 @@ async function onRun(runBtn, runError) {
     const res = await api.runPriceRefresh();
     clearInterval(timer);
     stopwatchEl.textContent = formatDuration(res.duration_ms) || "—";
+    renderRunSummary(res);              // set BEFORE the panels-only repaint, never refresh()
     await reloadPanels();
   } catch (err) {
     clearInterval(timer);
@@ -154,6 +168,24 @@ async function onRun(runBtn, runError) {
   } finally {
     runBtn.disabled = false;
   }
+}
+
+// The counts the /run endpoint already returns. `res.errors` is a LIST of
+// (model, field, reason) — use its LENGTH for the trigger + pluralization. A degraded run
+// (errors present, still 200) shows the count in red and never says "no price changes", so
+// it can't masquerade as a clean no-change run.
+function renderRunSummary(res) {
+  const n = (res.errors || []).length;
+  const changed = res.applied + res.staged + res.rejected;
+  let base = `Applied ${res.applied} · staged ${res.staged} · `
+    + `rejected ${res.rejected} · skipped ${res.skipped}`;
+  if (changed === 0 && n === 0) base += " — no price changes";
+  const children = [node("span", { class: "prices-run-summary-base", text: base })];
+  if (n > 0) {
+    children.push(node("span", { class: "prices-run-summary-error",
+      text: ` · ${n} source error${n === 1 ? "" : "s"}` }));
+  }
+  summaryEl.replaceChildren(...children);
 }
 
 // --- panel render (repainted after run / confirm / reject) ------------------
@@ -169,14 +201,49 @@ async function reloadPanels() {
 }
 
 function renderPanels(data) {
-  pricesPanel.replaceChildren(...renderPrices(data.prices || []));
+  const crossCheck = data.cross_check || null;
+  pricesPanel.replaceChildren(...renderPrices(data.prices || [], crossCheck));
   reviewPanel.replaceChildren(...renderReview(data.proposals || []));
+  sourcesPanel.replaceChildren(...renderSources(crossCheck));
 }
 
-function deltaBadge(f) {
-  if (f.prior == null) {
-    return node("span", { class: "prices-delta prices-delta-none", text: "no prior data" });
+// Human-readable cell-flag labels. The five states are deliberately distinct: mismatch is
+// the only alarm; unverified (the validator does not carry the model) is no-signal and
+// muted; no-key-mapping (our config gap) is its own loud state, never folded into either.
+const FLAG_LABELS = {
+  match: "validator match",
+  drift: "validator drift",
+  mismatch: "validator mismatch",
+  unverified: "no validator entry",
+  no_key_mapping: "no key mapping",
+};
+
+// The cross-check chip for one field cell, from the run's provenance (cells[model][field]).
+// null when there is no snapshot yet (no run) so the cell shows price-only.
+function flagChip(cell) {
+  if (!cell || !cell.flag) return null;
+  const chip = node("span", {
+    class: `prices-flag prices-flag-${cell.flag.replace(/_/g, "-")}`,
+    text: FLAG_LABELS[cell.flag] || cell.flag });
+  if (cell.validator != null) {
+    chip.setAttribute("title", `validator: ${money(cell.validator)}`);
   }
+  return chip;
+}
+
+// provider -> its scrape outcome (for the per-row pricing-page link), from the provenance.
+function scrapeByProvider(crossCheck) {
+  const map = {};
+  if (crossCheck && crossCheck.source_outcomes) {
+    for (const o of crossCheck.source_outcomes) {
+      if (o.role === "scrape") map[o.provider] = o;
+    }
+  }
+  return map;
+}
+
+// The Δ badge, only for the prior-present case (fieldCell guards prior == null).
+function deltaBadge(f) {
   if (f.direction === "none") {
     return node("span", { class: "prices-delta prices-delta-none", text: "no change" });
   }
@@ -184,32 +251,87 @@ function deltaBadge(f) {
     class: `prices-delta prices-delta-${f.direction}`, text: pctLabel(f.pct) });
 }
 
-function fieldCell(label, f) {
-  return node("div", { class: "prices-field" }, [
+// label · current "$1.00" · prior "was $0.90" (or "no prior data") · Δ · cross-check chip —
+// the dollar values are never confused, and the chip shows the validator's verdict per field.
+function fieldCell(label, f, cell) {
+  const cells = [
     node("span", { class: "control-label", text: label }),
     node("span", { class: "prices-value", text: money(f.current) }),
-    deltaBadge(f),
-  ]);
+  ];
+  if (f.prior == null) {
+    // Single-window model: the empty-history state, NOT an error.
+    cells.push(node("span", { class: "prices-prior prices-prior-empty",
+                              text: "no prior data" }));
+  } else {
+    cells.push(node("span", { class: "prices-prior", text: `was ${money(f.prior)}` }));
+    cells.push(deltaBadge(f));
+  }
+  const chip = flagChip(cell);
+  if (chip) cells.push(chip);
+  return node("div", { class: "prices-field" }, cells);
 }
 
-function renderPrices(prices) {
+function renderPrices(prices, crossCheck) {
   if (!prices.length) {
     return [node("p", { class: "prices-empty", text: "No priced models." })];
   }
+  const cellsByModel = (crossCheck && crossCheck.cells) || {};
+  const scrapes = scrapeByProvider(crossCheck);
   return prices.map((p) => {
+    const provider = p.model.split(":", 1)[0];
+    const scrape = scrapes[provider];
+    const modelCell = node("span", { class: "prices-model", text: p.model });
+    const head = scrape
+      ? node("div", { class: "prices-model-head" }, [
+          modelCell,
+          node("a", { class: "prices-source", text: "pricing page",
+            attrs: { href: scrape.display_url || scrape.url, target: "_blank",
+                     rel: "noopener" } }),
+        ])
+      : modelCell;
     if (p.input == null) {
       // A priced model that lost its open window — shown as a visible problem, not dropped.
       return node("div", { class: "prices-row prices-row-warn" }, [
-        node("span", { class: "prices-model", text: p.model }),
+        head,
         node("span", { class: "prices-warn", text: "no current price" }),
       ]);
     }
+    const cells = cellsByModel[p.model] || {};
     return node("div", { class: "prices-row" }, [
-      node("span", { class: "prices-model", text: p.model }),
-      fieldCell("input", p.input),
-      fieldCell("output", p.output),
+      head,
+      fieldCell("input", p.input, cells.input),
+      fieldCell("output", p.output, cells.output),
     ]);
   });
+}
+
+// Every URL actually attempted this run, with its outcome — driven only by the provenance
+// snapshot (the page never refetches the validators). A failed primary validator is shown
+// alongside the answering fallback, never hidden.
+function renderSources(crossCheck) {
+  if (!crossCheck) {
+    return [node("p", { class: "prices-empty", text: "No run yet." })];
+  }
+  const header = node("p", { class: "prices-caption",
+    text: `Validator: ${crossCheck.validator_name || "none answered"}`
+      + (crossCheck.run_at ? ` · ${crossCheck.run_at}` : "") });
+  const rows = (crossCheck.source_outcomes || []).map((o) => {
+    const role = o.role === "scrape"
+      ? `scrape · ${o.provider}`
+      : `validator · ${o.name}`;
+    const status = o.ok
+      ? `ok${o.status ? ` (${o.status})` : ""}`
+      : `failed: ${o.reason || "unknown"}`;
+    return node("div", {
+      class: `prices-source-row${o.ok ? "" : " prices-source-row-failed"}` }, [
+      node("span", { class: "prices-source-role", text: role }),
+      node("a", { class: "prices-source", text: o.display_url || o.url,
+        attrs: { href: o.display_url || o.url, target: "_blank", rel: "noopener" } }),
+      node("span", { class: o.ok ? "prices-source-ok" : "prices-source-bad",
+                     text: status }),
+    ]);
+  });
+  return [header, ...rows];
 }
 
 function renderReview(proposals) {

@@ -151,3 +151,41 @@ def test_run_whole_run_setup_failure_is_clean_400(pr_client, monkeypatch):
     resp = pr_client.post("/api/price-refresh/run")
     assert resp.status_code == 400
     assert "unknown extraction model" in resp.json()["detail"]
+
+
+# --- cross-check provenance payload -----------------------------------------
+
+def _seed_snapshot(path, *, validator_name, source_outcomes, cells):
+    conn = db.get_connection(path)
+    try:
+        def _ins():
+            with db.transaction(conn):
+                db.insert_cross_check(conn, run_at=NOW, validator_name=validator_name,
+                                      source_outcomes=source_outcomes, cells=cells)
+        db.run_with_db_retry(_ins)
+    finally:
+        conn.close()
+
+
+def test_cross_check_null_before_any_run(pr_client):
+    assert pr_client.get("/api/price-refresh").json()["cross_check"] is None
+
+
+def test_cross_check_payload_parsed_after_a_snapshot(pr_client, pr_db_path):
+    _seed_snapshot(
+        pr_db_path, validator_name="litellm",
+        source_outcomes='[{"role": "validator", "name": "litellm", "ok": true}]',
+        cells=('{"anthropic:claude-haiku-4-5": {"input": '
+               '{"scraped": 1.0, "validator": 1.0, "flag": "match"}}}'))
+    cc = pr_client.get("/api/price-refresh").json()["cross_check"]
+    assert cc["validator_name"] == "litellm"
+    assert cc["cells"]["anthropic:claude-haiku-4-5"]["input"]["flag"] == "match"
+    assert cc["source_outcomes"][0]["role"] == "validator"
+
+
+def test_run_endpoint_surfaces_latest_cross_check(pr_client, pr_db_path, monkeypatch):
+    _seed_snapshot(pr_db_path, validator_name="openrouter",
+                   source_outcomes="[]", cells="{}")
+    monkeypatch.setattr(daily, "run_daily", lambda conn, **kw: daily.RunSummary())
+    body = pr_client.post("/api/price-refresh/run").json()
+    assert body["cross_check"]["validator_name"] == "openrouter"

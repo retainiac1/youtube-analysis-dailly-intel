@@ -158,7 +158,7 @@ def test_generate_xai(monkeypatch):
     monkeypatch.setattr(llm, "_client_xai",
                         lambda: _fake_openai(rec, content="hi", prompt_tokens=20,
                                              completion_tokens=5))
-    r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=42,
+    r = llm.generate("xai:grok-4.3", "p", temperature=0.5, seed=42,
                      supports_temperature=True, supports_seed=True, max_tokens=256)
     assert (r.text, r.input_tokens, r.output_tokens) == ("hi", 20, 5)
     assert r.seed_applied == 42
@@ -204,7 +204,7 @@ def test_openai_forwards_max_tokens_value(monkeypatch):
 def test_xai_forwards_max_tokens_value(monkeypatch):
     rec = {}
     monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
-    llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None,
+    llm.generate("xai:grok-4.3", "p", temperature=0.5, seed=None,
                  supports_temperature=True, supports_seed=True, max_tokens=321)
     assert rec["max_tokens"] == 321
 
@@ -236,7 +236,7 @@ def test_openai_none_max_tokens_omits_cap(monkeypatch):
 def test_xai_none_max_tokens_omits_cap(monkeypatch):
     rec = {}
     monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
-    llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None,
+    llm.generate("xai:grok-4.3", "p", temperature=0.5, seed=None,
                  supports_temperature=True, supports_seed=True, max_tokens=None)
     assert "max_tokens" not in rec
 
@@ -254,7 +254,7 @@ def test_generate_default_max_tokens_is_none_uncapped(monkeypatch):
     # call keeps working and emits no cap. Omitting the arg == uncapped.
     rec = {}
     monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
-    llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None,
+    llm.generate("xai:grok-4.3", "p", temperature=0.5, seed=None,
                  supports_temperature=True, supports_seed=True)
     assert "max_tokens" not in rec
 
@@ -300,7 +300,7 @@ def test_openai_temperature_out_of_range_when_supported(monkeypatch):
 def test_xai_temperature_out_of_range(monkeypatch):
     monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai({}))
     with pytest.raises(llm.LLMError, match="xai"):
-        llm.generate("xai:grok-4-fast", "p", temperature=2.5, seed=None,
+        llm.generate("xai:grok-4.3", "p", temperature=2.5, seed=None,
                      supports_temperature=True, supports_seed=True)
 
 
@@ -340,7 +340,7 @@ def test_missing_key_raises_named_error(monkeypatch):
 LIVE_MODELS = [
     "anthropic:claude-haiku-4-5",
     "openai:gpt-5.4-nano",
-    "xai:grok-4-fast",
+    "xai:grok-4.3",
     "google:gemini-2.5-flash-lite",
 ]
 
@@ -371,7 +371,7 @@ def test_generate_drops_non_positive_seed(monkeypatch):
     for bad in (0, -1):
         rec = {}
         monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
-        r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=bad,
+        r = llm.generate("xai:grok-4.3", "p", temperature=0.5, seed=bad,
                          supports_temperature=True, supports_seed=True)
         assert "seed" not in rec, f"seed={bad} must not be forwarded"
         assert r.seed_applied is None
@@ -380,7 +380,7 @@ def test_generate_drops_non_positive_seed(monkeypatch):
 def test_generate_keeps_positive_seed(monkeypatch):
     rec = {}
     monkeypatch.setattr(llm, "_client_xai", lambda: _fake_openai(rec))
-    r = llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=7,
+    r = llm.generate("xai:grok-4.3", "p", temperature=0.5, seed=7,
                      supports_temperature=True, supports_seed=True)
     assert rec["seed"] == 7 and r.seed_applied == 7
 
@@ -411,7 +411,7 @@ def test_generate_wraps_xai_api_error(monkeypatch):
         llm, "_client_xai",
         lambda: _raising_openai(openai.OpenAIError("boom from x.ai")))
     with pytest.raises(llm.LLMError) as exc:
-        llm.generate("xai:grok-4-fast", "p", temperature=0.5, seed=None,
+        llm.generate("xai:grok-4.3", "p", temperature=0.5, seed=None,
                      supports_temperature=True, supports_seed=True)
     assert "xai" in str(exc.value) and "boom from x.ai" in str(exc.value)
 

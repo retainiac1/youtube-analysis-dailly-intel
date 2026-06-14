@@ -373,13 +373,13 @@ def test_disabled_model_absent_from_dropdown_and_rejected(
     def _fail_if_called(*a, **k):
         raise AssertionError("generate must not run for a hidden model")
     monkeypatch.setattr(interpret, "generate", _fail_if_called)
-    _update_model(seeded_db_path, "xai:grok-4-fast", enabled=0)
+    _update_model(seeded_db_path, "xai:grok-4.3", enabled=0)
 
     models = client.get("/api/interpret-defaults").json()["models"]
-    assert "xai:grok-4-fast" not in models           # :479
+    assert "xai:grok-4.3" not in models           # :479
     resp = client.post("/api/interpret", json={
         "run_date": "2026-06-08", "scope": "health",
-        "model": "xai:grok-4-fast", "temperature": 0.5, "seed": None,
+        "model": "xai:grok-4.3", "temperature": 0.5, "seed": None,
     })
     assert resp.status_code == 422                    # :439
 
@@ -423,13 +423,13 @@ def test_interpret_defaults_with_history(client, seeded_db_path):
     try:
         with db.transaction(conn):
             db.log_invocation(
-                conn, "2026-06-08", "health", "xai:grok-4-fast",
+                conn, "2026-06-08", "health", "xai:grok-4.3",
                 0.9, 123, None, 500, 60, "2026-06-08T12:00:00-04:00",
             )
     finally:
         conn.close()
     body = client.get("/api/interpret-defaults").json()
-    assert body["model"] == "xai:grok-4-fast"
+    assert body["model"] == "xai:grok-4.3"
     assert body["temperature"] == 0.9
     assert body["seed"] == 123
 

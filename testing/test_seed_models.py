@@ -1,23 +1,28 @@
+import pytest
+
+import config
 import db
 import seed_models
 
 
-# --- pick_grok_model (the live-list selection heuristic) -------------------
+# --- canonical_xai_model (the configured string the live gate confirms) ----
 
-def test_pick_grok_prefers_fast_or_mini():
-    # Cheap tier ('fast'/'mini') wins over the base grok.
-    assert seed_models.pick_grok_model(
-        ["grok-4", "grok-4-fast", "gpt-4o", "grok-3"]) == "grok-4-fast"
-    assert seed_models.pick_grok_model(["grok-9", "grok-9-mini"]) == "grok-9-mini"
-
-
-def test_pick_grok_falls_back_to_smallest_grok():
-    # No fast/mini variant -> the lexically smallest grok.
-    assert seed_models.pick_grok_model(["grok-7", "grok-3"]) == "grok-3"
+def test_canonical_xai_model_is_the_seed_string():
+    # The live gate VERIFIES the configured xai model; it never auto-picks another
+    # from the live /v1/models list. Registry models are user-managed (/models page),
+    # so the canonical string is whatever config.SEED_MODELS declares.
+    assert seed_models.canonical_xai_model() == "xai:grok-4.3"
+    xai = [m["model"] for m in config.SEED_MODELS if m["provider"] == "xai"]
+    assert xai == ["xai:grok-4.3"]  # exactly one xai entry, and it is the canonical
 
 
-def test_pick_grok_none_when_no_grok_offered():
-    assert seed_models.pick_grok_model(["gpt-4o", "claude-x"]) is None
+def test_canonical_xai_model_requires_exactly_one_xai_seed(monkeypatch):
+    # Defensive: a malformed bootstrap with zero or two xai rows is a config error,
+    # surfaced loudly rather than silently picking one.
+    monkeypatch.setattr(config, "SEED_MODELS",
+                        [{"model": "anthropic:x", "provider": "anthropic"}])
+    with pytest.raises(ValueError, match="exactly one xai"):
+        seed_models.canonical_xai_model()
 
 
 # --- correct_xai (the DB reconciliation) -----------------------------------
@@ -31,7 +36,7 @@ def test_correct_xai_is_noop_when_already_current(tmp_path):
     try:
         with db.transaction(conn):
             result = seed_models.correct_xai(
-                conn, "xai:grok-4-fast", input_per_1m=0.20, output_per_1m=0.50,
+                conn, "xai:grok-4.3", input_per_1m=0.20, output_per_1m=0.50,
                 now="2026-06-11T10:00:00-04:00")
         assert result["retired"] == []
         rows = conn.execute(
@@ -40,7 +45,7 @@ def test_correct_xai_is_noop_when_already_current(tmp_path):
         assert len(rows) == 1
         assert rows[0]["enabled"] == 1 and rows[0]["deleted"] == 0
         n = conn.execute(
-            "SELECT count(*) c FROM model_prices WHERE model='xai:grok-4-fast'"
+            "SELECT count(*) c FROM model_prices WHERE model='xai:grok-4.3'"
         ).fetchone()["c"]
         assert n == 1  # no duplicate window
     finally:
@@ -59,17 +64,17 @@ def test_correct_xai_replaces_stale_string(tmp_path):
             result = seed_models.correct_xai(
                 conn, "xai:grok-9-mini", input_per_1m=0.15, output_per_1m=0.45,
                 now="2026-06-11T10:00:00-04:00")
-        assert result["retired"] == ["xai:grok-4-fast"]
+        assert result["retired"] == ["xai:grok-4.3"]
 
         offered = {r["model"] for r in db.fetch_dropdown_models(conn)}
-        assert "xai:grok-4-fast" not in offered      # stale string hidden
+        assert "xai:grok-4.3" not in offered      # stale string hidden
         assert "xai:grok-9-mini" in offered          # confirmed string offered
 
         # Backward pricing preserved: retiring the MODEL leaves its price window
         # intact and non-deleted (date-independent — the seed's valid_from is
         # "today"), so fetch_spend still prices that model's history.
         win = conn.execute(
-            "SELECT deleted FROM model_prices WHERE model = 'xai:grok-4-fast'"
+            "SELECT deleted FROM model_prices WHERE model = 'xai:grok-4.3'"
         ).fetchone()
         assert win is not None and win["deleted"] == 0
         # The confirmed model has its open window at the given price (valid_from is
@@ -93,13 +98,13 @@ def test_correct_xai_restores_a_previously_retired_confirmed_string(tmp_path):
         with db.transaction(conn):
             conn.execute(
                 "UPDATE models SET deleted = 1, enabled = 0 "
-                "WHERE model = 'xai:grok-4-fast'"
+                "WHERE model = 'xai:grok-4.3'"
             )
             result = seed_models.correct_xai(
-                conn, "xai:grok-4-fast", input_per_1m=0.20, output_per_1m=0.50,
+                conn, "xai:grok-4.3", input_per_1m=0.20, output_per_1m=0.50,
                 now="2026-06-11T10:00:00-04:00")
         assert result["retired"] == []
-        m = db.fetch_model(conn, "xai:grok-4-fast")
+        m = db.fetch_model(conn, "xai:grok-4.3")
         assert m["enabled"] == 1 and m["deleted"] == 0  # restored, not duplicated
     finally:
         conn.close()
