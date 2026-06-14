@@ -29,6 +29,18 @@ the dashboard remains read-only**; the read-only-strict statements below are
 preserved as written and individually marked `(amended: see Phase 3 generator
 amendment)` so the contract history stays honest.
 
+### Amendment (price-refresh agent, Phase 3)
+The price-refresh agent (see `docs/price-refresh-agent-plan.MD`) adds a `/prices` tab
+and, by the same carve-out logic, **five** new endpoints — one read and four writes:
+`GET /api/price-refresh` (current prices + day-over-day deltas + pending proposals,
+read-only); `POST /api/price-proposals/{id}/confirm` and `.../reject` (apply or
+dismiss a staged >=10% price move); `GET`/`POST /api/extraction-model` (read + persist
+the active extraction model to the `app_preferences` key-value table — NOT
+`settings.toml`); and `POST /api/price-refresh/run` (trigger one `run_daily`: live
+fetch + auto-apply windows + proposal staging). All outbound LLM/network calls and
+keys live server-side; the run uses a fixed `temperature=0.0` + seed (no per-click
+temp/seed). **Everything else remains read-only.**
+
 ### Architecture decisions (locked)
 - Backend: FastAPI + Python, reusing `db.py` helpers. No new connection or
   transaction code.

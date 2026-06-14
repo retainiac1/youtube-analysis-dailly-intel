@@ -224,3 +224,43 @@ def reject_proposal(conn: sqlite3.Connection, proposal_id: int, *,
         return False
     _commit_resolve(conn, proposal_id, "rejected", now)
     return True
+
+
+def _field_delta(field: str, current_val: float,
+                 prior: sqlite3.Row | None) -> dict:
+    """The {current, prior, pct, direction} shape for one field vs the prior window.
+    prior=None -> 'no prior data' (prior/pct/direction all None). 'none' direction means
+    no change (within PRICE_ABS_TOL)."""
+    prior_val = prior[f"{field}_per_1m"] if prior is not None else None
+    if prior_val is None or prior_val == 0:
+        # No prior, or a $0 baseline a percentage can't be taken against.
+        return {"current": current_val, "prior": prior_val, "pct": None,
+                "direction": None}
+    if not value_changed(current_val, prior_val):
+        return {"current": current_val, "prior": prior_val, "pct": 0.0,
+                "direction": "none"}
+    return {"current": current_val, "prior": prior_val,
+            "pct": (current_val - prior_val) / prior_val,
+            "direction": "up" if current_val > prior_val else "down"}
+
+
+def fetch_price_overview(conn: sqlite3.Connection, *, models=None) -> list[dict]:
+    """Per priced model (extractable_models by default), the current price + day-over-day
+    delta vs the prior window. EVERY model gets a row: one with no active window gets
+    input/output=None so the UI surfaces a 'no current price' problem state rather than
+    silently dropping it. Read-only."""
+    if models is None:
+        models = extractable_models(conn)
+    overview = []
+    for model in sorted(models):
+        active = db.active_price_window(conn, model)
+        if active is None:
+            overview.append({"model": model, "input": None, "output": None})
+            continue
+        prior = db.prior_price_window(conn, model, active["valid_from"])
+        overview.append({
+            "model": model,
+            "input": _field_delta("input", active["input_per_1m"], prior),
+            "output": _field_delta("output", active["output_per_1m"], prior),
+        })
+    return overview

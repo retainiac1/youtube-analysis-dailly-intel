@@ -70,6 +70,18 @@ def test_make_generate_text_unknown_model_raises(conn):
         daily.make_generate_text(conn, "nope:nope", RUN_DATE)
 
 
+# --- active_extraction_model (shared read path) -----------------------------
+
+def test_active_extraction_model_pref_then_settings_default(conn):
+    import config
+    # No pref -> the settings.toml seed default.
+    assert daily.active_extraction_model(conn) == config.EXTRACTION_MODEL
+    # A persisted pref wins (cron + dashboard read this one path).
+    with db.transaction(conn):
+        db.set_preference(conn, daily.ACTIVE_MODEL_PREF, "ollama:qwen3.5:9b", NOW)
+    assert daily.active_extraction_model(conn) == "ollama:qwen3.5:9b"
+
+
 # --- run_daily end-to-end (fetch + generate_text injected) ------------------
 import json     # noqa: E402
 import re       # noqa: E402

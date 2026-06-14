@@ -1700,6 +1700,26 @@ def test_price_proposals_partial_index_one_pending_per_model_field(tmp_path):
         conn.close()
 
 
+def test_prior_price_window_is_id_tiebroken_and_non_deleted(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        with db.transaction(conn):
+            _price_window(conn, "test:m", 1.0, 2.0, "2026-01-01", "2026-06-01")
+            _price_window(conn, "test:m", 3.0, 4.0, "2026-06-01", None)
+            # a soft-deleted window between them must NOT be the prior.
+            _price_window(conn, "test:m", 9.9, 9.9, "2026-03-01", "2026-06-01",
+                          deleted=1)
+        prior = db.prior_price_window(conn, "test:m", "2026-06-01")
+        assert prior["valid_from"] == "2026-01-01"           # skips the deleted 03-01
+        assert prior["input_per_1m"] == 1.0
+        # nothing strictly before the earliest window.
+        assert db.prior_price_window(conn, "test:m", "2026-01-01") is None
+    finally:
+        conn.close()
+
+
 def test_active_price_window_is_the_open_non_deleted_window(tmp_path):
     """active_price_window returns the single open (valid_to IS NULL) non-deleted
     window — NOT latest_price_window, which is deleted-agnostic and would surface a

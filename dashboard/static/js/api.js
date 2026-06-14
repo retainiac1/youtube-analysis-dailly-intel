@@ -238,3 +238,31 @@ export async function getDocumentBytes(tabId, docId) {
   }
   return resp.arrayBuffer();
 }
+
+// --- Price-refresh agent (Phase 3) ------------------------------------------
+// Reads + writes go through getJSON/postJSON + errorFrom, so a server {detail}
+// (e.g. "unknown or unusable model 'x'") surfaces as the inline message.
+
+export function getPriceRefresh() {
+  return getJSON("/api/price-refresh");
+}
+
+export function getExtractionModel() {
+  return getJSON("/api/extraction-model");
+}
+
+export function setExtractionModel(model) {
+  return postJSON("/api/extraction-model", { model });
+}
+
+export function confirmProposal(id) {
+  return postJSON(`/api/price-proposals/${id}/confirm`, {});
+}
+
+export function rejectProposal(id) {
+  return postJSON(`/api/price-proposals/${id}/reject`, {});
+}
+
+export function runPriceRefresh() {
+  return postJSON("/api/price-refresh/run", {});
+}

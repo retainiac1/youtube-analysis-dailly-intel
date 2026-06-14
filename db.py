@@ -1023,6 +1023,22 @@ def active_price_window(
     ).fetchone()
 
 
+def prior_price_window(
+    conn: sqlite3.Connection, model: str, before: str
+) -> sqlite3.Row | None:
+    """The most recent NON-DELETED window for `model` strictly before `before` (a
+    YYYY-MM-DD valid_from), or None. The day-over-day diff baseline for the prices
+    panel. Ordered by (valid_from DESC, id DESC) so the prior is unambiguous even if
+    two windows ever shared a valid_from (the id tiebreak), rather than relying on
+    fetch_prices' valid_from-only ordering. Read-only."""
+    return conn.execute(
+        "SELECT * FROM model_prices "
+        "WHERE model = ? AND deleted = 0 AND valid_from < ? "
+        "ORDER BY valid_from DESC, id DESC LIMIT 1",
+        (model, before),
+    ).fetchone()
+
+
 def insert_price_window(conn: sqlite3.Connection, *, model: str,
                         input_per_1m: float, output_per_1m: float,
                         valid_from: str, now: str) -> int:

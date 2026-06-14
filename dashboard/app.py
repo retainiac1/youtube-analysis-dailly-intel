@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
@@ -31,6 +32,7 @@ import db  # noqa: E402
 import interpret  # noqa: E402
 import llm  # noqa: E402
 from dashboard import discovery  # noqa: E402
+from price_refresh import daily, store  # noqa: E402
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -912,6 +914,105 @@ def api_price_invocation_count(
         conn, row["model"], row["valid_from"], row["valid_to"])
     return {"id": price_id, "model": row["model"], "valid_from": row["valid_from"],
             "valid_to": row["valid_to"], "count": count}
+
+
+# --- Price-refresh agent (Phase 3): prices/deltas, review, model, run -------
+#
+# A tracked amendment to the read-only-strict dashboard contract (see
+# docs/dashboard-plan.MD), mirroring the interpret-write carve-out: one read, two
+# proposal writes, get/set the active extraction model, and one run trigger.
+
+@app.get("/api/price-refresh")
+def api_price_refresh(conn: sqlite3.Connection = Depends(get_conn)):
+    """Current prices + day-over-day deltas per priced model, and the pending (>=10%)
+    proposals awaiting a human. Read-only; empty -> empty lists, never 404."""
+    prices = db.run_with_db_retry(lambda: store.fetch_price_overview(conn))
+    proposals = db.run_with_db_retry(
+        lambda: _rows(store.fetch_pending_proposals(conn)))
+    return {"prices": prices, "proposals": proposals}
+
+
+@app.post("/api/price-proposals/{proposal_id}/confirm")
+def api_confirm_proposal(
+    proposal_id: int, conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Apply a pending proposal (opens/supersedes a window, carrying the other field
+    forward) and mark it confirmed. PriceRefreshError (no active window) -> clean 422;
+    unknown/not-pending -> 404."""
+    try:
+        ok = db.run_with_db_retry(
+            lambda: store.confirm_proposal(conn, proposal_id))
+    except store.PriceRefreshError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if not ok:
+        raise HTTPException(status_code=404,
+                            detail=f"no pending proposal {proposal_id}")
+    return {"id": proposal_id, "status": "confirmed"}
+
+
+@app.post("/api/price-proposals/{proposal_id}/reject")
+def api_reject_proposal(
+    proposal_id: int, conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Mark a pending proposal rejected; opens no window. Unknown/not-pending -> 404."""
+    ok = db.run_with_db_retry(lambda: store.reject_proposal(conn, proposal_id))
+    if not ok:
+        raise HTTPException(status_code=404,
+                            detail=f"no pending proposal {proposal_id}")
+    return {"id": proposal_id, "status": "rejected"}
+
+
+@app.get("/api/extraction-model")
+def api_get_extraction_model(conn: sqlite3.Connection = Depends(get_conn)):
+    """The persisted active extraction model (the shared cron+dashboard read path),
+    plus the capable options for the dropdown. `options` is _allowed_models (capable
+    priced registry models incl. ollama) — the engine that READS pages, NOT the
+    non-local priced set shown in the prices panel."""
+    model = db.run_with_db_retry(lambda: daily.active_extraction_model(conn))
+    options = db.run_with_db_retry(lambda: _allowed_models(conn))
+    return {"model": model, "options": options}
+
+
+class ExtractionModelUpdate(BaseModel):
+    model: str
+
+
+@app.post("/api/extraction-model")
+def api_set_extraction_model(
+    body: ExtractionModelUpdate,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Persist the active extraction model. Validated against _allowed_models before
+    upsert — an unknown/incapable model is a clean 422 and nothing is written."""
+    if body.model not in _allowed_models(conn):
+        raise HTTPException(
+            status_code=422, detail=f"unknown or unusable model {body.model!r}")
+    now = config.now_local_iso()
+
+    def write():
+        with db.transaction(conn):
+            db.set_preference(conn, daily.ACTIVE_MODEL_PREF, body.model, now)
+
+    db.run_with_db_retry(write)
+    return {"model": body.model}
+
+
+@app.post("/api/price-refresh/run")
+def api_price_refresh_run(conn: sqlite3.Connection = Depends(get_conn)):
+    """Trigger one run of the daily agent using the PERSISTED active model. Returns the
+    run summary + a server-measured duration_ms for the stopwatch. A partial/per-source
+    failure is absorbed into summary.errors -> 200 with counts; only a whole-run SETUP
+    failure (bad/incapable model, invalid config) is a clean 400, never a raw 500. No
+    temp/seed param exists, so a click can't invalidate the determinism contract."""
+    start = time.monotonic()
+    try:
+        summary = daily.run_daily(conn)
+    except (ValueError, config.ConfigError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    duration_ms = int((time.monotonic() - start) * 1000)
+    return {"applied": summary.applied, "staged": summary.staged,
+            "rejected": summary.rejected, "skipped": summary.skipped,
+            "errors": summary.errors, "duration_ms": duration_ms}
 
 
 # --- Documentation page: filesystem-discovered docs (read-only) -------------

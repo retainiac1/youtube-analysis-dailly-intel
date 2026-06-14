@@ -44,6 +44,8 @@
                id="nav-interpretation" tabindex="-1">Interpretation</a>
             <a class="page-nav-link" data-route href="/models"
                id="nav-models" tabindex="-1">Models</a>
+            <a class="page-nav-link" data-route href="/prices"
+               id="nav-prices" tabindex="-1">Prices</a>
             <a class="page-nav-link" data-route href="/documentation"
                id="nav-documentation" tabindex="-1">Documentation</a>
           </nav>
@@ -123,6 +125,11 @@
       <!-- The model + price registry editor (models.js owns this region; it
            replaceChildren's it). A global admin surface, not run/lane scoped. -->
       <main class="models" id="models" aria-live="polite" hidden></main>
+
+      <!-- The price-refresh agent (price-refresh.js owns this region). Prices +
+           day-over-day deltas, the pending proposals review, a model dropdown, and a
+           Run button. A global admin surface, not run/lane scoped. -->
+      <main class="prices" id="prices" aria-live="polite" hidden></main>
 
       <!-- Documentation: a filesystem-discovered docs browser (documentation.js owns
            this region; it replaceChildren's it). Read-only, not run/lane scoped. -->

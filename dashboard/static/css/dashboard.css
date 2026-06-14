@@ -1323,3 +1323,56 @@ html { scroll-padding-top: var(--header-h, 0px); }
   * { transition: none !important; }
   .models-row, .models-confirm { animation: none !important; }
 }
+
+/* --- Price-refresh agent (/prices) -------------------------------------------
+   Reuses tokens.css + the .interpret-stopwatch / .interpret-runtime / .btn-* /
+   .interpret-select / .glass-panel components. Only layout + the delta/warn badges
+   and inline-error spans are new. */
+.prices-page { display: flex; flex-direction: column; gap: 1rem; padding: 1rem 0; }
+.prices-head { display: flex; align-items: baseline; gap: 0.75rem; }
+
+.prices-controls {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1.25rem;
+  padding: 1rem 1.25rem;
+}
+.prices-model-field { display: flex; flex-direction: column; gap: 0.3rem; }
+.prices-run-group { display: inline-flex; align-items: center; gap: 1rem; }
+
+.prices-panel { padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.6rem; }
+.prices-table, .prices-review { display: flex; flex-direction: column; gap: 0.4rem; }
+
+.prices-row {
+  display: flex; align-items: center; gap: 1.5rem;
+  padding: 0.5rem 0.2rem; border-bottom: 1px solid var(--border-subtle);
+}
+.prices-row:last-child { border-bottom: none; }
+.prices-model {
+  font-family: var(--font-display); color: var(--text-primary);
+  min-width: 16rem; flex: 1 1 auto;
+}
+.prices-field { display: inline-flex; align-items: baseline; gap: 0.5rem; min-width: 12rem; }
+.prices-value { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+
+.prices-delta {
+  font-size: 0.78rem; font-variant-numeric: tabular-nums;
+  padding: 0.05rem 0.4rem; border-radius: var(--radius-sm);
+}
+.prices-delta-up   { color: var(--accent-cyan); background: rgba(0, 242, 169, 0.12); }
+.prices-delta-down { color: var(--accent-red);  background: rgba(239, 68, 68, 0.14); }
+.prices-delta-none { color: var(--text-secondary); }
+.prices-row-warn .prices-warn { color: var(--accent-amber); font-size: 0.85rem; }
+
+.prices-proposal {
+  display: flex; flex-direction: column; gap: 0.4rem;
+  padding: 0.75rem 0.85rem; border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md); background: var(--bg-card);
+}
+.prices-proposal-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.prices-proposal-move { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.prices-quote { color: var(--text-secondary); font-size: 0.85rem; margin: 0; }
+.prices-source { color: var(--accent-blue); font-size: 0.8rem; }
+.prices-proposal-actions { display: flex; gap: 0.6rem; margin-top: 0.2rem; }
+
+.prices-error { color: var(--accent-red); font-size: 0.8rem; flex-basis: 100%; }
+.prices-error:empty { display: none; }
+.prices-empty { color: var(--text-secondary); font-size: 0.9rem; margin: 0.3rem 0; }

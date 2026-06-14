@@ -272,3 +272,39 @@ def test_apply_price_noops_on_sub_tolerance_jitter(conn):
         conn, model="test:m", input_per_1m=0.9999996, output_per_1m=2.0, now=NOW)
     assert result is None
     assert len(_windows(conn, "test:m")) == 1
+
+
+# --- fetch_price_overview (current + prior-window delta) ---------------------
+
+def test_fetch_price_overview_deltas_and_edge_states(conn):
+    # a:m — prior 1.0/2.0 (closed), current 1.04/2.0 (open): input +4% up, output none.
+    _window(conn, "a:m", 1.0, 2.0, "2026-01-01", "2026-06-01")
+    _window(conn, "a:m", 1.04, 2.0, "2026-06-01", None)
+    # b:m — single window: no prior data.
+    _window(conn, "b:m", 0.5, 1.0, "2026-01-01", None)
+    # c:m — no window at all: no current price (must still appear, not vanish).
+    rows = {r["model"]: r
+            for r in store.fetch_price_overview(conn, models={"a:m", "b:m", "c:m"})}
+
+    a = rows["a:m"]
+    assert a["input"]["current"] == 1.04 and a["input"]["prior"] == 1.0
+    assert a["input"]["pct"] == pytest.approx(0.04) and a["input"]["direction"] == "up"
+    assert a["output"]["current"] == 2.0 and a["output"]["direction"] == "none"
+    assert a["output"]["pct"] == 0.0
+
+    b = rows["b:m"]
+    assert b["input"]["current"] == 0.5
+    assert b["input"]["prior"] is None and b["input"]["pct"] is None
+    assert b["input"]["direction"] is None                  # "no prior data"
+
+    c = rows["c:m"]
+    assert c["input"] is None and c["output"] is None       # "no current price" row
+
+
+def test_fetch_price_overview_same_day_supersede_resolves_unambiguously(conn):
+    # Prior dated earlier + a window updated-in-place TODAY: current via
+    # active_price_window, prior via the id-tiebroken prior_price_window.
+    _window(conn, "a:m", 1.0, 2.0, "2026-01-01", TODAY)
+    _window(conn, "a:m", 1.5, 2.0, TODAY, None)             # today's (superseded) window
+    a = store.fetch_price_overview(conn, models={"a:m"})[0]
+    assert a["input"]["current"] == 1.5 and a["input"]["prior"] == 1.0

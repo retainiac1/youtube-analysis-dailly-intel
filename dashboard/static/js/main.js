@@ -12,6 +12,7 @@ import * as interpretation from "./interpretation.js";
 import * as interpRail from "./interpretation-rail.js";
 import * as spend from "./spend.js";
 import * as models from "./models.js";
+import * as priceRefresh from "./price-refresh.js";
 import * as documentation from "./documentation.js";
 import * as router from "./router.js";
 import "./sticky-header.js"; // side-effect: publishes --header-h for the pinned strip
@@ -22,6 +23,7 @@ const boardEl = document.getElementById("board");
 const trendsEl = document.getElementById("trends");
 const interpretationEl = document.getElementById("interpretation");
 const modelsEl = document.getElementById("models");
+const pricesEl = document.getElementById("prices");
 const documentationEl = document.getElementById("documentation");
 const railGroups = document.getElementById("filter-groups");
 const rail = document.getElementById("filter-rail");
@@ -108,6 +110,7 @@ function enterBoard() {
   interpretationEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
+  pricesEl.hidden = true;
   laneRow.hidden = false;
 }
 
@@ -119,6 +122,7 @@ function enterTrends() {
   interpretationEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
+  pricesEl.hidden = true;
   laneRow.hidden = false;
   // Render the charts on entry: an ECharts instance on a hidden element cannot
   // size itself, so charts are only rendered while Trends is visible.
@@ -135,6 +139,7 @@ function enterInterpretation() {
   interpretationEl.hidden = false;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
+  pricesEl.hidden = true;
   laneRow.hidden = false;
   // Fetch + render the interpretation for the current run + lane on entry.
   interpretation.refresh(state);
@@ -152,6 +157,7 @@ function enterModels() {
   interpretationEl.hidden = true;
   modelsEl.hidden = false;
   documentationEl.hidden = true;
+  pricesEl.hidden = true;
   laneRow.hidden = false;
   models.refresh();
 }
@@ -166,9 +172,25 @@ function enterDocumentation() {
   trendsEl.hidden = true;
   interpretationEl.hidden = true;
   modelsEl.hidden = true;
+  pricesEl.hidden = true;
   documentationEl.hidden = false;
   laneRow.hidden = true; // the page is not lane-scoped; hide the lane tabs here
   documentation.refresh();
+}
+
+// The price-refresh agent: a global admin page (not run/lane scoped), like Models. Hide
+// every other region + the filter rail/drawer, then load the prices + proposals.
+function enterPrices() {
+  boardEl.hidden = true;
+  rail.hidden = true;
+  drawerToggle.hidden = true;
+  trendsEl.hidden = true;
+  interpretationEl.hidden = true;
+  modelsEl.hidden = true;
+  documentationEl.hidden = true;
+  pricesEl.hidden = false;
+  laneRow.hidden = true; // not lane-scoped; hide the lane tabs here
+  priceRefresh.refresh();
 }
 
 // Arrow-key roving focus for a segmented tablist.
@@ -339,6 +361,7 @@ async function init() {
   spend.init(document.getElementById("spend-panel"));
   interpRail.init(document.getElementById("trends-interp-rail"));
   models.init(modelsEl);
+  priceRefresh.init(pricesEl);
   documentation.init(documentationEl);
   board.setActiveTab(app, tabs, state.lane);
 
@@ -354,6 +377,7 @@ async function init() {
       "/trends": enterTrends,
       "/interpretation": enterInterpretation,
       "/models": enterModels,
+      "/prices": enterPrices,
       "/documentation": enterDocumentation,
     },
     // Leaving Documentation tears down any live native render (a pdf.js worker handle

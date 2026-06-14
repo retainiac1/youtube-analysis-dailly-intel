@@ -30,6 +30,18 @@ EXTRACTION_SEED = 7
 # needs more room than an interpretation summary, so this is NOT the model's stored cap.
 EXTRACTION_MAX_TOKENS = 2000
 
+# app_preferences key holding the user-selected extraction model (a plain provider:model
+# string). The ONE shared read path below is used by BOTH run_daily and the dashboard, so
+# the unattended cron and the manual Run button never run a different model.
+ACTIVE_MODEL_PREF = "extraction_model"
+
+
+def active_extraction_model(conn: sqlite3.Connection) -> str:
+    """The extraction model in effect: the persisted app_preferences choice if set, else
+    the settings.toml EXTRACTION_MODEL seed default. run_daily (cron) and the dashboard
+    both resolve the model through here, so they can never diverge."""
+    return db.get_preference(conn, ACTIVE_MODEL_PREF) or config.EXTRACTION_MODEL
+
 
 def make_generate_text(conn: sqlite3.Connection, model: str, run_date: str):
     """Return the `(prompt) -> str` closure extract.extract_source expects, bound to
@@ -190,7 +202,8 @@ def run_daily(conn: sqlite3.Connection, *, fetch=None, generate_text=None,
     if fetch is None:
         fetch = extract.fetch_page
     if generate_text is None:
-        generate_text = make_generate_text(conn, config.EXTRACTION_MODEL, run_date)
+        generate_text = make_generate_text(
+            conn, active_extraction_model(conn), run_date)
 
     pr = config.PRICE_REFRESH
     lo, hi = pr["magnitude_lo"], pr["magnitude_hi"]
