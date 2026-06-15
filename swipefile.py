@@ -1,13 +1,17 @@
 import argparse
 import csv
+import http.client
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httplib2
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -44,13 +48,50 @@ from config import (
     TOP_N,
     VALID_BUCKETS,
     VIDEOS_QUOTA_COST,
+    EXIT_AUTH,
+    EXIT_DB_LOCKED,
+    EXIT_NETWORK,
+    EXIT_NO_ROWS,
+    EXIT_OK,
+    EXIT_OTHER,
+    EXIT_QUOTA,
+    NETWORK_FAILURE_REASON,
+    QUOTA_STOP_STATUSES,
     ConfigError,
     distribution_buckets,
+    exit_code_for_api_failure,
     get_published_after,
     now_local_iso,
     pacific_date,
     validate_config,
 )
+
+
+# Reason slugs for the single PIPELINE_RESULT line, keyed by exit code. Purely
+# for the grep-able log; the code itself is the contract.
+_EXIT_REASON = {
+    EXIT_OK: "ok",
+    EXIT_NETWORK: "network",
+    EXIT_QUOTA: "quota_exceeded",
+    EXIT_AUTH: "auth",
+    EXIT_OTHER: "other",
+    EXIT_DB_LOCKED: "db_locked",
+    EXIT_NO_ROWS: "no_rows",
+}
+
+
+class PipelineApiError(Exception):
+    """A terminal YouTube API failure raised by api_call_with_retry after its own
+    in-function retries are exhausted. Carries the RAW signal only (`reason` from
+    error_details, `status` HTTP code); classification into an exit code is done
+    solely by config.exit_code_for_api_failure in main(). This is never raised for
+    benign per-item conditions (comments disabled, video not found), which stay a
+    graceful None skip."""
+
+    def __init__(self, reason: str, status: int | None):
+        self.reason = reason
+        self.status = status
+        super().__init__(f"reason={reason!r} status={status}")
 
 # Rough per-call-count heuristics for the discover quota estimate. They are
 # intentionally approximate (real channel/comment counts are unknown until the
@@ -564,32 +605,52 @@ def api_call_with_retry(call_fn, budget: QuotaBudget, cost: int):
             reason = ""
             if e.error_details:
                 reason = e.error_details[0].get("reason", "")
+            status = e.resp.status
 
-            if reason == "keyInvalid" or e.resp.status == 400:
-                print(f"ERROR: Invalid API key. {e}", file=sys.stderr)
-                sys.exit(1)
-
-            if reason == "quotaExceeded":
-                print(f"ERROR: Quota exhausted after {budget.run_units} units. {e}", file=sys.stderr)
-                return None
-
+            # Benign per-item conditions: a private/deleted video or a video with
+            # comments off. These are normal data, not a systemic failure, so we
+            # skip the one item and keep going. NEVER raised: one private video
+            # must not abort the whole run.
             if reason in ("commentsDisabled", "forbidden", "videoNotFound"):
                 return None
 
-            if e.resp.status == 429 and attempt == 0:
+            # Daily quota cap: retrying same-day is pointless, so raise straight
+            # away. main() classifies this as EXIT_QUOTA.
+            if reason in ("quotaExceeded", "dailyLimitExceeded"):
+                print(f"ERROR: Quota exhausted after {budget.run_units} units. {e}",
+                      file=sys.stderr)
+                raise PipelineApiError(reason, status)
+
+            # Transient rate limiting (HTTP 429 or the 403 rate-limit reasons):
+            # retry once in-function; only a still-failing call surfaces (as
+            # EXIT_NETWORK) below.
+            transient = status == 429 or reason in (
+                "rateLimitExceeded", "userRateLimitExceeded")
+            if transient and attempt == 0:
                 print("Rate limited, retrying in 5s...", file=sys.stderr)
                 time.sleep(5)
                 continue
 
+            # Every other HttpError is terminal: raise with the RAW reason/status
+            # and let config.exit_code_for_api_failure decide (keyInvalid/401 ->
+            # AUTH, exhausted rate-limit -> NETWORK, a bare 400 or unknown reason
+            # -> OTHER). No sys.exit here; main() is the sole exit-code decider.
             print(f"ERROR: API error: {e}", file=sys.stderr)
-            return None
-        except (ConnectionError, TimeoutError) as e:
+            raise PipelineApiError(reason, status)
+        except (OSError, httplib2.HttpLib2Error, http.client.HTTPException) as e:
+            # Connectivity/transport failure, retried once then raised -> EXIT_NETWORK.
+            # The tuple is verified against the installed stack (googleapiclient over
+            # httplib2): OSError covers socket-level errors incl. ConnectionError,
+            # TimeoutError (socket.timeout is TimeoutError) and socket.gaierror;
+            # httplib2.HttpLib2Error covers ServerNotFoundError (DNS lookup failure,
+            # which is NOT an OSError); http.client.HTTPException covers a malformed
+            # response mid-transfer.
             if attempt == 0:
                 print(f"Network error, retrying in 2s... ({e})", file=sys.stderr)
                 time.sleep(2)
                 continue
             print(f"ERROR: Network failure: {e}", file=sys.stderr)
-            return None
+            raise PipelineApiError(NETWORK_FAILURE_REASON, None)
     return None
 
 
@@ -790,19 +851,20 @@ def eligible_pool(rows: list[dict], cutoff_dt: datetime) -> list[dict]:
     return kept
 
 
-def _recompute_rankings(conn, now: str) -> None:
+def _recompute_rankings(conn, captured_at: str, run_date: str) -> None:
     """Recompute and write all three lanes from the persisted pool. Shared by
-    discover and refresh so both rank the same way. `now` is the Eastern timestamp;
-    run_date is its date part (the offset never shifts the calendar date)."""
+    discover and refresh so both rank the same way. `run_date` is the Eastern
+    rankings key captured ONCE at run start in main() and threaded here, so the
+    rows are stamped with the same date main() later counts (a midnight-straddling
+    run never diverges). `captured_at` is the live Eastern write timestamp."""
     cutoff_dt = datetime.fromisoformat(get_published_after().replace("Z", "+00:00"))
     pool = eligible_pool(db.fetch_ranking_pool(conn), cutoff_dt)
     rankings = compute_rankings(pool, VALID_BUCKETS, TOP_N)
-    run_date = now[:10]  # Eastern calendar date
-    db.run_with_db_retry(lambda: _rank_phase(conn, rankings, run_date, now))
+    db.run_with_db_retry(lambda: _rank_phase(conn, rankings, run_date, captured_at))
 
 
 def _run_refresh(youtube, conn, run_id: int, budget: "QuotaBudget",
-                 now: str) -> tuple[int, bool]:
+                 now: str, run_date: str) -> tuple[int, bool]:
     """Refresh mode (cheap, no searches): re-pull videos.list stats for tracked
     videos in batches of 50, preserving each video's matched_queries / buckets /
     top_comments from the DB, upsert, write one snapshot per video, and recompute
@@ -860,7 +922,7 @@ def _run_refresh(youtube, conn, run_id: int, budget: "QuotaBudget",
         print(f"WARNING: snapshot persist failed, continuing: {e}", file=sys.stderr)
 
     try:
-        _recompute_rankings(conn, now)
+        _recompute_rankings(conn, now, run_date)
     except Exception as e:
         persist_partial = True
         print(f"WARNING: ranking phase failed, continuing: {e}", file=sys.stderr)
@@ -1050,6 +1112,11 @@ def _run_category_phase(youtube, conn, budget: "QuotaBudget", region: str,
             return
         db.run_with_db_retry(lambda: persist_categories(conn, records, now))
         print(f"Synced {len(records)} video categories (region {region})", file=sys.stderr)
+    except PipelineApiError:
+        # A systemic API failure (network/auth/quota) is terminal: let it propagate
+        # so main() classifies it into an exit code. Only non-API hiccups (a persist
+        # error, a malformed reference response) are the non-fatal "continue" case.
+        raise
     except Exception as e:
         print(f"WARNING: category sync failed, continuing: {e}", file=sys.stderr)
 
@@ -1141,9 +1208,10 @@ def _persist_all(conn, run_id: int, video_records: list[dict],
 
 
 def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict,
-                  today_pac: str) -> tuple[int, bool, bool]:
+                  today_pac: str, run_date: str) -> tuple[int, bool, bool]:
     """Discover mode (expensive): run the search/channel/comment phases, persist
-    everything, and recompute rankings. Returns
+    everything, and recompute rankings. `run_date` is the Eastern rankings key
+    captured once in main() and threaded to the rankings write. Returns
     (videos_seen, quota_aborted, persist_partial)."""
     all_results, quota_aborted = _run_search_phase(youtube, state, budget, conn, today_pac)
 
@@ -1164,7 +1232,7 @@ def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict
     # Recompute all three rankings from the persisted pool. A failure here is
     # non-fatal: persisted videos are kept and the run is marked partial.
     try:
-        _recompute_rankings(conn, now)
+        _recompute_rankings(conn, now, run_date)
     except Exception as e:
         persist_partial = True
         print(f"WARNING: ranking phase failed, continuing: {e}", file=sys.stderr)
@@ -1200,7 +1268,16 @@ def _pick_status(budget: "QuotaBudget", quota_aborted: bool,
     return "success"
 
 
-def main() -> None:
+def _finalize(code: int) -> int:
+    """Print the single grep-able result line and return the exit code. The
+    __main__ guard does sys.exit(main()); main() is the sole code-decider, this is
+    just the one place every path funnels through to log + return."""
+    reason = _EXIT_REASON.get(code, "other")
+    print(f"PIPELINE_RESULT: code={code} reason={reason}", file=sys.stderr)
+    return code
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(description="YouTube Habits Swipe File Builder")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--dry-run", action="store_true",
@@ -1209,12 +1286,20 @@ def main() -> None:
                             help="Force a discovery run (expensive: searches + enrichment)")
     mode_group.add_argument("--refresh", action="store_true",
                             help="Force a cheap stats refresh of tracked videos (no searches)")
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except SystemExit as e:
+        # argparse exits 0 on --help (let it pass), 2 on a usage error. Remap the
+        # usage error to EXIT_OTHER so a bad flag is never read as EXIT_NETWORK(2).
+        return _finalize(EXIT_OK if e.code in (0, None) else EXIT_OTHER)
 
     cap = DAILY_QUOTA_LIMIT - SAFETY_BUFFER
 
     if args.dry_run:
-        # No API calls; read today's quota state so the estimate shows headroom.
+        # Terminal branch: no API calls, no writes. Read today's quota state for the
+        # estimate, then go STRAIGHT to the finalizer as EXIT_OK. It must NOT fall
+        # through to the clean-run classification below (that would count 0 rankings
+        # rows and false-fire EXIT_NO_ROWS).
         db.init_db(DB_PATH)
         conn = db.get_connection(DB_PATH)
         try:
@@ -1222,101 +1307,152 @@ def main() -> None:
         finally:
             conn.close()
         _print_dry_run(units_today, cap)
-        return
+        return _finalize(EXIT_OK)
 
     load_dotenv()
     api_key = os.getenv("YOUTUBE_API_KEY")
     if not api_key:
         print("ERROR: YOUTUBE_API_KEY not found in .env", file=sys.stderr)
-        sys.exit(1)
+        return _finalize(EXIT_AUTH)
 
     try:
         validate_config()
     except ConfigError as e:
         print(f"ERROR: invalid config: {e}", file=sys.stderr)
-        sys.exit(1)
+        return _finalize(EXIT_OTHER)
 
-    db.init_db(DB_PATH)
-    conn = db.get_connection(DB_PATH)
+    # Single run_date capture (Eastern, once). Threaded to BOTH the rankings write
+    # and the NO_ROWS count so a midnight-straddling run never stamps rows under one
+    # date while counting under another. now_local_iso() is the same Eastern helper
+    # the rows were always stamped from; only the capture moment moves to run start.
+    run_started = now_local_iso()
+    run_date = run_started[:10]
 
+    conn = None
+    run_id = None
+    mode = None
     today_pac = pacific_date()
-    units_today = db.get_units_used(conn, today_pac)
-
-    # Choose the run mode.
-    if args.refresh:
-        mode = "refresh"
-    elif args.discover:
-        mode = "discover"
-    else:
-        mode = "refresh" if _discover_done_today(conn, today_pac) else "discover"
-
-    # Pre-flight guard (discover only): refuse if the estimate won't fit the cap.
-    downgraded = False
-    if mode == "discover":
-        estimate = estimate_discover_units()["total"]
-        if units_today + estimate > cap:
-            remaining = max(cap - units_today, 0)
-            if args.discover:  # explicit discover -> hard stop, no work done
-                run_id = db.start_run(conn, "discover", now_local_iso())
-                db.finish_run(conn, run_id, now_local_iso(), 0, 0, "quota_preflight_stop")
-                print(f"PRE-FLIGHT STOP: discover needs ~{estimate} units but only "
-                      f"{remaining} remain under the cap ({cap}). No API calls made.",
-                      file=sys.stderr)
-                conn.close()
-                return
-            # no-flag default -> loud downgrade to a cheap refresh
-            print(f"DOWNGRADE: discover needs ~{estimate} units but only {remaining} "
-                  f"remain under the cap ({cap}); running a refresh instead.",
-                  file=sys.stderr)
-            mode, downgraded = "refresh", True
-
-    run_id = db.start_run(conn, mode, now_local_iso())
-    youtube = build_youtube_client(api_key)
-    budget = QuotaBudget(units_today, cap)
-    # state.json is the discover resume cache; refresh neither reads nor clears it.
-    state = _normalize_state(load_state()) if mode == "discover" else {}
     videos_seen = 0
     quota_aborted = False
     persist_partial = False
+    downgraded = False
     status = "failed"
+    code = EXIT_OTHER
 
     try:
-        # Reference-data sync runs once per invocation, before either mode, so the
-        # categories table stays current and its 1-unit charge is flushed by the
-        # finally block below like every other call.
-        _run_category_phase(youtube, conn, budget, CATEGORY_REGION, now_local_iso())
+        db.init_db(DB_PATH)
+        # get_connection is inside the try so a "database is locked" at open time
+        # classifies as EXIT_DB_LOCKED rather than crashing as a generic error.
+        conn = db.get_connection(DB_PATH)
 
-        if mode == "discover":
-            videos_seen, quota_aborted, persist_partial = _run_discover(
-                youtube, conn, run_id, budget, state, today_pac
-            )
+        units_today = db.get_units_used(conn, today_pac)
+
+        # Resolve the run mode (auto: discover if none done today, else refresh).
+        if args.refresh:
+            mode = "refresh"
+        elif args.discover:
+            mode = "discover"
         else:
-            videos_seen, persist_partial = _run_refresh(
-                youtube, conn, run_id, budget, now_local_iso()
-            )
+            mode = "refresh" if _discover_done_today(conn, today_pac) else "discover"
 
-        status = _pick_status(budget, quota_aborted, persist_partial, downgraded)
-        # Only a clean discover clears the resume cache; an aborted/partial discover
-        # keeps it, and refresh never touches it.
-        if mode == "discover" and status == "success":
-            clear_state()
+        # Pre-flight guard (discover only): refuse if the estimate won't fit the cap.
+        if mode == "discover":
+            estimate = estimate_discover_units()["total"]
+            if units_today + estimate > cap:
+                remaining = max(cap - units_today, 0)
+                if args.discover:  # explicit discover -> hard stop, no work done
+                    run_id = db.start_run(conn, "discover", run_started)
+                    db.finish_run(conn, run_id, now_local_iso(), 0, 0,
+                                  "quota_preflight_stop")
+                    print(f"PRE-FLIGHT STOP: discover needs ~{estimate} units but only "
+                          f"{remaining} remain under the cap ({cap}). No API calls made.",
+                          file=sys.stderr)
+                    return _finalize(EXIT_QUOTA)
+                # no-flag default -> loud downgrade to a cheap refresh
+                print(f"DOWNGRADE: discover needs ~{estimate} units but only {remaining} "
+                      f"remain under the cap ({cap}); running a refresh instead.",
+                      file=sys.stderr)
+                mode, downgraded = "refresh", True
 
-        print(f"\n[{mode}] processed {videos_seen} videos to {DB_PATH} "
-              f"(run {run_id}, status: {status})", file=sys.stderr)
-        print(f"Quota consumed this run: {budget.run_units} units "
-              f"({units_today + budget.run_units}/{cap} used today)", file=sys.stderr)
-    finally:
+        run_id = db.start_run(conn, mode, run_started)
+        youtube = build_youtube_client(api_key)
+        budget = QuotaBudget(units_today, cap)
+        # state.json is the discover resume cache; refresh neither reads nor clears it.
+        state = _normalize_state(load_state()) if mode == "discover" else {}
+
         try:
-            # Flush only the un-flushed remainder (cheap calls); search.list was
-            # already flushed eagerly. Its own committed transaction.
-            if budget.unflushed() > 0:
-                db.run_with_db_retry(lambda: db.add_quota_units(
-                    conn, today_pac, budget.unflushed(), now_local_iso()))
-            db.finish_run(conn, run_id, now_local_iso(), budget.run_units,
-                          videos_seen, status)
+            # Reference-data sync runs once per invocation, before either mode, so the
+            # categories table stays current and its 1-unit charge is flushed by the
+            # finally block below like every other call.
+            _run_category_phase(youtube, conn, budget, CATEGORY_REGION, now_local_iso())
+
+            if mode == "discover":
+                videos_seen, quota_aborted, persist_partial = _run_discover(
+                    youtube, conn, run_id, budget, state, today_pac, run_date
+                )
+            else:
+                videos_seen, persist_partial = _run_refresh(
+                    youtube, conn, run_id, budget, now_local_iso(), run_date
+                )
+
+            status = _pick_status(budget, quota_aborted, persist_partial, downgraded)
+            # Only a clean discover clears the resume cache; an aborted/partial discover
+            # keeps it, and refresh never touches it.
+            if mode == "discover" and status == "success":
+                clear_state()
+
+            print(f"\n[{mode}] processed {videos_seen} videos to {DB_PATH} "
+                  f"(run {run_id}, status: {status})", file=sys.stderr)
+            print(f"Quota consumed this run: {budget.run_units} units "
+                  f"({units_today + budget.run_units}/{cap} used today)", file=sys.stderr)
         finally:
-            conn.close()
+            # Durably record the run even on abort: on a raise, status stays "failed"
+            # so run_log never falsely reads "success". Each cleanup step swallows its
+            # own error so a failing finally cannot replace the already-decided exit
+            # code (worst case: a still-held DB lock making finish_run raise).
+            try:
+                if budget.unflushed() > 0:
+                    # Losing the last quota increment on a DB-locked abort is
+                    # DELIBERATE: eager per-call flushing already persisted the rest,
+                    # and a locked DB could not write this remainder anyway.
+                    db.run_with_db_retry(lambda: db.add_quota_units(
+                        conn, today_pac, budget.unflushed(), now_local_iso()))
+            except Exception as e:
+                print(f"WARNING: final quota flush failed (ignored): {e}",
+                      file=sys.stderr)
+            try:
+                db.finish_run(conn, run_id, now_local_iso(), budget.run_units,
+                              videos_seen, status)
+            except Exception as e:
+                print(f"WARNING: finish_run failed (ignored): {e}", file=sys.stderr)
+
+        # Clean (no-exception) classification. Order: quota stop first, then the
+        # discover-only no-rows check, else success.
+        if status in QUOTA_STOP_STATUSES:
+            code = EXIT_QUOTA
+        elif mode == "discover" and \
+                db.count_rankings_for_run_date(conn, run_date) == 0:  # resolved mode, not args.discover
+            code = EXIT_NO_ROWS
+        else:
+            code = EXIT_OK
+
+    except PipelineApiError as e:
+        code = exit_code_for_api_failure(e.reason, e.status)
+    except sqlite3.OperationalError as e:
+        code = EXIT_DB_LOCKED if "database is locked" in str(e).lower() else EXIT_OTHER
+        print(f"ERROR: database error: {e}", file=sys.stderr)
+    except Exception:
+        traceback.print_exc()
+        code = EXIT_OTHER
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    return _finalize(code)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

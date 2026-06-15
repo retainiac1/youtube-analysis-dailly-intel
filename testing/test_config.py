@@ -587,3 +587,27 @@ def test_price_validation_model_keys_missing_validator_id_raises():
     cfg.PRICE_VALIDATION = {**cfg.PRICE_VALIDATION, "model_keys": broken}
     with pytest.raises(config.ConfigError, match="openrouter"):
         config.validate_config(cfg)
+
+
+# --- exit_code_for_api_failure (scheduler retry contract) -------------------
+
+@pytest.mark.parametrize("reason,status,expected", [
+    # Reason-first: positively-identified API reasons win over status.
+    ("keyInvalid", 400, config.EXIT_AUTH),
+    ("keyInvalid", None, config.EXIT_AUTH),
+    ("quotaExceeded", 403, config.EXIT_QUOTA),
+    ("dailyLimitExceeded", 403, config.EXIT_QUOTA),
+    ("rateLimitExceeded", 403, config.EXIT_NETWORK),
+    ("userRateLimitExceeded", 403, config.EXIT_NETWORK),
+    (config.NETWORK_FAILURE_REASON, None, config.EXIT_NETWORK),
+    # Status fallback only when reason did not classify.
+    ("", 401, config.EXIT_AUTH),
+    # A bare 400 (badRequest / no reason) is a code defect, NOT auth.
+    ("", 400, config.EXIT_OTHER),
+    ("badRequest", 400, config.EXIT_OTHER),
+    # Unknown reason / server error -> unclassifiable.
+    ("", 500, config.EXIT_OTHER),
+    ("somethingNew", 403, config.EXIT_OTHER),
+])
+def test_exit_code_for_api_failure(reason, status, expected):
+    assert config.exit_code_for_api_failure(reason, status) == expected

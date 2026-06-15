@@ -3,6 +3,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httplib2
+import pytest
+from googleapiclient.errors import HttpError
+
 import config
 import db
 import swipefile
@@ -129,7 +133,9 @@ def seed(tmp_path, *, with_video=True):
     return db_path
 
 
-def _drive_main(monkeypatch, db_path, argv, youtube=None, queries=None):
+def _patch_main(monkeypatch, db_path, argv, youtube=None, queries=None):
+    """Wire up main()'s external deps against a temp DB and fake YouTube. Returns
+    the state-file path. Callers then invoke swipefile.main() themselves."""
     state_path = db_path + ".state.json"
     monkeypatch.setattr(swipefile, "DB_PATH", db_path)
     monkeypatch.setattr(swipefile, "STATE_FILE", state_path)
@@ -140,8 +146,19 @@ def _drive_main(monkeypatch, db_path, argv, youtube=None, queries=None):
     if queries is not None:
         monkeypatch.setattr(swipefile, "SEARCH_QUERIES", queries)
     monkeypatch.setattr(sys, "argv", ["swipefile.py"] + argv)
+    return state_path
+
+
+def _drive_main(monkeypatch, db_path, argv, youtube=None, queries=None):
+    state_path = _patch_main(monkeypatch, db_path, argv, youtube, queries)
     swipefile.main()
     return state_path
+
+
+def _drive_main_code(monkeypatch, db_path, argv, youtube=None, queries=None):
+    """Like _drive_main but returns main()'s exit code (the contract under test)."""
+    _patch_main(monkeypatch, db_path, argv, youtube, queries)
+    return swipefile.main()
 
 
 def latest_run(db_path):
@@ -163,7 +180,7 @@ def test_refresh_updates_stats_preserves_user_and_content(tmp_path):
         budget = swipefile.QuotaBudget(0, 9500)
         youtube = FakeYouTube(video_items={"v1": fake_video("v1", view_count="200000")})
 
-        seen, partial = swipefile._run_refresh(youtube, conn, run_id, budget, NOW1)
+        seen, partial = swipefile._run_refresh(youtube, conn, run_id, budget, NOW1, NOW1[:10])
 
         assert (seen, partial) == (1, False)
         row = conn.execute("SELECT * FROM videos WHERE video_id='v1'").fetchone()
@@ -197,7 +214,7 @@ def test_refresh_no_tracked_videos_is_noop(tmp_path):
     try:
         run_id = db.start_run(conn, "refresh", NOW1)
         budget = swipefile.QuotaBudget(0, 9500)
-        seen, partial = swipefile._run_refresh(None, conn, run_id, budget, NOW1)
+        seen, partial = swipefile._run_refresh(None, conn, run_id, budget, NOW1, NOW1[:10])
         assert (seen, partial) == (0, False)
         assert budget.run_units == 0
     finally:
@@ -211,7 +228,7 @@ def test_near_cap_refresh_guard_stops(tmp_path):
     try:
         run_id = db.start_run(conn, "refresh", NOW1)
         budget = swipefile.QuotaBudget(baseline=9500, cap=9500)  # nothing affordable
-        seen, partial = swipefile._run_refresh(None, conn, run_id, budget, NOW1)
+        seen, partial = swipefile._run_refresh(None, conn, run_id, budget, NOW1, NOW1[:10])
         assert budget.guard_stopped is True
         assert seen == 0
         # untouched stat
@@ -324,3 +341,267 @@ def test_discover_ledger_equals_run_units_no_double_count(tmp_path, monkeypatch)
     assert len(youtube._videos.calls) == 2
     assert len(youtube._channels.calls) == 1
     assert not Path(state_path).exists()          # cleared on clean success
+
+
+# --- main(): exit codes (scheduler retry contract) --------------------------
+
+def test_argparse_usage_error_exits_other(tmp_path, monkeypatch):
+    """A bad flag must NOT exit 2 (that would read as EXIT_NETWORK); argparse's
+    SystemExit(2) is remapped to EXIT_OTHER(5)."""
+    db_path = seed(tmp_path, with_video=False)
+    assert _drive_main_code(monkeypatch, db_path, ["--bogus"]) == config.EXIT_OTHER
+
+
+def test_missing_api_key_exits_auth(tmp_path, monkeypatch):
+    db_path = seed(tmp_path, with_video=False)
+    _patch_main(monkeypatch, db_path, [], youtube=None)
+    monkeypatch.setattr(swipefile.os, "getenv", lambda *a, **k: "")  # no key
+    assert swipefile.main() == config.EXIT_AUTH
+
+
+def test_dry_run_exits_ok_not_no_rows(tmp_path, monkeypatch):
+    """--dry-run writes nothing (0 rankings) but must exit OK, never EXIT_NO_ROWS:
+    it is a terminal branch that skips the clean-run classification."""
+    db_path = seed(tmp_path, with_video=False)
+    assert _drive_main_code(monkeypatch, db_path, ["--dry-run"]) == config.EXIT_OK
+
+
+def test_explicit_discover_preflight_exits_quota(tmp_path, monkeypatch):
+    db_path = seed(tmp_path, with_video=False)
+    conn = db.get_connection(db_path)
+    db.add_quota_units(conn, config.pacific_date(), 9500, NOW1)  # at the cap
+    conn.close()
+    assert _drive_main_code(monkeypatch, db_path, ["--discover"]) == config.EXIT_QUOTA
+
+
+def test_discover_with_zero_results_exits_no_rows(tmp_path, monkeypatch):
+    """A clean discover that captures nothing (empty searches -> zero rankings)
+    exits EXIT_NO_ROWS(7)."""
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    queries = [{"q": "q1", "bucket": "habit"}]
+    youtube = FakeYouTube(search_map={"q1": []})  # searches return nothing
+    code = _drive_main_code(monkeypatch, db_path, ["--discover"], youtube=youtube,
+                            queries=queries)
+    assert code == config.EXIT_NO_ROWS
+    assert latest_run(db_path)["status"] == "success"
+
+
+def test_refresh_with_empty_pool_exits_ok_not_no_rows(tmp_path, monkeypatch):
+    """A clean refresh whose ranking pool ages out (zero rankings written through
+    _recompute_rankings at :863) is NORMAL, not a failure: EXIT_OK, never
+    EXIT_NO_ROWS. Guards the auto-mode daily false-alarm."""
+    old = "2000-01-01T00:00:00Z"  # far outside the ranking window
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    db.upsert_video(conn, make_video_record(published_at=old), NOW1)
+    db.upsert_channel(conn, {
+        "channel_id": "c1", "subscriber_count": 100000, "channel_video_count": 10,
+        "channel_total_views": 1000000, "channel_created_date": "2020-01-01",
+        "channel_country": "US", "channel_keywords": "k"}, NOW1)
+    conn.commit()
+    conn.close()
+    youtube = FakeYouTube(video_items={"v1": fake_video("v1", published_at=old)})
+
+    code = _drive_main_code(monkeypatch, db_path, ["--refresh"], youtube=youtube)
+
+    assert code == config.EXIT_OK
+    n = db.count_rankings_for_run_date(
+        db.get_connection(db_path), config.now_local_iso()[:10])
+    assert n == 0  # the pool aged out, yet we exit OK
+
+
+@pytest.mark.parametrize("reason,status,expected", [
+    ("quotaExceeded", 403, config.EXIT_QUOTA),
+    ("network", None, config.EXIT_NETWORK),
+    ("keyInvalid", None, config.EXIT_AUTH),
+    ("badRequest", 400, config.EXIT_OTHER),
+])
+def test_pipeline_api_error_is_classified_and_run_marked_failed(
+        tmp_path, monkeypatch, reason, status, expected):
+    """A PipelineApiError raised mid-work classifies to the mapped code, the run is
+    recorded 'failed' (never falsely success), and the resume cache is preserved."""
+    db_path = seed(tmp_path, with_video=False)
+
+    def boom(*a, **k):
+        raise swipefile.PipelineApiError(reason, status)
+
+    state_path = _patch_main(monkeypatch, db_path, ["--discover"], youtube=object())
+    monkeypatch.setattr(swipefile, "_run_discover", boom)
+    Path(state_path).write_text("{}")  # a resume cache exists
+
+    assert swipefile.main() == expected
+    assert latest_run(db_path)["status"] == "failed"
+    assert Path(state_path).exists()  # not cleared on abort
+
+
+def test_failing_finally_preserves_db_locked_code(tmp_path, monkeypatch):
+    """A DB-locked abort that ALSO makes finish_run raise in the finally must still
+    exit EXIT_DB_LOCKED(6), never a generic 1: the decided code survives a failing
+    finally."""
+    db_path = seed(tmp_path, with_video=False)
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    _patch_main(monkeypatch, db_path, ["--discover"], youtube=object())
+    monkeypatch.setattr(swipefile, "_run_discover", locked)
+    monkeypatch.setattr(db, "finish_run", locked)  # finally also raises
+
+    assert swipefile.main() == config.EXIT_DB_LOCKED
+
+
+def test_run_date_single_capture_survives_midnight_straddle(tmp_path, monkeypatch):
+    """run_date is captured ONCE at run start and threaded to both the rankings
+    write and the count. If wall-clock crosses midnight mid-run, rows stay stamped
+    under the start date and the count finds them, so a clean discover exits OK,
+    not a false EXIT_NO_ROWS."""
+    day1 = "2026-06-07T23:59:30-04:00"
+    day2 = "2026-06-08T00:00:30-04:00"
+    seq = [day1]  # first call (run_started) is day1; every later call is day2
+
+    def clock():
+        return seq.pop(0) if seq else day2
+
+    monkeypatch.setattr(swipefile, "now_local_iso", clock)
+
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    queries = [{"q": "q1", "bucket": "habit"}]
+    youtube = FakeYouTube(
+        search_map={"q1": ["v1"]},
+        video_items={"v1": fake_video("v1")},
+        channel_items={"c1": fake_channel("c1")},
+    )
+    code = _drive_main_code(monkeypatch, db_path, ["--discover"], youtube=youtube,
+                            queries=queries)
+
+    assert code == config.EXIT_OK
+    conn = db.get_connection(db_path)
+    dates = [r["run_date"] for r in
+             conn.execute("SELECT DISTINCT run_date FROM rankings").fetchall()]
+    conn.close()
+    assert dates == ["2026-06-07"]  # stamped under the run-start date, not day2
+
+
+# --- QUOTA_STOP_STATUSES pinned to its producers ----------------------------
+
+def test_quota_stop_statuses_pinned_to_producers():
+    """The set must equal EXACTLY the strings the producers emit. If a producer is
+    renamed without updating the set, that quota stop would fall back to the
+    retryable default and retry a real daily cap all day."""
+    assert config.QUOTA_STOP_STATUSES == frozenset(
+        {"quota_guard_stop", "quota_exceeded", "quota_preflight_stop"})
+
+    guard = swipefile.QuotaBudget(0, 100)
+    guard.guard_stopped = True
+    assert swipefile._pick_status(guard, False, False, False) == "quota_guard_stop"
+    assert "quota_guard_stop" in config.QUOTA_STOP_STATUSES
+
+    plain = swipefile.QuotaBudget(0, 100)
+    assert swipefile._pick_status(plain, True, False, False) == "quota_exceeded"
+    assert "quota_exceeded" in config.QUOTA_STOP_STATUSES
+    # quota_preflight_stop is written by the pre-flight path in main(); pinned here
+    # so a rename there is caught too.
+    assert "quota_preflight_stop" in config.QUOTA_STOP_STATUSES
+
+
+# --- api_call_with_retry: terminal failures RAISE, benign skips return None --
+
+def _http_error(status, reason):
+    """A real googleapiclient HttpError with the given status and error reason."""
+    err = HttpError(httplib2.Response({"status": status}), b"{}")
+    err.error_details = [{"reason": reason}] if reason else []
+    err.resp.status = status
+    return err
+
+
+def _afford_budget():
+    return swipefile.QuotaBudget(0, 1000)
+
+
+def test_choke_point_quota_raises_without_retry(monkeypatch):
+    monkeypatch.setattr(swipefile.time, "sleep", lambda *_: None)
+    calls = []
+
+    def call_fn():
+        calls.append(1)
+        raise _http_error(403, "quotaExceeded")
+
+    with pytest.raises(swipefile.PipelineApiError) as ei:
+        swipefile.api_call_with_retry(call_fn, _afford_budget(), 1)
+    assert (ei.value.reason, ei.value.status) == ("quotaExceeded", 403)
+    assert len(calls) == 1  # no same-day retry
+
+
+def test_choke_point_key_invalid_raises_auth_signal(monkeypatch):
+    monkeypatch.setattr(swipefile.time, "sleep", lambda *_: None)
+
+    def call_fn():
+        raise _http_error(400, "keyInvalid")
+
+    with pytest.raises(swipefile.PipelineApiError) as ei:
+        swipefile.api_call_with_retry(call_fn, _afford_budget(), 1)
+    assert config.exit_code_for_api_failure(ei.value.reason, ei.value.status) == config.EXIT_AUTH
+
+
+def test_choke_point_bare_400_raises_other_signal(monkeypatch):
+    monkeypatch.setattr(swipefile.time, "sleep", lambda *_: None)
+
+    def call_fn():
+        raise _http_error(400, "")  # badRequest, no reason
+
+    with pytest.raises(swipefile.PipelineApiError) as ei:
+        swipefile.api_call_with_retry(call_fn, _afford_budget(), 1)
+    assert config.exit_code_for_api_failure(ei.value.reason, ei.value.status) == config.EXIT_OTHER
+
+
+def test_choke_point_benign_per_item_returns_none(monkeypatch):
+    """A private video / comments-off must NOT abort the run: still a None skip."""
+    monkeypatch.setattr(swipefile.time, "sleep", lambda *_: None)
+    for reason in ("commentsDisabled", "forbidden", "videoNotFound"):
+        def call_fn(r=reason):
+            raise _http_error(403, r)
+        assert swipefile.api_call_with_retry(call_fn, _afford_budget(), 1) is None
+
+
+def test_choke_point_network_retries_then_raises(monkeypatch):
+    monkeypatch.setattr(swipefile.time, "sleep", lambda *_: None)
+    calls = []
+
+    def call_fn():
+        calls.append(1)
+        raise ConnectionError("boom")
+
+    with pytest.raises(swipefile.PipelineApiError) as ei:
+        swipefile.api_call_with_retry(call_fn, _afford_budget(), 1)
+    assert config.exit_code_for_api_failure(ei.value.reason, ei.value.status) == config.EXIT_NETWORK
+    assert len(calls) == 2  # one in-function retry, then raise
+
+
+def test_choke_point_dns_failure_raises_network(monkeypatch):
+    """A DNS lookup failure surfaces as httplib2.ServerNotFoundError, which is NOT
+    an OSError. It must still classify as EXIT_NETWORK, not EXIT_OTHER."""
+    monkeypatch.setattr(swipefile.time, "sleep", lambda *_: None)
+
+    def call_fn():
+        raise swipefile.httplib2.ServerNotFoundError("Unable to find the server")
+
+    with pytest.raises(swipefile.PipelineApiError) as ei:
+        swipefile.api_call_with_retry(call_fn, _afford_budget(), 1)
+    assert config.exit_code_for_api_failure(ei.value.reason, ei.value.status) == config.EXIT_NETWORK
+
+
+def test_choke_point_rate_limit_retries_then_succeeds(monkeypatch):
+    monkeypatch.setattr(swipefile.time, "sleep", lambda *_: None)
+    calls = []
+
+    def call_fn():
+        calls.append(1)
+        if len(calls) == 1:
+            raise _http_error(429, "")
+        return {"ok": True}
+
+    assert swipefile.api_call_with_retry(call_fn, _afford_budget(), 1) == {"ok": True}
+    assert len(calls) == 2  # transient retry recovered, no raise

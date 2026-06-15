@@ -241,3 +241,20 @@ def test_fetch_ranking_pool_shape(tmp_path):
                 "published_at"} <= set(row)
     finally:
         conn.close()
+
+
+# --- count_rankings_for_run_date (EXIT_NO_ROWS source) ----------------------
+
+def test_count_rankings_for_run_date_sums_all_lanes(tmp_path):
+    conn = fresh_db(tmp_path)
+    try:
+        with db.transaction(conn):
+            db.replace_rankings(conn, RUN_DATE, "habit", [("a", 9.0), ("b", 5.0)], NOW)
+            db.replace_rankings(conn, RUN_DATE, "health", [("c", 7.0)], NOW)
+            db.replace_rankings(conn, "2026-06-08", "habit", [("d", 4.0)], NOW)
+        # Counts only the queried run_date, across every lane (2 + 1).
+        assert db.count_rankings_for_run_date(conn, RUN_DATE) == 3
+        # A run_date with no rows returns 0 (the EXIT_NO_ROWS trigger).
+        assert db.count_rankings_for_run_date(conn, "2020-01-01") == 0
+    finally:
+        conn.close()

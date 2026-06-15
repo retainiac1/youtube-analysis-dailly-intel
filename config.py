@@ -25,10 +25,11 @@ DEFAULT_SAFETY_BUFFER = 500
 # Local Ollama HTTP endpoint the adapter calls. Loopback only (never 0.0.0.0): the
 # model server is a local single-user process. No URL literal lives in the adapter.
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-# Per-request timeout (seconds) for the Ollama call. Generous because a local
-# thinking run can take many seconds; bounded so a not-running/hung server surfaces
-# a clean error instead of hanging the request forever.
-DEFAULT_OLLAMA_TIMEOUT_SECONDS = 600
+# Per-request timeout (seconds) for the Ollama call. A 5-minute fail-fast ceiling:
+# a local run can be slow, but a not-running/hung/grinding server should surface a
+# clean error in minutes, not block the request for ~10. Overridable in settings.toml
+# for genuinely slower local models.
+DEFAULT_OLLAMA_TIMEOUT_SECONDS = 300
 # ISO-3166 region whose category titles seed the `categories` table. Category IDs
 # are effectively global, so any English region yields the same titles.
 DEFAULT_CATEGORY_REGION = "US"
@@ -339,6 +340,60 @@ PUBLISH_ROOT = "docs/publish"
 # naive) — see now_local_iso(). The YouTube API param in get_published_after()
 # is the one exemption (it must be UTC/Z).
 LOCAL_TZ = "America/New_York"
+
+# --- Pipeline exit codes (run-pipeline.sh -> swipefile.py) -------------------
+# Distinct, stable process exit codes so a scheduler can retry intelligently.
+# This is the SINGLE source of truth: the codes AND the reason/status -> code
+# mapping live here; nothing else defines a contract integer. Code 1 is reserved
+# by run-pipeline.sh for "never reached the pipeline" (missing venv, failed
+# backup) and is deliberately kept OUTSIDE the 2..7 range.
+EXIT_OK = 0           # success, today's rows captured
+EXIT_SUCCESS = EXIT_OK
+EXIT_NETWORK = 2      # connectivity/transport/transient rate-limit, retries exhausted
+EXIT_QUOTA = 3        # daily quota cap reached; NOT retryable same day
+EXIT_AUTH = 4         # 401 / keyInvalid / missing-empty YOUTUBE_API_KEY
+EXIT_OTHER = 5        # uncaught/unclassifiable, or CLI/usage/config error
+EXIT_DB_LOCKED = 6    # sqlite3.OperationalError containing "database is locked"
+EXIT_NO_ROWS = 7      # ran clean but committed zero rankings rows for run_date
+
+# The single "is this a quota stop?" set. The pipeline usually stops on its own
+# quota budget BEFORE the API's quotaExceeded fires, producing one of these run_log
+# statuses; main() routes ALL of them through one check to EXIT_QUOTA so a future
+# fourth quota status cannot fall back to the retryable default. These strings are
+# produced by swipefile._pick_status (quota_guard_stop, quota_exceeded) and the
+# pre-flight path (quota_preflight_stop); a test pins this set to those producers.
+QUOTA_STOP_STATUSES = frozenset(
+    {"quota_guard_stop", "quota_exceeded", "quota_preflight_stop"}
+)
+
+# Internal sentinel reason for a transport/connectivity failure (a DNS/connect
+# error has no API "reason"). The choke point raises PipelineApiError with this
+# reason; the mapping below recognizes it as EXIT_NETWORK. Defined once here so
+# the raiser and the classifier share one string.
+NETWORK_FAILURE_REASON = "network"
+
+
+def exit_code_for_api_failure(reason: str, status: int | None) -> int:
+    """Map a YouTube API terminal failure to a contract exit code, REASON-FIRST,
+    status only as a fallback (never guess a specific code from status alone).
+
+    Reason is the positively-identified `error_details[0]["reason"]`; status is the
+    HTTP status. A bare 400 with no/other reason is a code defect, NOT an auth
+    problem, so it maps to EXIT_OTHER rather than sending a human chasing keys."""
+    if reason == "keyInvalid":
+        return EXIT_AUTH
+    if reason in ("quotaExceeded", "dailyLimitExceeded"):
+        return EXIT_QUOTA
+    if reason in ("rateLimitExceeded", "userRateLimitExceeded",
+                  NETWORK_FAILURE_REASON):
+        return EXIT_NETWORK
+    # Status fallback only when the reason did not positively classify. 401 is
+    # unambiguously auth; a bare 400 (badRequest with no/other reason) is a code
+    # defect, so it falls through to EXIT_OTHER, not EXIT_AUTH.
+    if status == 401:
+        return EXIT_AUTH
+    return EXIT_OTHER
+
 
 VALID_BUCKETS = {"health", "habit"}
 

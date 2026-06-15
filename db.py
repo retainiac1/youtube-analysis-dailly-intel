@@ -788,6 +788,18 @@ def fetch_run_dates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def count_rankings_for_run_date(conn: sqlite3.Connection, run_date: str) -> int:
+    """Return the total number of rankings rows committed for `run_date` (across
+    all lanes). Used by swipefile.main() to decide EXIT_NO_ROWS: a clean discover
+    that wrote zero rows for its run_date signals the scheduler that nothing
+    landed. `replace_rankings` does not return a count, so this authoritative
+    re-query is the clean source. run_date is the Eastern rankings key."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM rankings WHERE run_date = ?",
+        (run_date,),
+    ).fetchone()[0]
+
+
 def fetch_lane(
     conn: sqlite3.Connection, run_date: str, bucket: str
 ) -> list[sqlite3.Row]:
