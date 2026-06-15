@@ -12,7 +12,7 @@ DAILY_QUOTA_LIMIT = 10000          # YouTube Data API daily quota units; positiv
 SAFETY_BUFFER = 500                # units held back below the limit; positive int, MUST be < DAILY_QUOTA_LIMIT.
 CATEGORY_REGION = "US"             # ISO-3166 region whose titles seed the categories table; non-empty string. IDs are global, so any English region matches.
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"  # local Ollama HTTP endpoint the adapter calls; non-empty string. Loopback only (never 0.0.0.0).
-OLLAMA_TIMEOUT_SECONDS = 600       # per-request timeout for the Ollama call; positive int. Generous (local thinking runs are slow) but bounded so a dead server fails clean, not hangs.
+OLLAMA_TIMEOUT_SECONDS = 300       # per-request timeout for the Ollama call; positive int. 5-min fail-fast ceiling so a dead/grinding server fails clean instead of hanging ~10 min. Raise for genuinely slower local models.
 
 # Per-model LLM output-token caps (the models.max_tokens column defaults). These
 # three have NO in-code fallback: config.py loads them strictly and ConfigError-s

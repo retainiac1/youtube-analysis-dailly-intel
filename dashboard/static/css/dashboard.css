@@ -402,6 +402,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .trends[hidden],
 .interpretation[hidden],
 .models[hidden],
+.prices[hidden],
 .documentation[hidden] {
   display: none;
 }
@@ -1328,13 +1329,43 @@ html { scroll-padding-top: var(--header-h, 0px); }
    Reuses tokens.css + the .interpret-stopwatch / .interpret-runtime / .btn-* /
    .interpret-select / .glass-panel components. Only layout + the delta/warn badges
    and inline-error spans are new. */
+/* Rail-less full-width page: span both .layout tracks when the filter rail is hidden
+   (same idiom as .models / .documentation). Without this the page sits in one narrow
+   track and .prices-top-row wraps Sources below the controls. */
+.prices { grid-column: 1 / -1; }
 .prices-page { display: flex; flex-direction: column; gap: 1rem; padding: 1rem 0; }
 .prices-head { display: flex; align-items: baseline; gap: 0.75rem; }
 
+/* top row: controls hug their content, "Sources this run" fills the rest,
+   wrapping below the controls on narrow viewports (gap matches .prices-page) */
+.prices-top-row {
+  display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start;
+}
+.prices-top-row .prices-controls { flex: 0 1 auto; }
+.prices-sources-panel { flex: 1 1 22rem; }
+
+/* Refresh card is a vertical stack: decorative glyph, then the model selector,
+   then the Run group beneath it. */
 .prices-controls {
-  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1.25rem;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1rem;
   padding: 1rem 1.25rem;
 }
+
+/* Decorative hero fill for the refresh card: a centered gradient "price pulse"
+   over a soft ambient glow, with a hairline separating it from the controls. */
+.prices-glyph {
+  align-self: stretch; display: flex; justify-content: center;
+  padding: 1.25rem 0 1.5rem; border-bottom: 1px solid var(--glass-border);
+  background: radial-gradient(60% 80% at 72% 46%,
+              rgba(0, 242, 169, 0.08), transparent 70%);
+}
+.prices-glyph svg { width: 100%; max-width: 17rem; height: auto; }
+.prices-glyph-rings circle { fill: none; stroke: var(--accent-cyan); opacity: 0.16; }
+.prices-glyph-node { fill: var(--accent-cyan); filter: drop-shadow(0 0 6px var(--accent-glow)); }
+/* the leading node breathes; tasteful, single-element motion */
+@keyframes prices-glyph-pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+.prices-glyph-node { animation: prices-glyph-pulse 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .prices-glyph-node { animation: none; } }
 .prices-model-field { display: flex; flex-direction: column; gap: 0.3rem; }
 .prices-run-group { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }
 /* The run-summary line by the stopwatch: base counts muted, a degraded run's error count
@@ -1345,6 +1376,11 @@ html { scroll-padding-top: var(--header-h, 0px); }
 }
 .prices-run-summary:empty { display: none; }
 .prices-run-summary-error { color: var(--accent-red); }
+/* one real reason per line under the count (failed source / reject), so the "why" is
+   legible at a glance without opening the Sources panel */
+.prices-run-summary-detail {
+  display: block; color: var(--accent-red); font-size: 0.78rem;
+}
 
 .prices-panel { padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.6rem; }
 .prices-table, .prices-review { display: flex; flex-direction: column; gap: 0.4rem; }

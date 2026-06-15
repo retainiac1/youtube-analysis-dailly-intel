@@ -72,7 +72,13 @@ export async function refresh() {
     node("header", { class: "prices-head" }, [
       node("h2", { class: "heading-sm", text: "Price refresh" }),
     ]),
-    controlsRow(modelData),
+    node("div", { class: "prices-top-row" }, [
+      controlsRow(modelData),
+      node("section", { class: "glass-panel prices-panel prices-sources-panel" }, [
+        node("h3", { class: "heading-sm", text: "Sources this run" }),
+        sourcesPanel,
+      ]),
+    ]),
     node("section", { class: "glass-panel prices-panel" }, [
       node("h3", { class: "heading-sm", text: "Prices (vs prior window)" }),
       node("p", { class: "prices-caption",
@@ -83,14 +89,32 @@ export async function refresh() {
       node("h3", { class: "heading-sm", text: "Pending review" }),
       reviewPanel,
     ]),
-    node("section", { class: "glass-panel prices-panel" }, [
-      node("h3", { class: "heading-sm", text: "Sources this run" }),
-      sourcesPanel,
-    ]),
   ]));
 
   renderPanels(data);
 }
+
+// Decorative only: an abstract cyan->blue "price pulse" sparkline with a glowing
+// leading node and concentric rings (the refresh sweep). Static markup, so it is
+// injected via innerHTML; node() can't create SVG. aria-hidden -- purely visual.
+const PRICES_GLYPH_SVG = `
+<svg viewBox="0 0 280 132" role="presentation" focusable="false">
+  <defs>
+    <linearGradient id="prices-glyph-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="var(--accent-cyan)"/>
+      <stop offset="1" stop-color="var(--accent-blue)"/>
+    </linearGradient>
+  </defs>
+  <g class="prices-glyph-rings">
+    <circle cx="214" cy="58" r="16"/><circle cx="214" cy="58" r="30"/>
+    <circle cx="214" cy="58" r="46"/>
+  </g>
+  <polyline class="prices-glyph-line"
+    points="14,96 56,78 98,86 140,50 182,64 214,58"
+    fill="none" stroke="url(#prices-glyph-grad)" stroke-width="2.5"
+    stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="prices-glyph-node" cx="214" cy="58" r="5"/>
+</svg>`;
 
 function controlsRow(modelData) {
   const modelSelect = node("select", {
@@ -126,7 +150,11 @@ function controlsRow(modelData) {
   const runError = node("span", { class: "prices-error", attrs: { role: "alert" } });
   runBtn.addEventListener("click", () => onRun(runBtn, runError));
 
+  const glyph = node("div", { class: "prices-glyph", attrs: { "aria-hidden": "true" } });
+  glyph.innerHTML = PRICES_GLYPH_SVG;
+
   return node("section", { class: "glass-panel prices-controls" }, [
+    glyph,
     node("label", { class: "prices-model-field" }, [
       node("span", { class: "control-label", text: "Extraction model" }),
       modelSelect,
@@ -170,10 +198,36 @@ async function onRun(runBtn, runError) {
   }
 }
 
-// The counts the /run endpoint already returns. `res.errors` is a LIST of
-// (model, field, reason) — use its LENGTH for the trigger + pluralization. A degraded run
-// (errors present, still 200) shows the count in red and never says "no price changes", so
-// it can't masquerade as a clean no-change run.
+// Headline count from `res.errors` (a LIST of (model, field, reason) field-level
+// outcomes), but the count alone is opaque — so we also lift the REAL reasons that
+// already ride along in `res`: failed source_outcomes (the root cause: an Ollama
+// timeout, a 403, unparseable JSON) plus genuine rejects. A degraded run (errors
+// present, still 200) shows the count in red and never says "no price changes", so it
+// can't masquerade as a clean no-change run. The full per-source list still lives in
+// the adjacent Sources panel; this just surfaces the why at a glance.
+const REASON_DETAIL_CAP = 4;
+
+function runIssueReasons(res) {
+  const out = [];
+  const seen = new Set();
+  const push = (text) => {
+    if (text && !seen.has(text)) { seen.add(text); out.push(text); }
+  };
+  // 1. Root causes: every failed scrape / validator, with its real reason.
+  for (const o of (res.cross_check && res.cross_check.source_outcomes) || []) {
+    if (o.ok) continue;
+    const who = o.role === "scrape" ? `scrape · ${o.provider}` : `validator · ${o.name}`;
+    push(`${who}: ${o.reason || "unknown"}`);
+  }
+  // 2. Genuine rejects — "no source data" is downstream of a failed scrape already
+  //    shown in (1), so skip it to avoid restating the same failure.
+  for (const [model, field, reason] of res.errors || []) {
+    if (reason === "no source data") continue;
+    push(`${model}${field ? ` ${field}` : ""}: ${reason}`);
+  }
+  return out;
+}
+
 function renderRunSummary(res) {
   const n = (res.errors || []).length;
   const changed = res.applied + res.staged + res.rejected;
@@ -183,7 +237,16 @@ function renderRunSummary(res) {
   const children = [node("span", { class: "prices-run-summary-base", text: base })];
   if (n > 0) {
     children.push(node("span", { class: "prices-run-summary-error",
-      text: ` · ${n} source error${n === 1 ? "" : "s"}` }));
+      text: ` · ${n} issue${n === 1 ? "" : "s"}` }));
+    const reasons = runIssueReasons(res);
+    for (const r of reasons.slice(0, REASON_DETAIL_CAP)) {
+      children.push(node("span", { class: "prices-run-summary-detail", text: r }));
+    }
+    const extra = reasons.length - REASON_DETAIL_CAP;
+    if (extra > 0) {
+      children.push(node("span", { class: "prices-run-summary-detail",
+        text: `+${extra} more` }));
+    }
   }
   summaryEl.replaceChildren(...children);
 }
