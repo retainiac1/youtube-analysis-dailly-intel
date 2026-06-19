@@ -72,11 +72,13 @@ export async function refresh() {
     node("header", { class: "prices-head" }, [
       node("h2", { class: "heading-sm", text: "Price refresh" }),
     ]),
-    node("div", { class: "prices-top-row" }, [
-      controlsRow(modelData),
-      node("section", { class: "glass-panel prices-panel prices-sources-panel" }, [
-        node("h3", { class: "heading-sm", text: "Sources this run" }),
-        sourcesPanel,
+    node("section", { class: "glass-panel prices-refresh-card" }, [
+      node("div", { class: "prices-refresh-grid" }, [
+        controlsCol(modelData),
+        node("div", { class: "prices-sources-col" }, [
+          node("h3", { class: "heading-sm", text: "Sources this run" }),
+          sourcesPanel,
+        ]),
       ]),
     ]),
     node("section", { class: "glass-panel prices-panel" }, [
@@ -94,29 +96,7 @@ export async function refresh() {
   renderPanels(data);
 }
 
-// Decorative only: an abstract cyan->blue "price pulse" sparkline with a glowing
-// leading node and concentric rings (the refresh sweep). Static markup, so it is
-// injected via innerHTML; node() can't create SVG. aria-hidden -- purely visual.
-const PRICES_GLYPH_SVG = `
-<svg viewBox="0 0 280 132" role="presentation" focusable="false">
-  <defs>
-    <linearGradient id="prices-glyph-grad" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="var(--accent-cyan)"/>
-      <stop offset="1" stop-color="var(--accent-blue)"/>
-    </linearGradient>
-  </defs>
-  <g class="prices-glyph-rings">
-    <circle cx="214" cy="58" r="16"/><circle cx="214" cy="58" r="30"/>
-    <circle cx="214" cy="58" r="46"/>
-  </g>
-  <polyline class="prices-glyph-line"
-    points="14,96 56,78 98,86 140,50 182,64 214,58"
-    fill="none" stroke="url(#prices-glyph-grad)" stroke-width="2.5"
-    stroke-linecap="round" stroke-linejoin="round"/>
-  <circle class="prices-glyph-node" cx="214" cy="58" r="5"/>
-</svg>`;
-
-function controlsRow(modelData) {
+function controlsCol(modelData) {
   const modelSelect = node("select", {
     class: "interpret-select", attrs: { "aria-label": "Extraction model" } });
   for (const m of modelData.options || []) {
@@ -150,11 +130,7 @@ function controlsRow(modelData) {
   const runError = node("span", { class: "prices-error", attrs: { role: "alert" } });
   runBtn.addEventListener("click", () => onRun(runBtn, runError));
 
-  const glyph = node("div", { class: "prices-glyph", attrs: { "aria-hidden": "true" } });
-  glyph.innerHTML = PRICES_GLYPH_SVG;
-
-  return node("section", { class: "glass-panel prices-controls" }, [
-    glyph,
+  return node("div", { class: "prices-controls-col" }, [
     node("label", { class: "prices-model-field" }, [
       node("span", { class: "control-label", text: "Extraction model" }),
       modelSelect,
