@@ -35,6 +35,19 @@ const pageNav = [...document.querySelectorAll(".page-nav-link")];
 const MAX_TRACKED = 5;
 const TRENDS_ROUTE = "/trends";
 const INTERPRETATION_ROUTE = "/interpretation";
+const PRICES_ROUTE = "/prices";
+
+// Mount container ids for the shared spend panel and the Prices content column.
+// Named here (not sprinkled as literals) so each id has one source; the spend panel
+// is created once per mount via spend.create (see init).
+const INTERP_SPEND_ID = "spend-panel";
+const PRICES_SPEND_ID = "prices-spend-panel";
+const PRICES_MAIN_ID = "prices-main";
+
+// One independent spend-panel instance per page, created in init(). Each owns its own
+// data cache + donut instances + resize listener, so they never collide.
+let interpSpend = null;
+let pricesSpend = null;
 
 // The active page is owned by the router (router.current()); run/lane/tracked are
 // shared state that persists across pages. tracked is EPHEMERAL in-memory view
@@ -144,7 +157,7 @@ function enterInterpretation() {
   // Fetch + render the interpretation for the current run + lane on entry.
   interpretation.refresh(state);
   // The spend panel beside it (run section + month-to-date), refreshed on entry.
-  spend.refresh(state);
+  interpSpend.refresh(state);
 }
 
 // The registry editor: a global admin page (not run/lane scoped). Hide every other
@@ -191,6 +204,10 @@ function enterPrices() {
   pricesEl.hidden = false;
   laneRow.hidden = true; // not lane-scoped; hide the lane tabs here
   priceRefresh.refresh();
+  // The same spend panel as Interpretation, in this page's right aside (its own
+  // instance), refreshed on entry. One fetch per entry: the run-select change handler
+  // only fires on a real change, never on route entry.
+  pricesSpend.refresh(state);
 }
 
 // Arrow-key roving focus for a segmented tablist.
@@ -223,8 +240,10 @@ function setupTheme() {
     localStorage.setItem("site-theme", next);
     // ECharts cannot re-theme a live instance, so rebuild the visible charts.
     if (router.current() === TRENDS_ROUTE) trends.rerenderFromCache();
-    // The spend panel's donuts are ECharts too -- rebuild them on the same toggle.
-    if (router.current() === INTERPRETATION_ROUTE) spend.rerenderFromCache();
+    // The spend panel's donuts are ECharts too -- rebuild whichever page's panel is
+    // showing (Interpretation and Prices each have their own instance).
+    if (router.current() === INTERPRETATION_ROUTE) interpSpend.rerenderFromCache();
+    if (router.current() === PRICES_ROUTE) pricesSpend.rerenderFromCache();
   });
 }
 
@@ -358,17 +377,21 @@ async function init() {
   // mount); spend.js owns the sibling panel, so a generation re-render never wipes
   // it. The outer #interpretation main stays the page region toggled by the router.
   interpretation.init(document.getElementById("interpretation-main"));
-  spend.init(document.getElementById("spend-panel"));
+  // One spend-panel instance per page, each bound to its own aside mount.
+  interpSpend = spend.create(document.getElementById(INTERP_SPEND_ID));
+  pricesSpend = spend.create(document.getElementById(PRICES_SPEND_ID));
   interpRail.init(document.getElementById("trends-interp-rail"));
   models.init(modelsEl);
-  priceRefresh.init(pricesEl);
+  // price-refresh.js owns the Prices content column (#prices-main), NOT the #prices
+  // shell, so its replaceChildren never wipes the sibling spend-panel aside.
+  priceRefresh.init(document.getElementById(PRICES_MAIN_ID));
   documentation.init(documentationEl);
   board.setActiveTab(app, tabs, state.lane);
 
   // A successful generation changes the spend totals; refresh the panel. The event
   // is dispatched by interpretation.js after a written run, keeping spend.js
   // decoupled (it never imports interpretation.js) while main.js owns `state`.
-  document.addEventListener("interpretation:generated", () => spend.refresh(state));
+  document.addEventListener("interpretation:generated", () => interpSpend.refresh(state));
 
   // Register routes (wires page-nav clicks/keys); do not dispatch until data loads.
   router.initRouter({
@@ -398,8 +421,10 @@ async function init() {
       interpretation.refresh(state);
       // The "This run" section is run-scoped, so a run change re-aggregates it
       // (month-to-date is unaffected but recomputes cheaply on the same call).
-      spend.refresh(state);
+      interpSpend.refresh(state);
     }
+    // The Prices page shows the same panel; keep it in sync on a run change too.
+    if (router.current() === PRICES_ROUTE) pricesSpend.refresh(state);
   });
 
   let runs;

@@ -113,12 +113,12 @@
                aria-label="Interpretation"></aside>
       </main>
 
-      <!-- Two stable mounts: interpretation.js owns #interpretation-main (it calls
-           replaceChildren on it), and spend.js owns #spend-panel beside it. Keeping
-           them as separate children means a generation re-render never wipes the
-           spend panel. -->
-      <main class="interpretation" id="interpretation" aria-live="polite" hidden>
-        <div id="interpretation-main"></div>
+      <!-- Two stable mounts on the shared .page-aside shell: interpretation.js owns
+           #interpretation-main (it calls replaceChildren on it), and a spend.js panel
+           instance owns the #spend-panel aside beside it. Keeping them as separate
+           children means a generation re-render never wipes the spend panel. -->
+      <main class="interpretation page-aside" id="interpretation" aria-live="polite" hidden>
+        <div id="interpretation-main" class="page-aside-main"></div>
         <aside class="glass-panel spend-panel" id="spend-panel" aria-label="LLM spend"></aside>
       </main>
 
@@ -126,10 +126,16 @@
            replaceChildren's it). A global admin surface, not run/lane scoped. -->
       <main class="models" id="models" aria-live="polite" hidden></main>
 
-      <!-- The price-refresh agent (price-refresh.js owns this region). Prices +
-           day-over-day deltas, the pending proposals review, a model dropdown, and a
-           Run button. A global admin surface, not run/lane scoped. -->
-      <main class="prices" id="prices" aria-live="polite" hidden></main>
+      <!-- The price-refresh agent on the shared .page-aside shell. price-refresh.js owns
+           #prices-main (it replaceChildren's it): prices + day-over-day deltas, the
+           pending proposals review, a model dropdown, and a Run button. A spend.js panel
+           instance owns the #prices-spend-panel aside beside it; mounting it as a sibling
+           of #prices-main (not a child) means a price-refresh re-render never wipes it.
+           A global admin surface, not run/lane scoped. -->
+      <main class="prices page-aside" id="prices" aria-live="polite" hidden>
+        <div id="prices-main" class="page-aside-main"></div>
+        <aside class="glass-panel spend-panel" id="prices-spend-panel" aria-label="LLM spend"></aside>
+      </main>
 
       <!-- Documentation: a filesystem-discovered docs browser (documentation.js owns
            this region; it replaceChildren's it). Read-only, not run/lane scoped. -->

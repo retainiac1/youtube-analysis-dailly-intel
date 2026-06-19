@@ -8,7 +8,7 @@
 
 import * as api from "./api.js";
 
-let el = null;             // the page mount (<main id="prices">)
+let el = null;             // the page content column (<div id="prices-main">)
 let pricesPanel = null;    // the prices/deltas panel body (repainted on reload)
 let reviewPanel = null;    // the review panel body (repainted on reload)
 let sourcesPanel = null;   // the "sources this run" provenance body (repainted on reload)

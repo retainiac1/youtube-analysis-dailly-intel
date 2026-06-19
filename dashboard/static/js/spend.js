@@ -1,4 +1,4 @@
-// Spend panel for the Interpretation page. Shows what the LLM runs have cost: two
+// Spend panel, reusable across pages. Shows what the LLM runs have cost: two
 // breakdowns, each split by model -- "This run" (the run in the picker) and "Month to
 // date" (the current Eastern calendar month). Read-only display.
 //
@@ -16,29 +16,14 @@
 //
 // Tokens are EXACT (thousands-separated); dollar cost is an ESTIMATE ("est." on the
 // total) and shown "unavailable" for any model absent from the price map.
+//
+// This module is a FACTORY: create(mount) returns one independent panel instance bound
+// to that mount (its own data cache, its own donut instances, its own resize listener).
+// Several panels (Interpretation, Prices, ...) therefore coexist with no shared state.
 
 /* global echarts */
 
 import * as api from "./api.js";
-
-let el = null;
-let lastData = null;
-// Live donut instances keyed by their mount element, so a window resize can re-flow
-// them and each render can dispose the previous ones (ECharts cannot re-theme live).
-const donutInstances = new Map();
-let resizeBound = false;
-
-export function init(mount) {
-  el = mount;
-  // Register the resize handler ONCE (not per render, or it would leak a listener
-  // every time the panel re-renders).
-  if (!resizeBound) {
-    window.addEventListener("resize", () => {
-      for (const inst of donutInstances.values()) inst.resize();
-    });
-    resizeBound = true;
-  }
-}
 
 function node(tag, opts = {}, children = []) {
   const n = document.createElement(tag);
@@ -224,59 +209,6 @@ function buildSection(title, data, emptyText, viz) {
   return { section: node("section", { class: "spend-section" }, children), pending };
 }
 
-function initDonut({ el: mountEl, priced, total, colorOf, viz }) {
-  const inst = echarts.init(mountEl);
-  inst.setOption({
-    animation: !(
-      window.matchMedia &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    ),
-    tooltip: {
-      trigger: "item",
-      formatter: (p) => `${p.name}<br/>$${usdFmt.format(p.value)} (${p.percent}%)`,
-    },
-    series: [{
-      type: "pie",
-      radius: [viz.donut_inner_radius, viz.donut_outer_radius],
-      center: ["50%", "50%"],
-      avoidLabelOverlap: false,
-      label: { show: false },
-      labelLine: { show: false },
-      // A panel-colored stroke separates adjacent slices so same-family mint stops
-      // never blur together.
-      itemStyle: { borderColor: themeColor("--bg-base", "#0a0f1a"), borderWidth: 2 },
-      data: priced.map((m) => ({
-        name: m.model,
-        value: m.cost,
-        itemStyle: { color: colorOf.get(m.model) },
-      })),
-    }],
-  });
-  donutInstances.set(mountEl, inst);
-  // The total sits in the ring's hole as an HTML overlay (not an ECharts title), so it
-  // is exactly centered via CSS and never grazes the ring. pointer-events:none keeps
-  // slice-hover tooltips working on the canvas beneath it.
-  mountEl.appendChild(node("div", { class: "spend-donut-center" }, [
-    node("span", { class: "spend-donut-amount", text: `$${usdFmt.format(total)}` }),
-    node("span", { class: "spend-donut-est", text: "est." }),
-  ]));
-}
-
-function renderError(message) {
-  disposeDonuts();
-  el.replaceChildren(
-    node("div", { class: "spend-empty empty-error" }, [
-      node("p", { class: "heading-sm", text: "Could not load spend." }),
-      node("p", { text: message }),
-    ]),
-  );
-}
-
-function disposeDonuts() {
-  for (const inst of donutInstances.values()) inst.dispose();
-  donutInstances.clear();
-}
-
 // The panel-level caption, shown once (not per scope): the tokens=blue / cost=mint key.
 // De-duplicates the legend the old layout repeated per scope.
 function topCaption(viz) {
@@ -296,41 +228,119 @@ function topCaption(viz) {
   ]);
 }
 
-function render(data) {
-  disposeDonuts();
-  const runLabel = data.run_date ? `This run · ${data.run_date}` : "This run";
-  const run = buildSection(runLabel, data.run, "No runs for this run yet.", data.viz);
-  const month = buildSection(
-    `Month to date · ${data.month}`, data.month_to_date,
-    "No runs this month yet.", data.viz,
-  );
-  const hasData =
-    data.run.per_model.length || data.month_to_date.per_model.length;
-  const children = [
-    node("h2", { class: "heading-sm spend-title", text: "LLM spend" }),
-  ];
-  if (hasData) children.push(topCaption(data.viz));
-  children.push(run.section, month.section);
-  el.replaceChildren(...children);
-  // Init donuts only after their mount elements are attached and sized.
-  if (run.pending) initDonut(run.pending);
-  if (month.pending) initDonut(month.pending);
-}
+// Create one panel instance bound to `mount`. All mutable state (the data cache, the
+// live donut instances, the resize listener) is closed over here, so two instances on
+// two pages never collide. The instance exposes refresh / rerenderFromCache / dispose.
+export function create(mount) {
+  const el = mount;
+  let lastData = null;
+  // Live donut instances keyed by their mount element, so a window resize can re-flow
+  // them and each render can dispose the previous ones (ECharts cannot re-theme live).
+  const donutInstances = new Map();
 
-// Re-render from the last fetched payload. Used by the theme toggle: ECharts cannot
-// re-theme a live instance, so the donuts must be disposed and rebuilt.
-export function rerenderFromCache() {
-  if (lastData) render(lastData);
-}
-
-export async function refresh(state) {
-  let data;
-  try {
-    data = await api.getSpend(state.runDate);
-  } catch (err) {
-    renderError(String(err.message || err));
-    return;
+  function disposeDonuts() {
+    for (const inst of donutInstances.values()) inst.dispose();
+    donutInstances.clear();
   }
-  lastData = data;
-  render(data);
+
+  function initDonut({ el: mountEl, priced, total, colorOf, viz }) {
+    const inst = echarts.init(mountEl);
+    inst.setOption({
+      animation: !(
+        window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ),
+      tooltip: {
+        trigger: "item",
+        formatter: (p) => `${p.name}<br/>$${usdFmt.format(p.value)} (${p.percent}%)`,
+      },
+      series: [{
+        type: "pie",
+        radius: [viz.donut_inner_radius, viz.donut_outer_radius],
+        center: ["50%", "50%"],
+        avoidLabelOverlap: false,
+        label: { show: false },
+        labelLine: { show: false },
+        // A panel-colored stroke separates adjacent slices so same-family mint stops
+        // never blur together.
+        itemStyle: { borderColor: themeColor("--bg-base", "#0a0f1a"), borderWidth: 2 },
+        data: priced.map((m) => ({
+          name: m.model,
+          value: m.cost,
+          itemStyle: { color: colorOf.get(m.model) },
+        })),
+      }],
+    });
+    donutInstances.set(mountEl, inst);
+    // The total sits in the ring's hole as an HTML overlay (not an ECharts title), so it
+    // is exactly centered via CSS and never grazes the ring. pointer-events:none keeps
+    // slice-hover tooltips working on the canvas beneath it.
+    mountEl.appendChild(node("div", { class: "spend-donut-center" }, [
+      node("span", { class: "spend-donut-amount", text: `$${usdFmt.format(total)}` }),
+      node("span", { class: "spend-donut-est", text: "est." }),
+    ]));
+  }
+
+  function renderError(message) {
+    disposeDonuts();
+    el.replaceChildren(
+      node("div", { class: "spend-empty empty-error" }, [
+        node("p", { class: "heading-sm", text: "Could not load spend." }),
+        node("p", { text: message }),
+      ]),
+    );
+  }
+
+  function render(data) {
+    disposeDonuts();
+    const runLabel = data.run_date ? `This run · ${data.run_date}` : "This run";
+    const run = buildSection(runLabel, data.run, "No runs for this run yet.", data.viz);
+    const month = buildSection(
+      `Month to date · ${data.month}`, data.month_to_date,
+      "No runs this month yet.", data.viz,
+    );
+    const hasData =
+      data.run.per_model.length || data.month_to_date.per_model.length;
+    const children = [
+      node("h2", { class: "heading-sm spend-title", text: "LLM spend" }),
+    ];
+    if (hasData) children.push(topCaption(data.viz));
+    children.push(run.section, month.section);
+    el.replaceChildren(...children);
+    // Init donuts only after their mount elements are attached and sized.
+    if (run.pending) initDonut(run.pending);
+    if (month.pending) initDonut(month.pending);
+  }
+
+  // Re-render from the last fetched payload. Used by the theme toggle: ECharts cannot
+  // re-theme a live instance, so the donuts must be disposed and rebuilt.
+  function rerenderFromCache() {
+    if (lastData) render(lastData);
+  }
+
+  async function refresh(state) {
+    let data;
+    try {
+      data = await api.getSpend(state.runDate);
+    } catch (err) {
+      renderError(String(err.message || err));
+      return;
+    }
+    lastData = data;
+    render(data);
+  }
+
+  // One resize listener per instance, re-flowing only THIS instance's donuts. Removed by
+  // dispose() so a torn-down panel leaves no listener (and no orphaned chart) behind.
+  const onResize = () => {
+    for (const inst of donutInstances.values()) inst.resize();
+  };
+  window.addEventListener("resize", onResize);
+
+  function dispose() {
+    window.removeEventListener("resize", onResize);
+    disposeDonuts();
+  }
+
+  return { refresh, rerenderFromCache, dispose };
 }

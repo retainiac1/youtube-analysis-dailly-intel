@@ -439,13 +439,13 @@ html { scroll-padding-top: var(--header-h, 0px); }
   font-size: 0.95rem;
 }
 
-/* --- Interpretation page (read-only prose) ------------------------------- */
-/* Two columns: the generate controls + interpretation card on the left (in
-   #interpretation-main, which interpretation.js owns), and the spend panel on the
-   right. Splitting the page into two stable children means a generation re-render
-   (interpretation.js replaceChildren on its own mount) never wipes the spend panel.
-   align-items: start so the sticky spend panel can ride its own column. */
-.interpretation {
+/* --- Reusable two-column page shell (content | right aside) -------------- */
+/* A page opts into the shell by giving its <main> .page-aside and wrapping its
+   primary content in a .page-aside-main child beside an <aside> slot. The grid
+   lives here ONCE, so Interpretation, Prices, and future pages share a single
+   definition rather than each redeclaring it. align-items: start so a sticky
+   aside (e.g. the spend panel) can ride its own column. */
+.page-aside {
   grid-column: 1 / -1; /* span full width when the rail/board are hidden */
   display: grid;
   grid-template-columns: 1fr 300px;
@@ -453,9 +453,15 @@ html { scroll-padding-top: var(--header-h, 0px); }
   align-items: start;
   min-height: 12rem;
 }
-/* min-width: 0 so the controls/card column does not overflow its track (mirrors
-   .trends-charts), keeping the spend panel at its fixed width beside it. */
-#interpretation-main { min-width: 0; }
+/* min-width: 0 so the content column does not overflow its track (mirrors
+   .trends-charts), keeping the aside at its fixed width beside it. */
+.page-aside-main { min-width: 0; }
+
+/* --- Interpretation page (read-only prose) ------------------------------- */
+/* Uses the .page-aside shell: #interpretation-main (generate controls +
+   interpretation card, owned by interpretation.js) on the left, the spend panel
+   aside on the right. Two stable children mean a generation re-render
+   (interpretation.js replaceChildren on its own mount) never wipes the panel. */
 /* Glass card carrying a subtle lane accent (left border) so the lane reads the
    same here as on the other pages; --lane-color is set on #app[data-lane]. */
 .interpretation-card {

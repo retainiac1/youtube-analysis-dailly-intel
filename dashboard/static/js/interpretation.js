@@ -354,8 +354,8 @@ async function onRun() {
         thinking: res.thinking,
       });
       // A written run logged a new invocation, so the spend totals changed. Notify
-      // the spend panel (main.js routes this to spend.refresh). Only the written
-      // branch: a skipped lane logs nothing, so spend is unchanged.
+      // the spend panel (main.js routes this to the Interpretation panel's refresh).
+      // Only the written branch: a skipped lane logs nothing, so spend is unchanged.
       document.dispatchEvent(new CustomEvent("interpretation:generated"));
     }
   } catch (err) {
