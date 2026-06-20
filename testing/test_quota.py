@@ -126,11 +126,21 @@ def _budget(guard=False):
 
 
 def test_pick_status_precedence():
-    assert swipefile._pick_status(_budget(guard=True), True, True, True) == "quota_guard_stop"
-    assert swipefile._pick_status(_budget(), True, True, True) == "quota_exceeded"
-    assert swipefile._pick_status(_budget(), False, True, True) == "partial"
-    assert swipefile._pick_status(_budget(), False, False, True) == "discover_downgraded_to_refresh"
-    assert swipefile._pick_status(_budget(), False, False, False) == "success"
+    # signature: (budget, quota_aborted, persist_partial, downgraded, classify_budget)
+    assert swipefile._pick_status(_budget(guard=True), True, True, True, True) == "quota_guard_stop"
+    assert swipefile._pick_status(_budget(), True, True, True, True) == "quota_exceeded"
+    # The classify breaker ranks below the two YouTube quota stops but above partial.
+    assert swipefile._pick_status(_budget(), False, True, True, True) == "classify_budget_stop"
+    assert swipefile._pick_status(_budget(), False, True, True, False) == "partial"
+    assert swipefile._pick_status(_budget(), False, False, True, False) == "discover_downgraded_to_refresh"
+    assert swipefile._pick_status(_budget(), False, False, False, False) == "success"
+
+
+def test_pick_status_youtube_quota_wins_over_classify_breaker():
+    # Both a reactive YouTube quota stop AND the classify breaker fired: the
+    # not-retryable-today daily blocker wins the label (so the run maps to EXIT_QUOTA).
+    assert swipefile._pick_status(
+        _budget(), True, False, False, True) == "quota_exceeded"
 
 
 # --- _discover_done_today ---------------------------------------------------

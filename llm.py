@@ -57,7 +57,19 @@ class LLMError(Exception):
     an out-of-range temperature, or a malformed model string. A plain Exception
     (not ConfigError) — these are runtime provider failures, distinct from config
     validation — so the Phase 3 endpoint can catch it and return a clean error
-    payload instead of a 500. Messages name the offending provider."""
+    payload instead of a 500. Messages name the offending provider.
+
+    `status_code` and `retry_after_seconds` are OPTIONAL structured hints, set only
+    by adapters that can extract them (currently the google adapter, from the
+    APIError code + a RetryInfo retryDelay). They let a retry layer tell a 429
+    apart from a 503 and honor a provider's backoff hint WITHOUT parsing the
+    message string. Both default None so every existing raise site is unchanged."""
+
+    def __init__(self, *args, status_code: int | None = None,
+                 retry_after_seconds: float | None = None):
+        super().__init__(*args)
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass
@@ -183,6 +195,29 @@ def _api_error_base(provider: str):
 
 
 # --- key + temperature helpers ---------------------------------------------
+
+# Provider -> the environment variable holding its API key. ONE source so the
+# client factories and the api_key_present check (used by the classification
+# preflight's missing-key warning) agree. Local providers (ollama) need no key.
+PROVIDER_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "xai": "XAI_API_KEY",
+    "google": "GEMINI_API_KEY",
+}
+
+
+def api_key_present(provider: str) -> bool:
+    """True when `provider` can authenticate: a local provider always can, otherwise
+    its PROVIDER_KEY_ENV variable must be set and non-empty. Reads only (.env is loaded
+    at import). Lets a caller warn BEFORE a run that a configured provider has no key,
+    so a 'validate the provider is up first' failover does not quietly degrade to a
+    single provider unnoticed."""
+    if provider in config.LOCAL_PROVIDERS:
+        return True
+    env = PROVIDER_KEY_ENV.get(provider)
+    return bool(env and os.getenv(env))
+
 
 def _require_key(env_var: str, provider: str) -> str:
     """Return the API key from os.environ, or raise a provider-named LLMError.
@@ -324,6 +359,37 @@ def _generate_xai(model_id, prompt, *, temperature, seed, supports_temperature,
                           think_applied=(None if think is None else int(think)))
 
 
+def _parse_google_retry_delay(details) -> float | None:
+    """Extract the RetryInfo retryDelay (seconds) from a google APIError's parsed
+    JSON body, or None when absent/malformed. Defensive throughout (the body is
+    attacker-shaped external JSON): a non-dict body, a missing/renamed details
+    list, no RetryInfo entry, or an unparseable "33s" all yield None rather than
+    raising. The value is NEVER hardcoded (no literal 13/33); it is read here and
+    only here. Handles both a top-level body and the common error-nested shape
+    {"error": {"details": [...]}}."""
+    if not isinstance(details, dict):
+        return None
+    body = details.get("error", details)
+    if not isinstance(body, dict):
+        return None
+    entries = body.get("details")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if not str(entry.get("@type", "")).endswith("RetryInfo"):
+            continue
+        raw = entry.get("retryDelay")
+        if not isinstance(raw, str) or not raw.endswith("s"):
+            return None
+        try:
+            return float(raw[:-1])
+        except ValueError:
+            return None
+    return None
+
+
 def _generate_google(model_id, prompt, *, temperature, seed, supports_temperature,
                      think=None, max_tokens=None):
     # Gemini: temperature 0.0-2.0 and seed both ride in GenerateContentConfig, each
@@ -346,7 +412,14 @@ def _generate_google(model_id, prompt, *, temperature, seed, supports_temperatur
             model=model_id, contents=prompt, config=config
         )
     except _api_error_base("google") as e:
-        raise LLMError(f"google: {e}") from e
+        # Surface the HTTP status (429 RESOURCE_EXHAUSTED / 503 UNAVAILABLE) and a
+        # 429's retryDelay so the classify retry layer can back off intelligently
+        # without re-parsing the message. `code`/`details` are APIError attributes;
+        # guard with getattr so a stub or future shape never turns this into a 500.
+        status_code = getattr(e, "code", None)
+        retry_after = _parse_google_retry_delay(getattr(e, "details", None))
+        raise LLMError(f"google: {e}", status_code=status_code,
+                       retry_after_seconds=retry_after) from e
     usage = resp.usage_metadata
     return GenerateResult(resp.text, usage.prompt_token_count,
                           usage.candidates_token_count, seed_applied=seed,

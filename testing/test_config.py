@@ -54,6 +54,15 @@ def make_good_config() -> SimpleNamespace:
             "user_agent": "Mozilla/5.0 (Test) Chrome/124.0",
         },
         EXTRACTION_MODEL="anthropic:claude-haiku-4-5",
+        CLASSIFICATION_ENABLED=True,
+        CLASSIFICATION_MODEL="google:gemini-2.5-flash-lite",
+        CLASSIFICATION_FALLBACK_MODEL="anthropic:claude-haiku-4-5",
+        CLASSIFICATION_RETRY={
+            "max_retries": 1,
+            "base_backoff_seconds": 1.0,
+            "max_backoff_seconds": 30.0,
+            "max_fallback_videos": 150,
+        },
         PRICE_SOURCES={
             "anthropic": "https://a/official",
             "openai": "https://o/official",
@@ -113,6 +122,108 @@ def test_bool_is_rejected_for_int_key():
     cfg.TOP_N = True  # bool is an int subclass; must still be rejected
     with pytest.raises(config.ConfigError, match="TOP_N"):
         config.validate_config(cfg)
+
+
+def test_classification_model_bad_string_raises():
+    cfg = make_good_config()
+    cfg.CLASSIFICATION_MODEL = "no-colon-here"
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_MODEL"):
+        config.validate_config(cfg)
+
+
+def test_classification_fallback_same_provider_raises():
+    cfg = make_good_config()
+    # Both google -> the backup would be dead exactly when the primary's provider is.
+    cfg.CLASSIFICATION_FALLBACK_MODEL = "google:gemini-2.5-pro"
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_FALLBACK_MODEL"):
+        config.validate_config(cfg)
+
+
+# --- CLASSIFICATION_RETRY (the classify retry/backoff/breaker policy) -------
+# An otherwise-valid config with one bad CLASSIFICATION_RETRY key; the error must
+# name CLASSIFICATION_RETRY so a hand-edit typo is unambiguous.
+
+def test_classification_retry_missing_key_raises():
+    cfg = make_good_config()
+    del cfg.CLASSIFICATION_RETRY["max_fallback_videos"]
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_RETRY"):
+        config.validate_config(cfg)
+
+
+def test_classification_retry_max_retries_must_be_positive_int():
+    cfg = make_good_config()
+    cfg.CLASSIFICATION_RETRY["max_retries"] = 0
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_RETRY"):
+        config.validate_config(cfg)
+
+
+def test_classification_retry_max_retries_bool_rejected():
+    cfg = make_good_config()
+    cfg.CLASSIFICATION_RETRY["max_retries"] = True  # bool is an int subclass
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_RETRY"):
+        config.validate_config(cfg)
+
+
+def test_classification_retry_base_gt_max_raises():
+    cfg = make_good_config()
+    cfg.CLASSIFICATION_RETRY["base_backoff_seconds"] = 60.0  # > max_backoff_seconds
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_RETRY"):
+        config.validate_config(cfg)
+
+
+def test_classification_retry_max_fallback_videos_zero_raises():
+    cfg = make_good_config()
+    cfg.CLASSIFICATION_RETRY["max_fallback_videos"] = 0
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_RETRY"):
+        config.validate_config(cfg)
+
+
+def test_classification_retry_max_fallback_videos_negative_raises():
+    cfg = make_good_config()
+    cfg.CLASSIFICATION_RETRY["max_fallback_videos"] = -5
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_RETRY"):
+        config.validate_config(cfg)
+
+
+def test_classification_retry_backoff_must_be_positive():
+    cfg = make_good_config()
+    cfg.CLASSIFICATION_RETRY["base_backoff_seconds"] = 0.0
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_RETRY"):
+        config.validate_config(cfg)
+
+
+# --- EXIT_CLASSIFY_BUDGET: distinct exit code for the fallback breaker -------
+
+def test_exit_classify_budget_is_distinct_code():
+    # 8, outside the 2..7 contract range, and not colliding with any existing code.
+    assert config.EXIT_CLASSIFY_BUDGET == 8
+    existing = {config.EXIT_OK, config.EXIT_NETWORK, config.EXIT_QUOTA,
+                config.EXIT_AUTH, config.EXIT_OTHER, config.EXIT_DB_LOCKED,
+                config.EXIT_NO_ROWS}
+    assert config.EXIT_CLASSIFY_BUDGET not in existing
+
+
+def test_classification_enabled_must_be_bool():
+    cfg = make_good_config()
+    cfg.CLASSIFICATION_ENABLED = "yes"
+    with pytest.raises(config.ConfigError, match="CLASSIFICATION_ENABLED"):
+        config.validate_config(cfg)
+
+
+def test_classification_cap_is_reasoning_aware_per_provider():
+    # The fallback's cap must absorb hidden reasoning tokens; the primary's need not.
+    # Covers both axes (provider + is_reasoning) the cap factory keys on.
+    seeds = {m["model"]: m for m in config.SEED_MODELS}
+    nano = seeds["openai:gpt-5.4-nano"]
+    gemini = seeds["google:gemini-2.5-flash-lite"]
+    assert nano["is_reasoning"] == 1 and nano["supports_temperature"] == 0
+    assert gemini["is_reasoning"] == 0
+    assert config.default_max_tokens("openai", nano["is_reasoning"]) == \
+        config.DEFAULT_MAX_TOKENS_REASONING
+    assert config.default_max_tokens("google", gemini["is_reasoning"]) == \
+        config.DEFAULT_MAX_TOKENS
+    # A local provider stays uncapped regardless of the reasoning axis.
+    assert config.default_max_tokens("ollama", True) is None
 
 
 def test_invalid_bucket_raises_named_error():

@@ -20,7 +20,10 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
+import classify
+import config
 import db
+import llm
 from config import (
     BLOCKED_CATEGORY_IDS,
     CATEGORIES_QUOTA_COST,
@@ -49,6 +52,7 @@ from config import (
     VALID_BUCKETS,
     VIDEOS_QUOTA_COST,
     EXIT_AUTH,
+    EXIT_CLASSIFY_BUDGET,
     EXIT_DB_LOCKED,
     EXIT_NETWORK,
     EXIT_NO_ROWS,
@@ -77,6 +81,7 @@ _EXIT_REASON = {
     EXIT_OTHER: "other",
     EXIT_DB_LOCKED: "db_locked",
     EXIT_NO_ROWS: "no_rows",
+    EXIT_CLASSIFY_BUDGET: "classify_budget_exceeded",
 }
 
 
@@ -165,7 +170,7 @@ def _classify_video(video: dict, min_views: int, max_duration: int,
 
     if not within_window(snippet.get("publishedAt", ""), cutoff_dt):
         return "window"
-    if status.get("madeForKids", False):
+    if status.get("madeForKids", False) or status.get("selfDeclaredMadeForKids", False):
         return "made_for_kids"
     if snippet.get("categoryId", "") in BLOCKED_CATEGORY_IDS:
         return "category"
@@ -1182,6 +1187,313 @@ def _build_records(state: dict, seen_videos: dict[str, dict],
     return video_records, snapshot_args, channel_records
 
 
+# --- Phase A.5: English-only + no-kids LLM classification -------------------
+# Runs after dedupe and BEFORE the channel/comment phases, so a rejected video never
+# incurs their quota. The verdict is a binary the YouTube API cannot express. The core
+# logic lives in classify.py (DB/llm-free); here we BIND the real llm.generate + db
+# logging and orchestrate preflight + per-video failover, mirroring how
+# price_refresh.daily binds extraction.
+
+# Best-effort fixed seed (low temperature does the real variance reduction). NOTE: it
+# buys NO reproducibility on the reasoning fallback (nano's reasoning is on and
+# OpenAI's seed is deprecated) — only the gemini primary's verdicts are diffable across
+# runs. Do not treat nano classify output as deterministic.
+CLASSIFY_SEED = 7
+
+# Scope under which each classification call is logged to llm_invocations, so its cost
+# (including reasoning-token spend on the fallback) flows into the spend panel.
+_CLASSIFY_SCOPE = "video_classification"
+
+# A trivial preflight prompt: we only care that the provider answers without an
+# LLMError (key present, provider reachable), not that the body parses.
+_PREFLIGHT_PROMPT = (
+    'Reply with this exact JSON and nothing else: '
+    '{"english": true, "kids_targeted": false, "kids_subject": false, '
+    '"reason": "preflight"}'
+)
+
+
+def _make_classify_generate(conn, model: str, run_date: str):
+    """Return a `generate_fn(prompt) -> GenerateResult` bound to `model`, reading its
+    capability flags + the model-aware output cap from the registry ONCE and logging
+    each call to llm_invocations. The cap comes from config.default_max_tokens so a
+    reasoning fallback (nano) gets the generous ceiling its hidden reasoning needs
+    instead of being starved. Provider failures propagate as llm.LLMError (the phase
+    owns retry/failover). An unknown model raises ValueError."""
+    flags = db.fetch_model(conn, model)
+    if flags is None:
+        raise ValueError(f"unknown classification model {model!r}")
+    provider, _ = llm.split_model(model)
+    max_tokens = config.default_max_tokens(provider, bool(flags["is_reasoning"]))
+
+    def generate_fn(prompt: str):
+        start = time.monotonic()
+        result = llm.generate(
+            model, prompt, temperature=0.0, seed=CLASSIFY_SEED,
+            supports_temperature=bool(flags["supports_temperature"]),
+            supports_seed=bool(flags["supports_seed"]),
+            is_reasoning=bool(flags["is_reasoning"]),
+            max_tokens=max_tokens)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        now = now_local_iso()
+
+        def _log() -> None:
+            with db.transaction(conn):
+                db.log_invocation(
+                    conn, run_date, _CLASSIFY_SCOPE, model, 0.0,
+                    result.seed_applied, None, result.input_tokens,
+                    result.output_tokens, now, duration_ms=duration_ms)
+
+        db.run_with_db_retry(_log)
+        return result
+
+    return generate_fn
+
+
+def _preflight_classifiers(models: list[str], generate_fns: dict) -> set[str]:
+    """Probe each model's provider with a trivial call; return the set of models whose
+    provider answered (no llm.LLMError). A failure is warned, not fatal — the other
+    model may still be alive."""
+    alive: set[str] = set()
+    for model in models:
+        try:
+            generate_fns[model](_PREFLIGHT_PROMPT)
+            alive.add(model)
+        except llm.LLMError as e:
+            print(f"Classification preflight: {model} unavailable ({e})",
+                  file=sys.stderr)
+    return alive
+
+
+def _retry_backoff_seconds(exc, attempt: int, retry_cfg: dict) -> float:
+    """How long to wait before the next retry of a failed primary/fallback attempt.
+    A 429 RESOURCE_EXHAUSTED honors the provider's retryDelay when present (read off
+    the LLMError, never hardcoded), capped at max_backoff_seconds; a 429 without a
+    hint and a 503 UNAVAILABLE use exponential backoff base * 2**attempt (also
+    capped). Any other failure (a parse glitch / unclassified provider error) gets no
+    wait: it is not a throttle, so an immediate retry is correct. `attempt` is the
+    zero-based index of the attempt that just failed."""
+    status = getattr(exc, "status_code", None)
+    cap = retry_cfg["max_backoff_seconds"]
+    if status == 429:
+        retry_after = getattr(exc, "retry_after_seconds", None)
+        if retry_after is not None:
+            return min(retry_after, cap)
+        return min(retry_cfg["base_backoff_seconds"] * (2 ** attempt), cap)
+    if status == 503:
+        return min(retry_cfg["base_backoff_seconds"] * (2 ** attempt), cap)
+    return 0.0
+
+
+def _attempt_model(video: dict, gen, retry_cfg: dict) -> tuple:
+    """Run one model over `video` with bounded retries, returning
+    (Verdict, was_429) on success or (None, was_429) once retries are exhausted.
+    Attempts = 1 + retry_cfg['max_retries'] (so max_retries=1 => 2 attempts). 429/503
+    and a ClassificationError are all retried (the phase owns the policy); the sleep
+    between attempts is _retry_backoff_seconds. `was_429` reports whether the FINAL
+    failure was a 429 RESOURCE_EXHAUSTED, so the caller can make stickiness depend on
+    the durable signal alone."""
+    max_retries = retry_cfg["max_retries"]
+    was_429 = False
+    last = None
+    for attempt in range(max_retries + 1):
+        try:
+            return classify.classify_video(video, generate_fn=gen), was_429
+        except (llm.LLMError, classify.ClassificationError) as e:
+            last = e
+            was_429 = getattr(e, "status_code", None) == 429
+            if attempt < max_retries:
+                delay = _retry_backoff_seconds(e, attempt, retry_cfg)
+                if delay > 0:
+                    time.sleep(delay)
+    print(f"  classify: model failed for {video.get('id')} after "
+          f"{max_retries + 1} attempts: {last}", file=sys.stderr)
+    return None, was_429
+
+
+def _classify_one(video: dict, model_order: list[str], generate_fns: dict,
+                  runtime: dict, retry_cfg: dict):
+    """Classify `video`: try the in-use (primary) model with bounded retries, then
+    fail over to the fallback (also with bounded retries) before giving up. Returns
+    (Verdict, model_used), or (None, None) when every attempt fails OR the fallback
+    spend breaker trips (signaled via runtime['budget_exhausted']).
+
+    Stickiness is gated on the DURABLE signal only: when the primary exhausts its
+    retries on a 429 (free-tier quota gone for the window), runtime['primary_exhausted']
+    is set so every subsequent video skips the primary and fails straight over. A 503
+    or a parse glitch fails over THIS video only and leaves the primary live. The
+    breaker checks runtime['fallback_count'] BEFORE spending on the fallback, so the
+    tripping video never incurs a wasted paid call."""
+    in_use = model_order[0]
+    fallback = model_order[1] if len(model_order) > 1 else None
+
+    if not runtime["primary_exhausted"]:
+        verdict, was_429 = _attempt_model(video, generate_fns[in_use], retry_cfg)
+        if verdict is not None:
+            return verdict, in_use
+        # in_use exhausted. Only a 429 (with a fallback to go to) condemns the run.
+        if was_429 and fallback is not None and not runtime["primary_exhausted"]:
+            runtime["primary_exhausted"] = True
+            print(f"  classify: primary {in_use} throttled (429); failing over to "
+                  f"{fallback} for remaining videos", file=sys.stderr)
+
+    if fallback is None:
+        return None, None
+
+    # Fallback spend breaker: stop BEFORE the call that would exceed the per-run cap.
+    if runtime["fallback_count"] >= retry_cfg["max_fallback_videos"]:
+        runtime["budget_exhausted"] = True
+        return None, None
+    runtime["fallback_count"] += 1
+    verdict, _ = _attempt_model(video, generate_fns[fallback], retry_cfg)
+    if verdict is not None:
+        return verdict, fallback
+    return None, None
+
+
+def _classify_survivors(state: dict, seen_videos: dict, query_map: dict,
+                        in_use: str, model_order: list[str], generate_fns: dict
+                        ) -> tuple:
+    """Classify every survivor (skipping cache hits stamped with the current in-use
+    model + prompt version), prune `seen_videos`/`query_map` of drops in place, and
+    return (tally, budget_exhausted). Fail-closed: a video whose every attempt errors
+    is dropped and counted under classify_error. A mid-run mass failure (>half of
+    THIS-run attempts, once at least 4 were attempted) raises ClassificationUnavailable:
+    a provider degraded after preflight, and silently emptying the board is wrong.
+
+    Retry/failover policy is per-video and run-scoped via `runtime`: bounded retries
+    honoring 429 retryDelay / 503 backoff, sticky failover ONLY on a 429 primary
+    exhaust, and the per-run fallback spend breaker. When the breaker trips,
+    budget_exhausted is returned True and `seen_videos`/`query_map` are pruned down to
+    ONLY the classified-and-kept survivors (the unprocessed remainder is dropped so no
+    unclassified video reaches the board), for the caller's single board write."""
+    cache = state.setdefault("classification", {})
+    retry_cfg = config.CLASSIFICATION_RETRY
+    runtime = {"primary_exhausted": False, "fallback_count": 0,
+               "budget_exhausted": False}
+    tally = {"kept": 0, "not_english": 0, "kids": 0, "classify_error": 0}
+    tokens: dict[str, list[int]] = {}            # model -> [input, output]
+    attempts = errors = 0
+    dropped: list[str] = []
+    budget_tripped = False
+    survivors = list(seen_videos.items())
+    for idx, (vid, video) in enumerate(survivors, 1):
+        cached = cache.get(vid)
+        if not (cached and cached.get("model") == in_use
+                and cached.get("prompt_version") == classify.CLASSIFY_PROMPT_VERSION):
+            verdict, model_used = _classify_one(
+                video, model_order, generate_fns, runtime, retry_cfg)
+            if runtime["budget_exhausted"]:
+                # Breaker tripped BEFORE any fallback spend on this video: stop here
+                # and persist only what was already classified-and-kept.
+                budget_tripped = True
+                break
+            attempts += 1
+            if verdict is None:
+                errors += 1
+                cached = {"english": False, "kids_targeted": False,
+                          "kids_subject": False, "reason": "classify_error",
+                          "model": in_use,
+                          "prompt_version": classify.CLASSIFY_PROMPT_VERSION,
+                          "keep": False, "error": True}
+            else:
+                tok = tokens.setdefault(model_used, [0, 0])
+                tok[0] += verdict.input_tokens
+                tok[1] += verdict.output_tokens
+                cached = {"english": verdict.english,
+                          "kids_targeted": verdict.kids_targeted,
+                          "kids_subject": verdict.kids_subject,
+                          "reason": verdict.reason, "model": model_used,
+                          "prompt_version": classify.CLASSIFY_PROMPT_VERSION,
+                          "keep": verdict.keep, "error": False}
+            cache[vid] = cached
+            if idx % 10 == 0:
+                save_state(state)
+            # Mass-failure guard, counted over THIS run's attempts only (cache hits
+            # excluded): a provider that died after preflight should abort, not quietly
+            # empty the board.
+            if attempts >= 4 and errors * 2 > attempts:
+                save_state(state)
+                raise classify.ClassificationUnavailable(
+                    f"classification failing for most videos ({errors}/{attempts} "
+                    "attempts); aborting rather than emptying the board")
+
+        if cached["keep"]:
+            tally["kept"] += 1
+        else:
+            dropped.append(vid)
+            if cached.get("error"):
+                tally["classify_error"] += 1
+            elif not cached["english"]:
+                tally["not_english"] += 1
+            else:
+                tally["kids"] += 1
+
+    if budget_tripped:
+        # Prune to ONLY classified-and-kept survivors: this sweeps out both the drops
+        # and the unprocessed remainder in one pass, so the caller's single board write
+        # never persists an unclassified video.
+        kept_ids = {v for v in seen_videos if cache.get(v, {}).get("keep")}
+        for vid in list(seen_videos):
+            if vid not in kept_ids:
+                seen_videos.pop(vid, None)
+                query_map.pop(vid, None)
+        print(f"  fallback budget ({retry_cfg['max_fallback_videos']}) exceeded after "
+              f"primary throttle, persisted {len(kept_ids)} classified, aborting run",
+              file=sys.stderr)
+    else:
+        for vid in dropped:
+            seen_videos.pop(vid, None)
+            query_map.pop(vid, None)
+    save_state(state)
+
+    cost = sum(
+        (llm.estimate_cost(m, t[0], t[1], config.PRICES) or 0.0)
+        for m, t in tokens.items())
+    per_model = ", ".join(
+        f"{m} in={t[0]} out={t[1]}" for m, t in tokens.items()) or "no live calls"
+    print(f"Classification: kept {tally['kept']}, not_english "
+          f"{tally['not_english']}, kids {tally['kids']}, classify_error "
+          f"{tally['classify_error']} (in_use={in_use})", file=sys.stderr)
+    print(f"  classify cost: ${cost:.4f} ({per_model})", file=sys.stderr)
+    return tally, budget_tripped
+
+
+def _run_classification_phase(conn, state: dict, seen_videos: dict,
+                              query_map: dict, run_date: str) -> tuple:
+    """Phase A.5: resolve primary + fallback classifier models, warn on any missing
+    API key, preflight both providers, and classify all survivors with failover. If
+    BOTH providers fail preflight, raise ClassificationUnavailable (we cannot guarantee
+    English and must neither leak nor silently empty the board). Returns
+    (tally, budget_exhausted) so the caller can map a fallback-spend-breaker trip to
+    its own exit code."""
+    if not seen_videos:                              # nothing to classify; no LLM calls
+        return {"kept": 0, "not_english": 0, "kids": 0, "classify_error": 0}, False
+    primary = classify.active_classification_model(conn)
+    fallback = classify.active_classification_fallback_model(conn)
+    models = [primary, fallback]
+    for model in models:
+        provider, _ = llm.split_model(model)
+        if not llm.api_key_present(provider):
+            print(f"WARNING: no API key for classifier provider {provider!r} "
+                  f"({model}); failover may be unavailable", file=sys.stderr)
+
+    generate_fns = {m: _make_classify_generate(conn, m, run_date) for m in models}
+    print(f"Classifying {len(seen_videos)} videos "
+          f"(primary={primary}, fallback={fallback})...", file=sys.stderr)
+    alive = _preflight_classifiers(models, generate_fns)
+    if not alive:
+        raise classify.ClassificationUnavailable(
+            f"both classifier providers unavailable ({primary}, {fallback})")
+
+    # In-use = primary when alive, else the fallback. Per-video order tries the in-use
+    # provider first, then the other ONLY if it passed preflight (never a known-dead one).
+    model_order = [m for m in models if m in alive]
+    in_use = model_order[0]
+    return _classify_survivors(state, seen_videos, query_map, in_use,
+                               model_order, generate_fns)
+
+
 def _persist_all(conn, run_id: int, video_records: list[dict],
                  channel_records: list[dict], snapshot_args, now: str) -> bool:
     """Persist videos (fatal on failure), then channels and snapshots (non-fatal:
@@ -1208,18 +1520,32 @@ def _persist_all(conn, run_id: int, video_records: list[dict],
 
 
 def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict,
-                  today_pac: str, run_date: str) -> tuple[int, bool, bool]:
+                  today_pac: str, run_date: str) -> tuple[int, bool, bool, bool]:
     """Discover mode (expensive): run the search/channel/comment phases, persist
     everything, and recompute rankings. `run_date` is the Eastern rankings key
     captured once in main() and threaded to the rankings write. Returns
-    (videos_seen, quota_aborted, persist_partial)."""
+    (videos_seen, quota_aborted, persist_partial, classify_budget_exhausted)."""
     all_results, quota_aborted = _run_search_phase(youtube, state, budget, conn, today_pac)
 
     seen_videos, query_map = dedupe_videos(all_results)
     print(f"\n{len(seen_videos)} unique videos after dedup", file=sys.stderr)
 
-    channel_map = _run_channel_phase(youtube, state, seen_videos, budget)
-    _run_comment_phase(youtube, state, seen_videos, budget)
+    # Phase A.5: drop non-English and kids content BEFORE spending channel/comment
+    # quota on them. Skipped entirely when disabled (cheap gates still applied above).
+    classify_budget_exhausted = False
+    if config.CLASSIFICATION_ENABLED:
+        _, classify_budget_exhausted = _run_classification_phase(
+            conn, state, seen_videos, query_map, run_date)
+        print(f"{len(seen_videos)} videos after classification", file=sys.stderr)
+
+    # The fallback spend breaker aborts the run: skip the (quota-spending) channel and
+    # comment phases entirely and persist only the survivors classified so far. The
+    # board write below tolerates an empty channel_map (records default via .get()).
+    if not classify_budget_exhausted:
+        channel_map = _run_channel_phase(youtube, state, seen_videos, budget)
+        _run_comment_phase(youtube, state, seen_videos, budget)
+    else:
+        channel_map = {}
 
     now = now_local_iso()
     video_records, snapshot_args, channel_records = _build_records(
@@ -1237,7 +1563,7 @@ def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict
         persist_partial = True
         print(f"WARNING: ranking phase failed, continuing: {e}", file=sys.stderr)
 
-    return len(seen_videos), quota_aborted, persist_partial
+    return len(seen_videos), quota_aborted, persist_partial, classify_budget_exhausted
 
 
 def _discover_done_today(conn, today_pac: str) -> bool:
@@ -1253,14 +1579,20 @@ def _discover_done_today(conn, today_pac: str) -> bool:
 
 
 def _pick_status(budget: "QuotaBudget", quota_aborted: bool,
-                 persist_partial: bool, downgraded: bool) -> str:
+                 persist_partial: bool, downgraded: bool,
+                 classify_budget_exhausted: bool = False) -> str:
     """Resolve the terminal run_log status. Order matters: a proactive guard stop
     and a reactive quota stop are the most urgent signals; a downgrade is recorded
-    distinctly (never as a plain success) only on an otherwise-clean run."""
+    distinctly (never as a plain success) only on an otherwise-clean run. The classify
+    fallback-spend breaker (classify_budget_stop) is ranked AFTER the two YouTube quota
+    stops so that, when both fire in one run, the not-retryable-today daily blocker
+    wins the label; it sits ABOVE persist_partial because it aborted the run."""
     if budget.guard_stopped:
         return "quota_guard_stop"
     if quota_aborted:
         return "quota_exceeded"
+    if classify_budget_exhausted:
+        return "classify_budget_stop"
     if persist_partial:
         return "partial"
     if downgraded:
@@ -1386,8 +1718,10 @@ def main() -> int:
             # finally block below like every other call.
             _run_category_phase(youtube, conn, budget, CATEGORY_REGION, now_local_iso())
 
+            classify_budget_exhausted = False
             if mode == "discover":
-                videos_seen, quota_aborted, persist_partial = _run_discover(
+                (videos_seen, quota_aborted, persist_partial,
+                 classify_budget_exhausted) = _run_discover(
                     youtube, conn, run_id, budget, state, today_pac, run_date
                 )
             else:
@@ -1395,7 +1729,8 @@ def main() -> int:
                     youtube, conn, run_id, budget, now_local_iso(), run_date
                 )
 
-            status = _pick_status(budget, quota_aborted, persist_partial, downgraded)
+            status = _pick_status(budget, quota_aborted, persist_partial, downgraded,
+                                  classify_budget_exhausted)
             # Only a clean discover clears the resume cache; an aborted/partial discover
             # keeps it, and refresh never touches it.
             if mode == "discover" and status == "success":
@@ -1426,10 +1761,13 @@ def main() -> int:
             except Exception as e:
                 print(f"WARNING: finish_run failed (ignored): {e}", file=sys.stderr)
 
-        # Clean (no-exception) classification. Order: quota stop first, then the
-        # discover-only no-rows check, else success.
+        # Clean (no-exception) classification. Order: YouTube quota stop first (so a
+        # both-fire run reports quota, not the breaker), then the classify fallback-spend
+        # breaker, then the discover-only no-rows check, else success.
         if status in QUOTA_STOP_STATUSES:
             code = EXIT_QUOTA
+        elif status == "classify_budget_stop":
+            code = EXIT_CLASSIFY_BUDGET
         elif mode == "discover" and \
                 db.count_rankings_for_run_date(conn, run_date) == 0:  # resolved mode, not args.discover
             code = EXIT_NO_ROWS

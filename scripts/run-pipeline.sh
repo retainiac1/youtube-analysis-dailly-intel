@@ -48,4 +48,14 @@ else
   fi
 fi
 
-exec .venv/bin/python swipefile.py "$@"
+# Run the pipeline and PRESERVE its contract exit code for the scheduler. Not
+# `exec`: we branch on the code first so the fallback-spend breaker (exit 8, net-new
+# to the 2..7 set) surfaces as a distinct, greppable operational alert rather than a
+# silent net-new code. `|| exit_code=$?` captures a non-zero exit without tripping
+# `set -e`; every other code passes through unchanged.
+exit_code=0
+.venv/bin/python swipefile.py "$@" || exit_code=$?
+if [ "$exit_code" -eq 8 ]; then
+  echo "ALERT: classify fallback-spend breaker tripped (exit 8): Gemini throttled, per-run Haiku cap reached" >&2
+fi
+exit "$exit_code"

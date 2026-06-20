@@ -132,6 +132,32 @@ user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
 # per-model accuracy baseline in the fixtures (see price_refresh/fixtures).
 EXTRACTION_MODEL = "anthropic:claude-haiku-4-5"
 
+# English-only + no-kids LLM gate over each discovered video (a binary classification the
+# YouTube API cannot express). CLASSIFICATION_ENABLED turns the phase off without code
+# changes. CLASSIFICATION_MODEL is the primary (cheapest non-local); FALLBACK_MODEL is a
+# DIFFERENT-provider backup used when the primary provider is unreachable (validate_config
+# enforces the different-provider rule). Capability flags + the output-token cap are read
+# from the models table at call time. The model in effect resolves through
+# classify.active_classification_model (an app_preferences override wins over this), so a
+# future manual-run UI can change it without editing this file.
+CLASSIFICATION_ENABLED = true
+CLASSIFICATION_MODEL = "google:gemini-2.5-flash-lite"
+CLASSIFICATION_FALLBACK_MODEL = "anthropic:claude-haiku-4-5"
+
+# Resilience policy for the classify lane when the primary (Gemini) is throttled (429
+# RESOURCE_EXHAUSTED) or overloaded (503 UNAVAILABLE). max_retries is the EXTRA attempts
+# after the first call (1 => 2 attempts/model/video); a 429 honors the response retryDelay
+# (capped at max_backoff_seconds) else exponential backoff from base_backoff_seconds, and a
+# 503 uses exponential backoff. max_fallback_videos is the per-run spend breaker: once this
+# many distinct videos have failed over to the paid fallback, the next would-be fallback
+# aborts the run (exit 8) instead of spending further. Validated at startup (positive ints;
+# positive backoffs with base <= max).
+[CLASSIFICATION_RETRY]
+max_retries          = 1
+base_backoff_seconds = 1.0
+max_backoff_seconds  = 30.0
+max_fallback_videos  = 150
+
 # ONE official, server-rendered pricing page per NON-LOCAL provider (the fetcher runs no
 # JS). The scrape is the value-of-record, cross-checked against the [PRICE_VALIDATION]
 # feed below (not a second scrape). UPPERCASE section name per the loader convention (a

@@ -141,6 +141,35 @@ DEFAULT_PRICE_REFRESH = {
 # fallback — settings.toml overrides it.
 DEFAULT_EXTRACTION_MODEL = "anthropic:claude-haiku-4-5"
 
+# LLM gate that enforces English-only + drops kids content on each discovered video
+# (a binary classification the YouTube API cannot express). ENABLED toggles the phase
+# off without code changes. MODEL is the primary classifier (cheapest non-local), with
+# FALLBACK_MODEL a DIFFERENT-provider backup used when the primary provider is
+# unreachable (validate_config enforces the different-provider rule). Fresh-checkout
+# fallbacks; settings.toml overrides them. The actual model in effect resolves through
+# classify.active_classification_model (app_preferences override -> this default), so a
+# future manual-run UI can change it without editing the file.
+DEFAULT_CLASSIFICATION_ENABLED = True
+DEFAULT_CLASSIFICATION_MODEL = "google:gemini-2.5-flash-lite"
+DEFAULT_CLASSIFICATION_FALLBACK_MODEL = "anthropic:claude-haiku-4-5"
+
+# The classify lane's resilience policy when the primary (Gemini) is throttled
+# (429 RESOURCE_EXHAUSTED) or overloaded (503 UNAVAILABLE). One coupled dict (the
+# four values move together as a retry/breaker policy), so they live here, never
+# inline magic numbers. max_retries is the EXTRA attempts after the first call, so
+# 1 yields 2 attempts (initial + 1 retry) per model per video; a 429 honors the
+# response retryDelay (capped at max_backoff_seconds) else exponential backoff from
+# base_backoff_seconds; 503 uses exponential backoff. max_fallback_videos is the
+# per-run spend breaker: once this many distinct videos have been routed to the
+# paid fallback, the next would-be fallback aborts the run (EXIT_CLASSIFY_BUDGET)
+# rather than spend further. Fresh-checkout fallback; settings.toml overrides it.
+DEFAULT_CLASSIFICATION_RETRY = {
+    "max_retries": 1,
+    "base_backoff_seconds": 1.0,
+    "max_backoff_seconds": 30.0,
+    "max_fallback_videos": 150,
+}
+
 # ONE official, server-rendered pricing page per non-local provider (the fetcher runs
 # no JS). The scrape is the value-of-record; it is cross-checked against a third-party
 # validator feed (PRICE_VALIDATION), not a second scrape. Fresh-checkout fallback;
@@ -205,6 +234,10 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "SPEND_VIZ": DEFAULT_SPEND_VIZ,
     "PRICE_REFRESH": DEFAULT_PRICE_REFRESH,
     "EXTRACTION_MODEL": DEFAULT_EXTRACTION_MODEL,
+    "CLASSIFICATION_ENABLED": DEFAULT_CLASSIFICATION_ENABLED,
+    "CLASSIFICATION_MODEL": DEFAULT_CLASSIFICATION_MODEL,
+    "CLASSIFICATION_FALLBACK_MODEL": DEFAULT_CLASSIFICATION_FALLBACK_MODEL,
+    "CLASSIFICATION_RETRY": DEFAULT_CLASSIFICATION_RETRY,
     "PRICE_SOURCES": DEFAULT_PRICE_SOURCES,
     "PRICE_VALIDATION": DEFAULT_PRICE_VALIDATION,
 }
@@ -294,6 +327,10 @@ PRICES = _settings["PRICES"]
 SPEND_VIZ = _settings["SPEND_VIZ"]
 PRICE_REFRESH = _settings["PRICE_REFRESH"]
 EXTRACTION_MODEL = _settings["EXTRACTION_MODEL"]
+CLASSIFICATION_ENABLED = _settings["CLASSIFICATION_ENABLED"]
+CLASSIFICATION_MODEL = _settings["CLASSIFICATION_MODEL"]
+CLASSIFICATION_FALLBACK_MODEL = _settings["CLASSIFICATION_FALLBACK_MODEL"]
+CLASSIFICATION_RETRY = _settings["CLASSIFICATION_RETRY"]
 PRICE_SOURCES = _settings["PRICE_SOURCES"]
 PRICE_VALIDATION = _settings["PRICE_VALIDATION"]
 
@@ -346,7 +383,7 @@ LOCAL_TZ = "America/New_York"
 # This is the SINGLE source of truth: the codes AND the reason/status -> code
 # mapping live here; nothing else defines a contract integer. Code 1 is reserved
 # by run-pipeline.sh for "never reached the pipeline" (missing venv, failed
-# backup) and is deliberately kept OUTSIDE the 2..7 range.
+# backup) and is deliberately kept OUTSIDE the 2..8 range.
 EXIT_OK = 0           # success, today's rows captured
 EXIT_SUCCESS = EXIT_OK
 EXIT_NETWORK = 2      # connectivity/transport/transient rate-limit, retries exhausted
@@ -355,6 +392,8 @@ EXIT_AUTH = 4         # 401 / keyInvalid / missing-empty YOUTUBE_API_KEY
 EXIT_OTHER = 5        # uncaught/unclassifiable, or CLI/usage/config error
 EXIT_DB_LOCKED = 6    # sqlite3.OperationalError containing "database is locked"
 EXIT_NO_ROWS = 7      # ran clean but committed zero rankings rows for run_date
+EXIT_CLASSIFY_BUDGET = 8  # classify fallback-spend breaker tripped (primary throttled,
+                          # per-run Haiku cap reached); distinct from a YouTube quota stop
 
 # The single "is this a quota stop?" set. The pipeline usually stops on its own
 # quota budget BEFORE the API's quotaExceeded fires, producing one of these run_log
@@ -514,6 +553,8 @@ REQUIRED_KEYS: dict[str, type] = {
     "OLLAMA_TIMEOUT_SECONDS": int,
     "SEARCH_QUERIES": list,
     "PRICES": dict,
+    "CLASSIFICATION_ENABLED": bool,
+    "CLASSIFICATION_RETRY": dict,
     "DEFAULT_MAX_TOKENS": int,
     "DEFAULT_MAX_TOKENS_REASONING": int,
     "MAX_TOKENS_UPPER_BOUND": int,
@@ -737,6 +778,67 @@ def validate_config(cfg: object | None = None) -> None:
         raise ConfigError(
             "Config key EXTRACTION_MODEL must be a non-empty 'provider:model' string, "
             f"got {extraction_model!r}"
+        )
+
+    # CLASSIFICATION_MODEL / CLASSIFICATION_FALLBACK_MODEL: the primary + backup models
+    # for the English/no-kids gate. Both non-empty 'provider:model' strings (so a
+    # provider can be split off and dispatched). The two MUST name DIFFERENT providers:
+    # the fallback exists to survive a primary-provider outage, so a same-provider backup
+    # would be dead exactly when it is needed. API-key presence is a runtime concern
+    # (validate_config cannot read os.environ for the operator's keys), warned at the
+    # phase, not here.
+    primary = getattr(cfg, "CLASSIFICATION_MODEL")
+    fallback = getattr(cfg, "CLASSIFICATION_FALLBACK_MODEL")
+    for key, value in (("CLASSIFICATION_MODEL", primary),
+                       ("CLASSIFICATION_FALLBACK_MODEL", fallback)):
+        if not isinstance(value, str) or ":" not in value.strip():
+            raise ConfigError(
+                f"Config key {key} must be a non-empty 'provider:model' string, "
+                f"got {value!r}"
+            )
+    if primary.split(":", 1)[0] == fallback.split(":", 1)[0]:
+        raise ConfigError(
+            "Config key CLASSIFICATION_FALLBACK_MODEL must use a DIFFERENT provider "
+            f"than CLASSIFICATION_MODEL (both are {primary.split(':', 1)[0]!r}); the "
+            "backup must survive a primary-provider outage"
+        )
+
+    # CLASSIFICATION_RETRY: the classify lane's retry/backoff/breaker policy. All four
+    # keys required; max_retries and max_fallback_videos strictly positive ints (a bool
+    # is an int subclass and rejected); the two backoffs strictly positive floats with
+    # base <= max (an inverted band would clamp every wait to the smaller bound). Each
+    # error names CLASSIFICATION_RETRY so a hand-edit typo is unambiguous.
+    retry = getattr(cfg, "CLASSIFICATION_RETRY")
+    if not isinstance(retry, dict):
+        raise ConfigError(
+            f"Config key CLASSIFICATION_RETRY must be a dict, got "
+            f"{type(retry).__name__}"
+        )
+    for key in ("max_retries", "base_backoff_seconds", "max_backoff_seconds",
+                "max_fallback_videos"):
+        if key not in retry:
+            raise ConfigError(
+                f"Config key CLASSIFICATION_RETRY is missing required key {key!r}"
+            )
+    for key in ("max_retries", "max_fallback_videos"):
+        value = retry[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ConfigError(
+                f"Config key CLASSIFICATION_RETRY[{key!r}] must be a positive int, "
+                f"got {value!r}"
+            )
+    base = retry["base_backoff_seconds"]
+    cap = retry["max_backoff_seconds"]
+    for key, value in (("base_backoff_seconds", base), ("max_backoff_seconds", cap)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(
+                f"Config key CLASSIFICATION_RETRY[{key!r}] must be a positive number, "
+                f"got {value!r}"
+            )
+    if base > cap:
+        raise ConfigError(
+            "Config key CLASSIFICATION_RETRY base_backoff_seconds must be <= "
+            f"max_backoff_seconds (got {base} > {cap})"
         )
 
     # PRICE_SOURCES: ONE official pricing-page URL per NON-LOCAL seeded provider (local

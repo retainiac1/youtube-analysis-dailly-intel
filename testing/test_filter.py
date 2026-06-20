@@ -87,6 +87,16 @@ def test_each_gate_attributes_correctly():
         assert sum(drops.values()) == 1, gate
 
 
+def test_self_declared_made_for_kids_dropped():
+    # madeForKids is false but the creator self-declared: still a kids drop.
+    v = fake_video()
+    v["status"] = {"madeForKids": False, "selfDeclaredMadeForKids": True}
+    kept, drops = filt([v])
+    assert kept == []
+    assert drops["made_for_kids"] == 1
+    assert sum(drops.values()) == 1
+
+
 def test_window_gate_drops_out_of_window():
     recent_cut = datetime.fromisoformat("2026-06-06T00:00:00+00:00")
     old = fake_video(published_at="2026-06-01T00:00:00Z")   # before cutoff

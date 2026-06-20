@@ -1,7 +1,9 @@
+import json
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import httplib2
 import pytest
@@ -9,6 +11,7 @@ from googleapiclient.errors import HttpError
 
 import config
 import db
+import llm
 import swipefile
 
 NOW1 = "2026-06-07T10:00:00-04:00"
@@ -142,6 +145,10 @@ def _patch_main(monkeypatch, db_path, argv, youtube=None, queries=None):
     monkeypatch.setattr(swipefile, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setattr(swipefile.os, "getenv", lambda *a, **k: "fakekey")
     monkeypatch.setattr(swipefile, "validate_config", lambda *a, **k: None)
+    # These exercise quota/ledger/run_date through a full discover; the English/no-kids
+    # LLM phase is orthogonal and would make a real network call here. Disable it (the
+    # real skip path); classification has its own tests (test_classify*.py).
+    monkeypatch.setattr(config, "CLASSIFICATION_ENABLED", False)
     monkeypatch.setattr(swipefile, "build_youtube_client", lambda key: youtube)
     if queries is not None:
         monkeypatch.setattr(swipefile, "SEARCH_QUERIES", queries)
@@ -385,6 +392,56 @@ def test_discover_with_zero_results_exits_no_rows(tmp_path, monkeypatch):
                             queries=queries)
     assert code == config.EXIT_NO_ROWS
     assert latest_run(db_path)["status"] == "success"
+
+
+def _keep_gen_result():
+    return SimpleNamespace(
+        text=json.dumps({"english": True, "kids_targeted": False,
+                         "kids_subject": False, "reason": "r"}),
+        input_tokens=10, output_tokens=5)
+
+
+def test_discover_fallback_budget_breaker_exits_classify_budget(tmp_path, monkeypatch):
+    """End-to-end: the primary classifier is throttled (429) so every video fails
+    over to the paid fallback; once the per-run cap is hit the run aborts with
+    EXIT_CLASSIFY_BUDGET (8), distinct from a YouTube quota stop, and the survivors
+    classified so far are persisted (status classify_budget_stop)."""
+    N = 2
+    vids = [f"v{i}" for i in range(N + 1)]
+    youtube = FakeYouTube(
+        search_map={"q1": vids},
+        video_items={v: fake_video(v) for v in vids},
+        channel_items={"c1": fake_channel()},
+    )
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    queries = [{"q": "q1", "bucket": "habit"}]
+    _patch_main(monkeypatch, db_path, ["--discover"], youtube=youtube, queries=queries)
+    monkeypatch.setattr(config, "CLASSIFICATION_ENABLED", True)
+    monkeypatch.setattr(config, "CLASSIFICATION_RETRY",
+                        {**config.CLASSIFICATION_RETRY, "max_retries": 0,
+                         "max_fallback_videos": N})
+
+    # The primary passes its preflight probe but 429s every real classification; the
+    # fallback always succeeds. Branch on the preflight marker in the prompt so the
+    # primary is alive at preflight (in model_order) yet throttled per video.
+    def make_gen(conn, model, run_date):
+        provider = model.split(":", 1)[0]
+        def gen(prompt):
+            if provider == "google" and "preflight" not in prompt:
+                raise llm.LLMError("throttled", status_code=429)
+            return _keep_gen_result()
+        return gen
+
+    monkeypatch.setattr(swipefile, "_make_classify_generate", make_gen)
+    code = swipefile.main()
+    assert code == config.EXIT_CLASSIFY_BUDGET
+    assert latest_run(db_path)["status"] == "classify_budget_stop"
+    # The N classified-and-kept survivors were persisted; the tripping one was not.
+    conn = db.get_connection(db_path)
+    persisted = conn.execute("SELECT COUNT(*) AS n FROM videos").fetchone()["n"]
+    conn.close()
+    assert persisted == N
 
 
 def test_refresh_with_empty_pool_exits_ok_not_no_rows(tmp_path, monkeypatch):

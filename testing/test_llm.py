@@ -427,6 +427,100 @@ def test_generate_wraps_openai_api_error(monkeypatch):
     assert "openai" in str(exc.value)
 
 
+# --- LLMError carries optional provider status + retry hint -----------------
+# The classify retry layer needs to tell a 429/503 apart and honor a 429's
+# retryDelay WITHOUT parsing the message string. LLMError gains two optional
+# attributes, defaulting None so every existing raise site is unchanged.
+
+def test_llm_error_status_and_retry_default_none():
+    e = llm.LLMError("plain")
+    assert e.status_code is None and e.retry_after_seconds is None
+
+
+def test_llm_error_carries_status_and_retry():
+    e = llm.LLMError("throttled", status_code=429, retry_after_seconds=33.0)
+    assert e.status_code == 429 and e.retry_after_seconds == 33.0
+
+
+# --- _parse_google_retry_delay: read retryDelay from the 429 body -----------
+# Gemini's 429 RESOURCE_EXHAUSTED body carries a RetryInfo detail with a
+# retryDelay like "33s". The helper walks the (possibly error-nested) details
+# list defensively and converts to seconds; absent/malformed -> None (never raise,
+# never a hardcoded 13/33).
+
+def _google_429_body(retry_delay="33s"):
+    detail = {"@type": "type.googleapis.com/google.rpc.RetryInfo"}
+    if retry_delay is not None:
+        detail["retryDelay"] = retry_delay
+    return {
+        "error": {
+            "code": 429,
+            "status": "RESOURCE_EXHAUSTED",
+            "message": "Quota exceeded",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure"},
+                detail,
+            ],
+        }
+    }
+
+
+def test_parse_google_retry_delay_reads_seconds():
+    assert llm._parse_google_retry_delay(_google_429_body("33s")) == 33.0
+
+
+def test_parse_google_retry_delay_fractional():
+    assert llm._parse_google_retry_delay(_google_429_body("1.5s")) == 1.5
+
+
+def test_parse_google_retry_delay_absent_returns_none():
+    # No RetryInfo entry at all.
+    body = {"error": {"code": 503, "status": "UNAVAILABLE", "details": []}}
+    assert llm._parse_google_retry_delay(body) is None
+
+
+def test_parse_google_retry_delay_malformed_returns_none():
+    # RetryInfo present but retryDelay missing / non-string / unparseable.
+    assert llm._parse_google_retry_delay(_google_429_body(None)) is None
+    assert llm._parse_google_retry_delay(_google_429_body("oops")) is None
+    assert llm._parse_google_retry_delay("not a dict") is None
+
+
+# --- google adapter surfaces status_code + retry_after on an API error ------
+
+def _raising_google(exc):
+    class _Models:
+        def generate_content(self, **kwargs):
+            raise exc
+
+    return SimpleNamespace(models=_Models())
+
+
+def test_generate_google_429_surfaces_status_and_retry(monkeypatch):
+    from google.genai import errors
+    exc = errors.ClientError(429, _google_429_body("33s"))
+    monkeypatch.setattr(llm, "_client_google", lambda: _raising_google(exc))
+    with pytest.raises(llm.LLMError) as ei:
+        llm.generate("google:gemini-2.5-flash-lite", "p", temperature=0.5,
+                     seed=None, supports_temperature=True, supports_seed=True)
+    assert "google" in str(ei.value)
+    assert ei.value.status_code == 429
+    assert ei.value.retry_after_seconds == 33.0
+
+
+def test_generate_google_503_surfaces_status_no_retry(monkeypatch):
+    from google.genai import errors
+    body = {"error": {"code": 503, "status": "UNAVAILABLE",
+                      "message": "overloaded", "details": []}}
+    exc = errors.ServerError(503, body)
+    monkeypatch.setattr(llm, "_client_google", lambda: _raising_google(exc))
+    with pytest.raises(llm.LLMError) as ei:
+        llm.generate("google:gemini-2.5-flash-lite", "p", temperature=0.5,
+                     seed=None, supports_temperature=True, supports_seed=True)
+    assert ei.value.status_code == 503
+    assert ei.value.retry_after_seconds is None
+
+
 # --- pin the seeded capability flags to the adapters (kills drift) ---------
 # For each baseline model in config.SEED_MODELS, run generate() with that model's
 # flags against the provider's fake and assert the adapter ACTUALLY did what the
