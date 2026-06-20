@@ -144,6 +144,19 @@ CLASSIFICATION_ENABLED = true
 CLASSIFICATION_MODEL = "google:gemini-2.5-flash-lite"
 CLASSIFICATION_FALLBACK_MODEL = "anthropic:claude-haiku-4-5"
 
+# Deterministic title-keyword reject list: a cheap kid/parenting pre-filter that drops
+# matching videos by title BEFORE the LLM classify phase (cutting LLM volume + catching
+# obvious cases the LLM lets through). Whole-word, case-insensitive; a match is a
+# PERMANENT drop with no LLM safety net, so keep this HIGH-PRECISION (no terms that occur
+# in the adult longevity niche; note "bedtime" is intentionally absent). All-lowercase
+# (the matcher lowercases the title). Tunable here.
+KID_TITLE_KEYWORDS = [
+  "baby", "babies", "infant", "newborn", "toddler", "toddlers", "kid", "kids",
+  "kiddo", "child", "children", "nursery", "preschool", "kindergarten", "daycare",
+  "sahm", "momlife", "girlmom", "boymom", "parenting", "for kids", "for toddlers",
+  "cocomelon", "paw patrol", "peppa", "bluey", "baby shark", "nursery rhyme", "lullaby",
+]
+
 # Resilience policy for the classify lane when the primary (Gemini) is throttled (429
 # RESOURCE_EXHAUSTED) or overloaded (503 UNAVAILABLE). max_retries is the EXTRA attempts
 # after the first call (1 => 2 attempts/model/video); a 429 honors the response retryDelay

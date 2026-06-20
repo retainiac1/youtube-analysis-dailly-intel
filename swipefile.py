@@ -37,6 +37,7 @@ from config import (
     DAILY_QUOTA_LIMIT,
     DB_PATH,
     DISTRIBUTION_BUCKETS,
+    KID_TITLE_KEYWORDS,
     MIN_VIEWS,
     OUTPUT_CSV,
     OUTPUT_XLSX_BASE,
@@ -151,6 +152,20 @@ def parse_duration(iso_duration: str) -> int:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def title_has_kid_keyword(title: str, keywords) -> str | None:
+    """Return the FIRST keyword in `keywords` found in `title` as a whole word
+    (case-insensitive), else None. Word-boundary matched so `kid` never fires inside
+    `kidney`/`kidding`; a multi-word entry ('for kids') matches as a boundary-wrapped
+    phrase. Pure and list-injected: the cheap gate passes config.KID_TITLE_KEYWORDS,
+    and because a match is a PERMANENT drop the curated, high-precision list lives in
+    config (not here). Iterating in list order makes 'which keyword' deterministic for
+    logging."""
+    for kw in keywords:
+        if re.search(rf"\b{re.escape(kw)}\b", title, re.IGNORECASE):
+            return kw
+    return None
+
+
 def _classify_video(video: dict, min_views: int, max_duration: int,
                     cutoff_dt: datetime) -> str:
     """Return the name of the FIRST gate that rejects `video`, or 'kept' if it
@@ -172,6 +187,12 @@ def _classify_video(video: dict, min_views: int, max_duration: int,
         return "window"
     if status.get("madeForKids", False) or status.get("selfDeclaredMadeForKids", False):
         return "made_for_kids"
+    # Deterministic kid/parenting title reject, right after the API made-for-kids flag
+    # (both are kid drops). Runs BEFORE the LLM classify phase, so an obvious kid video
+    # is dropped cheaply and never spends an LLM call. A miss (innocent title) falls
+    # through to the LLM gate downstream, exactly as before.
+    if title_has_kid_keyword(snippet.get("title", ""), KID_TITLE_KEYWORDS):
+        return "kid_keyword"
     if snippet.get("categoryId", "") in BLOCKED_CATEGORY_IDS:
         return "category"
     lang = snippet.get("defaultAudioLanguage", "")
@@ -199,7 +220,7 @@ def filter_videos(videos: list[dict], min_views: int, max_duration: int,
     _classify_video — this is a thin loop over it."""
     drops = {k: 0 for k in (
         "window", "views", "duration", "category", "language",
-        "made_for_kids", "missing_duration", "missing_views",
+        "made_for_kids", "kid_keyword", "missing_duration", "missing_views",
     )}
     kept = []
     for video in videos:
@@ -1064,6 +1085,7 @@ def _run_search_phase(youtube, state: dict, budget: "QuotaBudget",
         print(f'       dropped: window {drops["window"]}, views {drops["views"]}, '
               f'duration {drops["duration"]}, category {drops["category"]}, '
               f'language {drops["language"]}, made_for_kids {drops["made_for_kids"]}, '
+              f'kid_keyword {drops["kid_keyword"]}, '
               f'missing_duration {drops["missing_duration"]}, '
               f'missing_views {drops["missing_views"]}', file=sys.stderr)
         print(f'       (views-only check: {below}/{len(details)} below '

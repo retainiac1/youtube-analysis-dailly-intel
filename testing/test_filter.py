@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import config
 import swipefile
 
 # A far-past cutoff so the window gate never fires except where tested explicitly.
@@ -135,6 +136,125 @@ def test_sum_invariant_mixed_batch():
     assert len(kept) == 1
     assert sum(drops.values()) == len(batch) - len(kept)
     assert drops["window"] == 1 and drops["missing_duration"] == 1 and drops["missing_views"] == 1
+
+
+# --- keyword kid pre-filter: title_has_kid_keyword (pure matcher) -----------
+
+def _kw(title):
+    return swipefile.title_has_kid_keyword(title, config.KID_TITLE_KEYWORDS)
+
+
+def test_kid_keyword_matches_obvious_kid_titles():
+    assert _kw("Why Your Baby Stay Awake All Night And Sleep All Day") == "baby"
+    assert _kw("The reality of a SAHM bedtime routine") == "sahm"
+    assert _kw("Good Morning! Brush Your Teeth Song for Kids") is not None
+
+
+def test_kid_keyword_case_insensitive():
+    assert _kw("WHY YOUR BABY STAYS AWAKE") == "baby"
+
+
+def test_kid_keyword_multiword_phrase():
+    assert _kw("Healthy Habits for Kids and parents") is not None
+
+
+def test_kid_keyword_word_boundary_no_substring_false_positives():
+    # The classic traps: 'kid' must not fire inside 'kidney' / 'kidding'.
+    assert _kw("3 foods that protect your kidneys after 50") is None
+    assert _kw("You won't believe this, no kidding") is None
+
+
+def test_kid_keyword_returns_none_for_adult_niche_titles():
+    for t in ("No Jump Bedtime Fat Melt Routine for Fast Results",
+              "Triple Berry Protein Glow Smoothie",
+              "VO2 max is one of the strongest predictors of longevity",
+              "5 Money Rules That Made Elon Musk Successful"):
+        assert _kw(t) is None, t
+
+
+# --- precision/recall against a PINNED fixture (auditable, stable) ----------
+# The one-time corpus validation was 16 matches over 323 distinct persisted titles,
+# ZERO adult false positives. Pinned here (not asserted against the live, growing DB)
+# so the zero-false-positive safety claim for a PERMANENT drop stays auditable.
+
+KID_TITLES = [
+    ("baby", "Is your baby struggling to sleep comfortably? Baby Sleep Positioner Pillow helps!"),
+    ("baby", "Why Your Baby Stay Awake All Night And Sleep All Day | Dr Kinshuki Sharma"),
+    ("baby", "Baby Sleep Tips Every Parent Needs Peaceful Night Routine For Happy Babies"),
+    ("baby", "Bedtime Routine with my 7 mo and Neice #sahm #girlmom #momlife #baby"),
+    ("baby", "Does your baby have a bedtime routine with a million tiny rules? #momlife #baby"),
+    ("kids", "Good Morning! Brush Your Teeth Song for Kids | Healthy Habits for Children"),
+    ("kids", "Kids High Protein Lunch Box Hack! 2 Months ki saripoyela #shorts"),
+    ("kids", "Ranking Kids Hilarious Bedtime Routines"),
+    ("kids", "Wakey Wakey! Time to Brush Your Teeth | Morning Routine for Kids #shorts"),
+    ("sahm", "Realistic Night Routine with my 7 month old #sahm #bedtimeroutine #girlmom"),
+    ("sahm", "Night Routine with my noisy 7 Month Old #sahm #momlife #babybedtime"),
+    ("sahm", "The reality of a SAHM bedtime routine Tracker #sahm"),
+    ("toddler", "I Brush My Teeth Every Day! | Healthy Habits for Kids | Fun Toddler Learning Song"),
+    ("toddler", "Wakey Wakey! Time to Brush Our Teeth | Morning Routine for Kids | Toddler Learning"),
+    ("toddler", "why the same sleep routine doesn't work for every toddler?"),
+    ("toddlers", "A 2020 study on toddlers' sleep and parental stress reported that parents"),
+]
+
+# A curated in-niche ADULT sample, including the deliberate `bedtime` traps and the
+# protein/longevity/wealth content that must NEVER be dropped by the keyword gate.
+ADULT_TITLES = [
+    "No Jump Bedtime Fat Melt Routine for Fast Results",
+    "How to Fall Asleep Faster Naturally Simple Bedtime Routine",
+    "5 Night Habits That Can Transform Your Health, Sleep & Life | Simple Bedtime Routine",
+    "Best Bedtime Routine: 3 Gentle Moves to Release Full Body Tension and Stress Fast",
+    "Triple Berry Protein Glow Smoothie | High Protein Antioxidant Smoothie",
+    "VO2 max is one of the strongest predictors of longevity",
+    "2 Small Habits to Build Muscle: Protein and Strength Training",
+    "3 Things Rich People Never Buy | Millionaire Habits That Build Real Wealth",
+    "Think Like a Billionaire 9 Powerful Habits That Can Change Your Life",
+    "12 Eating Habits That Silently Weaken Your Body After 60 | Senior Health",
+    "Simple habit that strengthens the heart and improves life #HealthyLifestyle",
+    "MY GIRLY MORNING ROUTINE soft life + slow day aesthetic #morningroutine",
+]
+
+
+def test_kid_keyword_fixture_all_kid_titles_match():
+    for expected_kw, title in KID_TITLES:
+        got = _kw(title)
+        assert got is not None, f"missed kid title: {title!r}"
+        assert got == expected_kw, f"{title!r}: matched {got!r}, expected {expected_kw!r}"
+
+
+def test_kid_keyword_fixture_zero_adult_false_positives():
+    for title in ADULT_TITLES:
+        assert _kw(title) is None, f"false positive on adult title: {title!r}"
+
+
+# --- the gate in _classify_video / filter_videos ----------------------------
+
+def test_kid_keyword_gate_drops_kid_title():
+    v = fake_video()
+    v["snippet"]["title"] = "Why Your Baby Stay Awake All Night"
+    kept, drops = filt([v])
+    assert kept == []
+    assert drops["kid_keyword"] == 1
+    assert sum(drops.values()) == 1
+
+
+def test_made_for_kids_flag_wins_over_keyword():
+    # An API made_for_kids flag is attributed FIRST (it precedes the keyword gate);
+    # first-match attribution must not double-count.
+    v = fake_video(made_for_kids=True)
+    v["snippet"]["title"] = "Morning Routine for Kids"
+    kept, drops = filt([v])
+    assert kept == []
+    assert drops["made_for_kids"] == 1
+    assert drops["kid_keyword"] == 0
+    assert sum(drops.values()) == 1
+
+
+def test_clean_adult_title_still_kept():
+    v = fake_video()
+    v["snippet"]["title"] = "VO2 max is one of the strongest predictors of longevity"
+    kept, drops = filt([v])
+    assert len(kept) == 1
+    assert drops["kid_keyword"] == 0
 
 
 # --- independent views-only diagnostic --------------------------------------

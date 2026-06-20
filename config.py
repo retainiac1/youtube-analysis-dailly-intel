@@ -170,6 +170,20 @@ DEFAULT_CLASSIFICATION_RETRY = {
     "max_fallback_videos": 150,
 }
 
+# Deterministic title-keyword reject list for the cheap gate (_classify_video): drops
+# obvious kid/parenting videos by title BEFORE the LLM classify phase, cutting LLM
+# volume and catching obvious cases the LLM has let through. Matched whole-word,
+# case-insensitive; a match is a PERMANENT drop (no LLM safety net), so the list is
+# high-precision (no terms that appear in the adult longevity niche, e.g. NOT
+# "bedtime"). Tunable in settings.toml; the owner curates it. Fresh-checkout fallback.
+DEFAULT_KID_TITLE_KEYWORDS = [
+    "baby", "babies", "infant", "newborn", "toddler", "toddlers", "kid", "kids",
+    "kiddo", "child", "children", "nursery", "preschool", "kindergarten", "daycare",
+    "sahm", "momlife", "girlmom", "boymom", "parenting", "for kids", "for toddlers",
+    "cocomelon", "paw patrol", "peppa", "bluey", "baby shark", "nursery rhyme",
+    "lullaby",
+]
+
 # ONE official, server-rendered pricing page per non-local provider (the fetcher runs
 # no JS). The scrape is the value-of-record; it is cross-checked against a third-party
 # validator feed (PRICE_VALIDATION), not a second scrape. Fresh-checkout fallback;
@@ -238,6 +252,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "CLASSIFICATION_MODEL": DEFAULT_CLASSIFICATION_MODEL,
     "CLASSIFICATION_FALLBACK_MODEL": DEFAULT_CLASSIFICATION_FALLBACK_MODEL,
     "CLASSIFICATION_RETRY": DEFAULT_CLASSIFICATION_RETRY,
+    "KID_TITLE_KEYWORDS": DEFAULT_KID_TITLE_KEYWORDS,
     "PRICE_SOURCES": DEFAULT_PRICE_SOURCES,
     "PRICE_VALIDATION": DEFAULT_PRICE_VALIDATION,
 }
@@ -331,6 +346,7 @@ CLASSIFICATION_ENABLED = _settings["CLASSIFICATION_ENABLED"]
 CLASSIFICATION_MODEL = _settings["CLASSIFICATION_MODEL"]
 CLASSIFICATION_FALLBACK_MODEL = _settings["CLASSIFICATION_FALLBACK_MODEL"]
 CLASSIFICATION_RETRY = _settings["CLASSIFICATION_RETRY"]
+KID_TITLE_KEYWORDS = _settings["KID_TITLE_KEYWORDS"]
 PRICE_SOURCES = _settings["PRICE_SOURCES"]
 PRICE_VALIDATION = _settings["PRICE_VALIDATION"]
 
@@ -555,6 +571,7 @@ REQUIRED_KEYS: dict[str, type] = {
     "PRICES": dict,
     "CLASSIFICATION_ENABLED": bool,
     "CLASSIFICATION_RETRY": dict,
+    "KID_TITLE_KEYWORDS": list,
     "DEFAULT_MAX_TOKENS": int,
     "DEFAULT_MAX_TOKENS_REASONING": int,
     "MAX_TOKENS_UPPER_BOUND": int,
@@ -840,6 +857,23 @@ def validate_config(cfg: object | None = None) -> None:
             "Config key CLASSIFICATION_RETRY base_backoff_seconds must be <= "
             f"max_backoff_seconds (got {base} > {cap})"
         )
+
+    # KID_TITLE_KEYWORDS: the deterministic kid-content title reject list. A non-empty
+    # list of non-empty, already-lowercased strings (the matcher lowercases the title,
+    # so an uppercase keyword could never match and is a config error, not silent dead
+    # weight). A match is a PERMANENT drop, so a malformed list fails loud here.
+    keywords = getattr(cfg, "KID_TITLE_KEYWORDS")
+    if not isinstance(keywords, list) or not keywords:
+        raise ConfigError(
+            "Config key KID_TITLE_KEYWORDS must be a non-empty list, got "
+            f"{type(keywords).__name__}"
+        )
+    for kw in keywords:
+        if not isinstance(kw, str) or not kw.strip() or kw != kw.lower():
+            raise ConfigError(
+                "Config key KID_TITLE_KEYWORDS entries must be non-empty lowercase "
+                f"strings, got {kw!r}"
+            )
 
     # PRICE_SOURCES: ONE official pricing-page URL per NON-LOCAL seeded provider (local
     # providers have no pricing page). The scrape is cross-checked against a validator

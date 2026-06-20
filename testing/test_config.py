@@ -63,6 +63,7 @@ def make_good_config() -> SimpleNamespace:
             "max_backoff_seconds": 30.0,
             "max_fallback_videos": 150,
         },
+        KID_TITLE_KEYWORDS=["baby", "kids", "toddler", "sahm"],
         PRICE_SOURCES={
             "anthropic": "https://a/official",
             "openai": "https://o/official",
@@ -193,6 +194,27 @@ def test_classification_retry_backoff_must_be_positive():
 
 
 # --- EXIT_CLASSIFY_BUDGET: distinct exit code for the fallback breaker -------
+
+def test_kid_title_keywords_must_be_nonempty_list():
+    cfg = make_good_config()
+    cfg.KID_TITLE_KEYWORDS = []
+    with pytest.raises(config.ConfigError, match="KID_TITLE_KEYWORDS"):
+        config.validate_config(cfg)
+
+
+def test_kid_title_keywords_members_must_be_nonempty_lowercase_strings():
+    cfg = make_good_config()
+    cfg.KID_TITLE_KEYWORDS = ["baby", "Kids"]  # uppercase member rejected
+    with pytest.raises(config.ConfigError, match="KID_TITLE_KEYWORDS"):
+        config.validate_config(cfg)
+
+
+def test_kid_title_keywords_blank_member_rejected():
+    cfg = make_good_config()
+    cfg.KID_TITLE_KEYWORDS = ["baby", "  "]
+    with pytest.raises(config.ConfigError, match="KID_TITLE_KEYWORDS"):
+        config.validate_config(cfg)
+
 
 def test_exit_classify_budget_is_distinct_code():
     # 8, outside the 2..7 contract range, and not colliding with any existing code.
