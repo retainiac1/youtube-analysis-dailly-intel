@@ -143,6 +143,38 @@ def test_classification_fallback_same_provider_raises():
         config.validate_config(cfg)
 
 
+# The shared classifier-pair validator (used by validate_config AND the dashboard picker,
+# so the cron + the UI enforce the SAME rule).
+def test_validate_classifier_pair_accepts_different_providers():
+    # Does not raise.
+    config.validate_classifier_pair("google:gemini-2.5-flash-lite",
+                                    "anthropic:claude-haiku-4-5")
+
+
+def test_validate_classifier_pair_rejects_same_provider():
+    with pytest.raises(config.ConfigError, match="DIFFERENT provider"):
+        config.validate_classifier_pair("google:a", "google:b")
+
+
+def test_validate_classifier_pair_rejects_identical():
+    # Same string -> same provider, so the different-provider rule catches it.
+    with pytest.raises(config.ConfigError, match="DIFFERENT provider"):
+        config.validate_classifier_pair("anthropic:x", "anthropic:x")
+
+
+def test_validate_classifier_pair_rejects_malformed():
+    with pytest.raises(config.ConfigError, match="provider:model"):
+        config.validate_classifier_pair("no-colon", "anthropic:x")
+
+
+def test_validate_classifier_pair_uses_custom_labels():
+    # The dashboard route passes UI labels so its 422 reads naturally.
+    with pytest.raises(config.ConfigError, match="fallback model"):
+        config.validate_classifier_pair("google:a", "google:b",
+                                        primary_label="primary model",
+                                        fallback_label="fallback model")
+
+
 # --- CLASSIFICATION_RETRY (the classify retry/backoff/breaker policy) -------
 # An otherwise-valid config with one bad CLASSIFICATION_RETRY key; the error must
 # name CLASSIFICATION_RETRY so a hand-edit typo is unambiguous.

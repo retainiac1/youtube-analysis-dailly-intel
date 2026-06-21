@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
+import classify  # noqa: E402
 import config  # noqa: E402
 import db  # noqa: E402
 import interpret  # noqa: E402
@@ -1097,6 +1098,78 @@ def get_documentation_raw(tab: str, doc: str,
         raise HTTPException(status_code=404, detail="unknown document")
 
     return FileResponse(file_real, media_type=_DOC_MEDIA_TYPES.get(entry["format"]))
+
+
+def _allowed_for(conn: sqlite3.Connection, key: str) -> set[str]:
+    """The values valid for a classifier slot: the current dropdown options PLUS the value
+    already persisted for `key`. The run resolves its classifier model from the persisted
+    pref regardless of pricing, so the picker must let the operator KEEP a persisted-but-
+    no-longer-priced model while editing the other slot; only a NEW model must be a
+    current, priced dropdown option."""
+    allowed = set(_allowed_models(conn))
+    current = db.get_preference(conn, key)
+    if current is not None:
+        allowed.add(current)
+    return allowed
+
+
+@app.get("/api/extract/models")
+def api_get_extract_models(conn: sqlite3.Connection = Depends(get_conn)):
+    """The classifier-model picker's prepopulation: the dropdown `options` plus the CURRENT
+    effective `primary` + `fallback` (the persisted prefs, else the config defaults — the
+    exact pair the next run will use). Read as ONE snapshot so a concurrent price-window
+    change cannot return options inconsistent with the resolved pair. Unlike
+    interpret-defaults the pair is NOT clamped into options: a persisted model that lost its
+    price window is returned as-is, so the UI can mark it rather than hide that the run still
+    uses it."""
+    def read():
+        return {
+            "options": _allowed_models(conn),
+            "primary": classify.active_classification_model(conn),
+            "fallback": classify.active_classification_fallback_model(conn),
+        }
+
+    return db.run_with_db_retry(read)
+
+
+class ClassificationModelsUpdate(BaseModel):
+    primary: str
+    fallback: str
+
+
+@app.post("/api/extract/models")
+def api_set_extract_models(
+    body: ClassificationModelsUpdate,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Persist the classifier primary + fallback pair. All validation precedes any write,
+    so an invalid pair writes NEITHER key: each model must be a current dropdown option or
+    the value already persisted for its slot (_allowed_for), and the pair must pass the
+    SHARED config.validate_classifier_pair (different providers) the cron enforces at
+    startup. Both keys are written in one transaction with one timestamp, so they read as a
+    single operation."""
+    if body.primary not in _allowed_for(conn, classify.CLASSIFICATION_MODEL_PREF):
+        raise HTTPException(
+            status_code=422, detail=f"unknown or unusable model {body.primary!r}")
+    if body.fallback not in _allowed_for(conn, classify.CLASSIFICATION_FALLBACK_PREF):
+        raise HTTPException(
+            status_code=422, detail=f"unknown or unusable model {body.fallback!r}")
+    try:
+        config.validate_classifier_pair(
+            body.primary, body.fallback,
+            primary_label="primary model", fallback_label="fallback model")
+    except config.ConfigError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    now = config.now_local_iso()
+
+    def write():
+        with db.transaction(conn):
+            db.set_preference(conn, classify.CLASSIFICATION_MODEL_PREF, body.primary, now)
+            db.set_preference(conn, classify.CLASSIFICATION_FALLBACK_PREF, body.fallback, now)
+
+    db.run_with_db_retry(write)
+    return {"primary": body.primary, "fallback": body.fallback}
 
 
 @app.get("/api/extract/stream")

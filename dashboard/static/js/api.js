@@ -165,6 +165,17 @@ export function streamExtract(mode, signal) {
   return fetch(`/api/extract/stream?${new URLSearchParams({ mode })}`, { signal });
 }
 
+// The classifier model picker: the dropdown options + the current effective primary /
+// fallback, and the paired persist. setClassificationModels goes through postJSON so a
+// 422 detail ("... must use a DIFFERENT provider ...") surfaces inline.
+export function getClassificationModels() {
+  return getJSON("/api/extract/models");
+}
+
+export function setClassificationModels(primary, fallback) {
+  return postJSON("/api/extract/models", { primary, fallback });
+}
+
 // --- Phase 5: the /models registry editor -----------------------------------
 // model strings carry ':' and '.', so every path segment is encodeURIComponent'd.
 // Writes go through postJSON/putJSON so a server `detail` (e.g. "valid_from must be

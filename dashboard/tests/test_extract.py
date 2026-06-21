@@ -9,6 +9,8 @@ import asyncio
 
 import pytest
 
+import config
+import db
 from dashboard import extract
 
 # The eight (code, reason) pairs of the pipeline exit contract (config.py /
@@ -326,3 +328,102 @@ def test_route_streams_run_events(client, monkeypatch):
     assert "text/event-stream" in r.headers["content-type"]
     assert extract.log_event("working...") in r.text
     assert extract.result_event(0, "ok") in r.text
+
+
+# --- Phase 4: classifier model picker (GET/POST /api/extract/models) ---------
+# init_db (run by the seeded_db_path fixture) seeds the baseline priced models, so
+# _allowed_models is non-empty and includes the two classifier defaults.
+
+def _prefs(db_path):
+    conn = db.get_connection(db_path)
+    try:
+        return {
+            "primary": db.get_preference(conn, "classification_model"),
+            "fallback": db.get_preference(conn, "classification_fallback_model"),
+            "extraction": db.get_preference(conn, "extraction_model"),
+        }
+    finally:
+        conn.close()
+
+
+def test_extract_models_get_defaults(client):
+    body = client.get("/api/extract/models").json()
+    assert "google:gemini-2.5-flash-lite" in body["options"]
+    assert "anthropic:claude-haiku-4-5" in body["options"]
+    # No pref set yet -> the settings.toml/config defaults (resolved through classify.py).
+    assert body["primary"] == config.CLASSIFICATION_MODEL
+    assert body["fallback"] == config.CLASSIFICATION_FALLBACK_MODEL
+
+
+def test_extract_models_post_persists_both_classifier_keys(client, seeded_db_path):
+    r = client.post("/api/extract/models",
+                    json={"primary": "anthropic:claude-haiku-4-5",
+                          "fallback": "google:gemini-2.5-flash-lite"})
+    assert r.status_code == 200
+    got = client.get("/api/extract/models").json()
+    assert got["primary"] == "anthropic:claude-haiku-4-5"
+    assert got["fallback"] == "google:gemini-2.5-flash-lite"
+    p = _prefs(seeded_db_path)
+    assert p["primary"] == "anthropic:claude-haiku-4-5"
+    assert p["fallback"] == "google:gemini-2.5-flash-lite"
+    assert p["extraction"] is None             # NOT the price_refresh key
+
+    # Both keys stamped the same updated_at (one atomic write).
+    conn = db.get_connection(seeded_db_path)
+    try:
+        rows = dict(conn.execute(
+            "SELECT key, updated_at FROM app_preferences WHERE key IN "
+            "('classification_model','classification_fallback_model')").fetchall())
+    finally:
+        conn.close()
+    assert rows["classification_model"] == rows["classification_fallback_model"]
+
+
+def test_extract_models_post_same_provider_422_no_write(client, seeded_db_path):
+    r = client.post("/api/extract/models",
+                    json={"primary": "google:gemini-2.5-flash-lite",
+                          "fallback": "google:gemini-2.5-flash-lite"})
+    assert r.status_code == 422
+    p = _prefs(seeded_db_path)
+    assert p["primary"] is None and p["fallback"] is None   # nothing written
+
+
+def test_extract_models_post_unknown_model_422(client, seeded_db_path):
+    r = client.post("/api/extract/models",
+                    json={"primary": "nope:nope",
+                          "fallback": "anthropic:claude-haiku-4-5"})
+    assert r.status_code == 422
+    assert _prefs(seeded_db_path)["primary"] is None
+
+
+def test_extract_models_stale_pref_roundtrip(client, seeded_db_path):
+    # Persist a valid pair (primary = google).
+    assert client.post("/api/extract/models",
+                       json={"primary": "google:gemini-2.5-flash-lite",
+                             "fallback": "anthropic:claude-haiku-4-5"}).status_code == 200
+    # Expire the primary's open price window so it drops out of the dropdown.
+    conn = db.get_connection(seeded_db_path)
+    try:
+        with db.transaction(conn):
+            conn.execute(
+                "UPDATE model_prices SET valid_to = '2020-01-01' "
+                "WHERE model = 'google:gemini-2.5-flash-lite' AND valid_to IS NULL")
+    finally:
+        conn.close()
+
+    got = client.get("/api/extract/models").json()
+    assert "google:gemini-2.5-flash-lite" not in got["options"]   # dropped from the dropdown
+    assert got["primary"] == "google:gemini-2.5-flash-lite"        # still the effective pref
+
+    # A POST carrying the now-stale (but persisted) primary succeeds: the validity rule
+    # permits the currently-persisted value even though it left the dropdown.
+    r2 = client.post("/api/extract/models",
+                     json={"primary": "google:gemini-2.5-flash-lite",
+                           "fallback": "anthropic:claude-haiku-4-5"})
+    assert r2.status_code == 200
+
+    # But a NEW unpriced model (not the persisted one) is still rejected.
+    r3 = client.post("/api/extract/models",
+                     json={"primary": "google:gemini-2.5-flash-lite",
+                           "fallback": "nope:nope"})
+    assert r3.status_code == 422

@@ -22,6 +22,9 @@ let running = false;    // a run is in flight (client single-flight; the server 
                         // real authority across tabs/reloads)
 let timer = null;       // the live run-time stopwatch interval
 let currentRun = null;  // the in-flight run's AbortController (FRESH per run; see onRun)
+let modelOptions = [];  // the dropdown model ids (Phase 4 classifier picker)
+let lastSaved = { primary: null, fallback: null };  // the last persisted pair (revert target)
+let populatePromise = null;  // memoizes the one model-list fetch + select wiring
 
 // Cap the retained terminal lines so a long run cannot grow the DOM without bound. A named
 // JS const (like main.js's MAX_TRACKED) since there is no JS<->config bridge; the oldest
@@ -135,6 +138,9 @@ function buildScaffold() {
 
   // Inline error/status line (reuses the Interpretation error styling).
   const errorEl = node("p", { class: "interpret-error", attrs: { role: "alert" } });
+  // A neutral inline note (not an error): used when a select is auto-advanced to keep the
+  // two providers distinct, so the adjustment is visible rather than silent.
+  const noteEl = node("p", { class: "extract-note" });
 
   const runGroup = node("div", { class: "interpret-run-group" }, [
     runBtn, dryRunBtn, runtime, statusPill,
@@ -148,6 +154,7 @@ function buildScaffold() {
       runGroup,
     ]),
     errorEl,
+    noteEl,
   ]);
 
   // The terminal: the streamed-output surface, stacked below the card inside #extract-main
@@ -165,7 +172,7 @@ function buildScaffold() {
   ]);
 
   controls = { primarySelect, fallbackSelect, runBtn, dryRunBtn, stopwatchEl, statusPill,
-               errorEl, terminal };
+               errorEl, noteEl, terminal };
 
   // Owns #extract-main ONLY (card + terminal). Never touches the sibling spend aside.
   el.replaceChildren(card, terminal);
@@ -178,6 +185,141 @@ function ensureBuilt() {
   if (built) return;
   buildScaffold();
   built = true;
+}
+
+// --- classifier model picker (Phase 4) --------------------------------------
+
+function providerOf(v) {
+  return v ? v.split(":")[0] : "";
+}
+
+// Fill one select with an <option> per dropdown model, pre-selecting `current`. If
+// `current` is no longer a dropdown option (it lost its price window) it is still the
+// effective pref, so prepend it as a marked, display-only "(unavailable)" option rather
+// than silently showing a different model.
+function fillSelect(select, current) {
+  const opts = [];
+  if (current && !modelOptions.includes(current)) {
+    opts.push(node("option", {
+      text: `${current} (unavailable)`,
+      attrs: { value: current, "data-stale": "true" },
+    }));
+  }
+  for (const m of modelOptions) {
+    opts.push(node("option", { text: m, attrs: { value: m } }));
+  }
+  select.replaceChildren(...opts);
+  if (current) select.value = current;
+}
+
+// Disable (for future selection) every option in `select` whose provider collides with
+// `otherValue`'s provider — never the currently-selected option (so the value is preserved)
+// and never a stale display option.
+function disableColliding(select, otherValue) {
+  const otherProv = providerOf(otherValue);
+  for (const opt of select.options) {
+    opt.disabled = opt.value !== select.value
+      && opt.dataset.stale !== "true"
+      && providerOf(opt.value) === otherProv;
+  }
+}
+
+function syncPairConstraints() {
+  disableColliding(controls.fallbackSelect, controls.primarySelect.value);
+  disableColliding(controls.primarySelect, controls.fallbackSelect.value);
+}
+
+// The first enabled, REAL (non-stale, in-dropdown) option in `select` whose provider
+// differs from `againstProvider`; null when none exists.
+function firstValidOption(select, againstProvider) {
+  for (const opt of select.options) {
+    if (opt.dataset.stale === "true") continue;
+    if (!modelOptions.includes(opt.value)) continue;
+    if (providerOf(opt.value) === againstProvider) continue;
+    return opt.value;
+  }
+  return null;
+}
+
+async function onPairChange(changedSelect) {
+  const isPrimary = changedSelect === controls.primarySelect;
+  const other = isPrimary ? controls.fallbackSelect : controls.primarySelect;
+  const otherSlot = isPrimary ? "fallback" : "primary";
+  const changedProv = providerOf(changedSelect.value);
+  controls.errorEl.textContent = "";
+  controls.noteEl.textContent = "";
+
+  syncPairConstraints();
+
+  // Disabling an option does not move the current selection, so a change can leave the
+  // other select on a now-colliding value. Auto-advance it to a valid option before saving.
+  let note = "";
+  if (providerOf(other.value) === changedProv) {
+    const saved = lastSaved[otherSlot];
+    const next = (saved && modelOptions.includes(saved) && providerOf(saved) !== changedProv)
+      ? saved
+      : firstValidOption(other, changedProv);
+    if (next == null) {
+      controls.errorEl.textContent =
+        "No different-provider model is available for the other slot.";
+      return;
+    }
+    other.value = next;
+    syncPairConstraints();
+    note = `${otherSlot === "fallback" ? "Fallback" : "Primary"} set to ${next} `
+         + "to keep the two providers distinct.";
+  }
+
+  await persistPair(note);
+}
+
+// Persist the current pair. Disables BOTH selects while the POST is in flight, so two
+// quick edits cannot land their responses out of order. On a 422 (a genuine backstop now
+// that the UI prevents collisions) revert to the last saved pair and show the detail.
+async function persistPair(note) {
+  const primary = controls.primarySelect.value;
+  const fallback = controls.fallbackSelect.value;
+  controls.primarySelect.disabled = true;
+  controls.fallbackSelect.disabled = true;
+  try {
+    await api.setClassificationModels(primary, fallback);
+    lastSaved = { primary, fallback };
+    controls.noteEl.textContent = note;
+    controls.errorEl.textContent = "";
+  } catch (err) {
+    controls.primarySelect.value = lastSaved.primary;
+    controls.fallbackSelect.value = lastSaved.fallback;
+    syncPairConstraints();
+    controls.noteEl.textContent = "";
+    controls.errorEl.textContent = err.message || String(err);
+  } finally {
+    controls.primarySelect.disabled = false;
+    controls.fallbackSelect.disabled = false;
+  }
+}
+
+async function populateModels() {
+  let data;
+  try {
+    data = await api.getClassificationModels();
+  } catch (err) {
+    controls.errorEl.textContent = `Could not load model options: ${err.message || err}`;
+    return;
+  }
+  modelOptions = data.options || [];
+  lastSaved = { primary: data.primary, fallback: data.fallback };
+  fillSelect(controls.primarySelect, data.primary);
+  fillSelect(controls.fallbackSelect, data.fallback);
+  syncPairConstraints();
+  controls.primarySelect.addEventListener(
+    "change", () => onPairChange(controls.primarySelect));
+  controls.fallbackSelect.addEventListener(
+    "change", () => onPairChange(controls.fallbackSelect));
+}
+
+function ensurePopulated() {
+  if (!populatePromise) populatePromise = populateModels();
+  return populatePromise;
 }
 
 // --- run / stream -----------------------------------------------------------
@@ -298,8 +440,10 @@ async function consumeStream(body, start) {
   }
 }
 
-// Page entry. Phase 2 only ensures the shell exists; Phase 3/4 add the stream + select
-// population. The signature takes `state` for parity with the other page modules.
+// Page entry: ensure the shell exists, then populate the model selects once (the run
+// reads its classifier models from prefs server-side, so the selects only persist the
+// operator's choice). The signature takes `state` for parity with the other page modules.
 export function refresh(_state) {
   ensureBuilt();
+  ensurePopulated();
 }

@@ -707,6 +707,15 @@ html { scroll-padding-top: var(--header-h, 0px); }
 /* The resting hint shown before the first run; dimmer than streamed output. */
 .extract-terminal-rest { color: var(--text-muted); }
 
+/* Neutral inline note (e.g. an auto-advanced model select). Distinct from .interpret-error
+   (red): this is informational, not a failure. */
+.extract-note {
+  margin: 0.4rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  min-height: 1rem;
+}
+
 /* Status pill for the run outcome (mirrors .prices-flag): a small uppercase label with
    colored text on a faint tint of the same accent. The pill is the page's polite live
    region, so only the run's status transitions announce. Reuses the accent tokens; the

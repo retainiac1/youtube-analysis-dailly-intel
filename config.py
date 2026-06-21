@@ -645,6 +645,35 @@ def pacific_date(eastern_iso: str | None = None) -> str:
     return dt.astimezone(ZoneInfo(QUOTA_RESET_TZ)).date().isoformat()
 
 
+def validate_classifier_pair(
+    primary: object,
+    fallback: object,
+    *,
+    primary_label: str = "Config key CLASSIFICATION_MODEL",
+    fallback_label: str = "Config key CLASSIFICATION_FALLBACK_MODEL",
+) -> None:
+    """Validate the classifier primary + fallback pair: each a non-empty
+    'provider:model' string, and the two naming DIFFERENT providers. The fallback exists
+    to survive a primary-provider outage, so a same-provider backup (or an identical
+    model: same string -> same provider) is dead exactly when it is needed.
+
+    Raises ConfigError. This is the ONE place the rule lives: validate_config calls it
+    with the config-key labels (the cron's startup gate), and the dashboard model picker
+    calls it with UI labels, so a UI write can never persist a pair the next run rejects.
+    The label kwargs only change the message wording, not the rule."""
+    for label, value in ((primary_label, primary), (fallback_label, fallback)):
+        if not isinstance(value, str) or ":" not in value.strip():
+            raise ConfigError(
+                f"{label} must be a non-empty 'provider:model' string, got {value!r}"
+            )
+    if primary.split(":", 1)[0] == fallback.split(":", 1)[0]:
+        raise ConfigError(
+            f"{fallback_label} must use a DIFFERENT provider than {primary_label} "
+            f"(both are {primary.split(':', 1)[0]!r}); the backup must survive a "
+            "primary-provider outage"
+        )
+
+
 def validate_config(cfg: object | None = None) -> None:
     """Validate that required config keys are present, correctly typed, and
     in-range, and that every SEARCH_QUERIES entry has a non-empty `q` and a valid
@@ -824,27 +853,14 @@ def validate_config(cfg: object | None = None) -> None:
         )
 
     # CLASSIFICATION_MODEL / CLASSIFICATION_FALLBACK_MODEL: the primary + backup models
-    # for the English/no-kids gate. Both non-empty 'provider:model' strings (so a
-    # provider can be split off and dispatched). The two MUST name DIFFERENT providers:
-    # the fallback exists to survive a primary-provider outage, so a same-provider backup
-    # would be dead exactly when it is needed. API-key presence is a runtime concern
-    # (validate_config cannot read os.environ for the operator's keys), warned at the
-    # phase, not here.
-    primary = getattr(cfg, "CLASSIFICATION_MODEL")
-    fallback = getattr(cfg, "CLASSIFICATION_FALLBACK_MODEL")
-    for key, value in (("CLASSIFICATION_MODEL", primary),
-                       ("CLASSIFICATION_FALLBACK_MODEL", fallback)):
-        if not isinstance(value, str) or ":" not in value.strip():
-            raise ConfigError(
-                f"Config key {key} must be a non-empty 'provider:model' string, "
-                f"got {value!r}"
-            )
-    if primary.split(":", 1)[0] == fallback.split(":", 1)[0]:
-        raise ConfigError(
-            "Config key CLASSIFICATION_FALLBACK_MODEL must use a DIFFERENT provider "
-            f"than CLASSIFICATION_MODEL (both are {primary.split(':', 1)[0]!r}); the "
-            "backup must survive a primary-provider outage"
-        )
+    # for the English/no-kids gate. The pair rule (both 'provider:model', DIFFERENT
+    # providers) lives in validate_classifier_pair so the dashboard picker enforces the
+    # SAME rule the cron does. API-key presence is a runtime concern (validate_config
+    # cannot read os.environ for the operator's keys), warned at the phase, not here.
+    validate_classifier_pair(
+        getattr(cfg, "CLASSIFICATION_MODEL"),
+        getattr(cfg, "CLASSIFICATION_FALLBACK_MODEL"),
+    )
 
     # CLASSIFICATION_RETRY: the classify lane's retry/backoff/breaker policy. All four
     # keys required; max_retries and max_fallback_videos strictly positive ints (a bool
