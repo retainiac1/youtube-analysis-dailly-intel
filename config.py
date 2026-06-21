@@ -230,6 +230,21 @@ DEFAULT_PRICE_VALIDATION = {
     },
 }
 
+# The dashboard Extract page spawns scripts/run-pipeline.sh and streams its stderr over
+# SSE. These three knobs bound that run; none is a magic number inline.
+# EXTRACT_RUN_TIMEOUT_SECONDS is a SAFETY CEILING, not a perf target: the single-flight
+# lock lives for the child's whole lifetime, so a wedged run (a hung socket mid-fetch, a
+# stuck DNS, a provider connection that never returns) would otherwise hold the lock until
+# the dashboard is restarted. Sized well above the worst legitimate discover (searches +
+# per-video classification with retries and backoff) so it ONLY ever fires on a true wedge.
+# On expiry the run is SIGTERM'd, given EXTRACT_TERMINATE_GRACE_SECONDS to exit, then
+# SIGKILL'd. EXTRACT_SSE_KEEPALIVE_SECONDS is how often the stream emits a comment ping
+# while the run is quiet so proxies/clients don't drop an idle connection. Fresh-checkout
+# fallbacks; settings.toml overrides them.
+DEFAULT_EXTRACT_RUN_TIMEOUT_SECONDS = 1800
+DEFAULT_EXTRACT_TERMINATE_GRACE_SECONDS = 10
+DEFAULT_EXTRACT_SSE_KEEPALIVE_SECONDS = 15
+
 # name -> default, for every externalized tunable. load_settings() merges the
 # parsed TOML over these, so a missing key always resolves to its default.
 SETTINGS_DEFAULTS: dict[str, object] = {
@@ -255,6 +270,9 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "KID_TITLE_KEYWORDS": DEFAULT_KID_TITLE_KEYWORDS,
     "PRICE_SOURCES": DEFAULT_PRICE_SOURCES,
     "PRICE_VALIDATION": DEFAULT_PRICE_VALIDATION,
+    "EXTRACT_RUN_TIMEOUT_SECONDS": DEFAULT_EXTRACT_RUN_TIMEOUT_SECONDS,
+    "EXTRACT_TERMINATE_GRACE_SECONDS": DEFAULT_EXTRACT_TERMINATE_GRACE_SECONDS,
+    "EXTRACT_SSE_KEEPALIVE_SECONDS": DEFAULT_EXTRACT_SSE_KEEPALIVE_SECONDS,
 }
 
 # Resolve relative to THIS file, not CWD, so it works regardless of where the
@@ -349,6 +367,9 @@ CLASSIFICATION_RETRY = _settings["CLASSIFICATION_RETRY"]
 KID_TITLE_KEYWORDS = _settings["KID_TITLE_KEYWORDS"]
 PRICE_SOURCES = _settings["PRICE_SOURCES"]
 PRICE_VALIDATION = _settings["PRICE_VALIDATION"]
+EXTRACT_RUN_TIMEOUT_SECONDS = _settings["EXTRACT_RUN_TIMEOUT_SECONDS"]
+EXTRACT_TERMINATE_GRACE_SECONDS = _settings["EXTRACT_TERMINATE_GRACE_SECONDS"]
+EXTRACT_SSE_KEEPALIVE_SECONDS = _settings["EXTRACT_SSE_KEEPALIVE_SECONDS"]
 
 # The per-model max_tokens defaults — strict, no fallback (see load_required_settings).
 _required = load_required_settings()
@@ -575,13 +596,18 @@ REQUIRED_KEYS: dict[str, type] = {
     "DEFAULT_MAX_TOKENS": int,
     "DEFAULT_MAX_TOKENS_REASONING": int,
     "MAX_TOKENS_UPPER_BOUND": int,
+    "EXTRACT_RUN_TIMEOUT_SECONDS": int,
+    "EXTRACT_TERMINATE_GRACE_SECONDS": int,
+    "EXTRACT_SSE_KEEPALIVE_SECONDS": int,
 }
 
 # Keys that must be strictly positive ints (type is checked via REQUIRED_KEYS).
 POSITIVE_INT_KEYS: frozenset[str] = frozenset(
     {"MIN_VIEWS", "WINDOW_DAYS", "TOP_N", "SHORT_MAX_SECONDS",
      "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER", "OLLAMA_TIMEOUT_SECONDS",
-     "DEFAULT_MAX_TOKENS", "DEFAULT_MAX_TOKENS_REASONING", "MAX_TOKENS_UPPER_BOUND"}
+     "DEFAULT_MAX_TOKENS", "DEFAULT_MAX_TOKENS_REASONING", "MAX_TOKENS_UPPER_BOUND",
+     "EXTRACT_RUN_TIMEOUT_SECONDS", "EXTRACT_TERMINATE_GRACE_SECONDS",
+     "EXTRACT_SSE_KEEPALIVE_SECONDS"}
 )
 
 

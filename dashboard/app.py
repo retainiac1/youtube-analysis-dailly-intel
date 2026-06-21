@@ -23,7 +23,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from fastapi import Depends, FastAPI, HTTPException, Query  # noqa: E402
-from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -31,7 +31,7 @@ import config  # noqa: E402
 import db  # noqa: E402
 import interpret  # noqa: E402
 import llm  # noqa: E402
-from dashboard import discovery  # noqa: E402
+from dashboard import discovery, extract  # noqa: E402
 from price_refresh import daily, store  # noqa: E402
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -1097,6 +1097,33 @@ def get_documentation_raw(tab: str, doc: str,
         raise HTTPException(status_code=404, detail="unknown document")
 
     return FileResponse(file_real, media_type=_DOC_MEDIA_TYPES.get(entry["format"]))
+
+
+@app.get("/api/extract/stream")
+async def api_extract_stream(mode: str = Query(...)):
+    """Start a pipeline run and stream its progress as Server-Sent Events.
+
+    `mode` is REQUIRED (no default) — `discover` runs the real, lock-taking discovery;
+    `dry-run` is the free, no-write quota preview. Defaulting would let a parameterless
+    client call silently launch a discover, so an absent/unknown mode is a 422. A
+    discover while one is already in flight is a 409 (single-flight); dry-run bypasses
+    that. Each stderr line arrives as a `log` event and the run ends with one terminal
+    `result` event (code + reason). EventSource forces GET, hence GET + query param."""
+    if mode not in extract.MODE_FLAGS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"mode must be one of {sorted(extract.MODE_FLAGS)}",
+        )
+    try:
+        handle = await extract.runner.start(mode)
+    except extract.ExtractBusy:
+        raise HTTPException(
+            status_code=409, detail="a discovery run is already in progress")
+    return StreamingResponse(
+        handle.stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 # Static assets + SPA shell. Registered AFTER every /api route above.

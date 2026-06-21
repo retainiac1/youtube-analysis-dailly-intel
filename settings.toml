@@ -14,6 +14,11 @@ CATEGORY_REGION = "US"             # ISO-3166 region whose titles seed the categ
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"  # local Ollama HTTP endpoint the adapter calls; non-empty string. Loopback only (never 0.0.0.0).
 OLLAMA_TIMEOUT_SECONDS = 300       # per-request timeout for the Ollama call; positive int. 5-min fail-fast ceiling so a dead/grinding server fails clean instead of hanging ~10 min. Raise for genuinely slower local models.
 
+# Dashboard Extract page (spawns run-pipeline.sh, streams stderr over SSE). All positive ints.
+EXTRACT_RUN_TIMEOUT_SECONDS = 1800       # SAFETY CEILING (not a perf target) for one discover/dry-run; positive int. The single-flight lock lives for the child's whole lifetime, so a wedged run holds it until this fires. Sized well above the worst legitimate run so it only ever trips on a true wedge.
+EXTRACT_TERMINATE_GRACE_SECONDS = 10     # grace after SIGTERM before SIGKILL when the watchdog kills a wedged run; positive int.
+EXTRACT_SSE_KEEPALIVE_SECONDS = 15       # how often the SSE stream emits a comment ping while a run is quiet so idle connections aren't dropped; positive int.
+
 # Per-model LLM output-token caps (the models.max_tokens column defaults). These
 # three have NO in-code fallback: config.py loads them strictly and ConfigError-s
 # if the file/key is missing, because a silently-defaulted token cap is an invisible

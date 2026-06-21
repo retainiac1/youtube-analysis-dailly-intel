@@ -23,6 +23,9 @@ def make_good_config() -> SimpleNamespace:
         DEFAULT_MAX_TOKENS=512,
         DEFAULT_MAX_TOKENS_REASONING=5000,
         MAX_TOKENS_UPPER_BOUND=8192,
+        EXTRACT_RUN_TIMEOUT_SECONDS=1800,
+        EXTRACT_TERMINATE_GRACE_SECONDS=10,
+        EXTRACT_SSE_KEEPALIVE_SECONDS=15,
         SEARCH_QUERIES=[
             {"q": "build habits", "bucket": "habit"},
             {"q": "zone 2 cardio", "bucket": "health"},
@@ -324,6 +327,23 @@ def test_non_positive_ollama_timeout_raises_named_error():
     cfg = make_good_config()
     cfg.OLLAMA_TIMEOUT_SECONDS = 0  # a zero/negative timeout would hang or error
     with pytest.raises(config.ConfigError, match="OLLAMA_TIMEOUT_SECONDS"):
+        config.validate_config(cfg)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "EXTRACT_RUN_TIMEOUT_SECONDS",
+        "EXTRACT_TERMINATE_GRACE_SECONDS",
+        "EXTRACT_SSE_KEEPALIVE_SECONDS",
+    ],
+)
+def test_non_positive_extract_knob_raises_named_error(key):
+    # The Extract-page watchdog/keepalive seconds bound a spawned run; a zero or
+    # negative value would make the watchdog fire instantly or busy-loop the stream.
+    cfg = make_good_config()
+    setattr(cfg, key, 0)
+    with pytest.raises(config.ConfigError, match=key):
         config.validate_config(cfg)
 
 
