@@ -707,6 +707,26 @@ html { scroll-padding-top: var(--header-h, 0px); }
 /* The resting hint shown before the first run; dimmer than streamed output. */
 .extract-terminal-rest { color: var(--text-muted); }
 
+/* Status pill for the run outcome (mirrors .prices-flag): a small uppercase label with
+   colored text on a faint tint of the same accent. The pill is the page's polite live
+   region, so only the run's status transitions announce. Reuses the accent tokens; the
+   tints match .prices-flag. Hidden until the first run sets a label. */
+.extract-status {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.15rem 0.55rem;
+  border-radius: var(--radius-sm);
+}
+.extract-status:empty { display: none; }
+.extract-status-running { color: var(--text-muted);      background: var(--bg-elevated); }
+.extract-status-success { color: var(--accent-cyan);     background: rgba(0, 242, 169, 0.12); }
+.extract-status-warn    { color: var(--accent-amber);    background: rgba(245, 158, 11, 0.14); }
+.extract-status-error   { color: var(--accent-red);      background: rgba(239, 68, 68, 0.16); }
+.extract-status-neutral { color: var(--text-secondary);  background: var(--bg-elevated); }
+
 /* --- Trends interpretation rail (read-only, right column) ---------------- */
 /* Mirrors the left filter rail: sticky and offset below the pinned header by the
    runtime-measured --header-h, so it stays in view while the charts scroll. The

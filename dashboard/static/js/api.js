@@ -13,7 +13,7 @@ async function getJSON(url) {
 // 422/409/400) and falling back to the status line when the body is not JSON (e.g. a
 // proxy page). Shared by POST and PUT so an edited-row error surfaces the same honest
 // message the add form does, not a bare "422 Unprocessable Content".
-async function errorFrom(resp) {
+export async function errorFrom(resp) {
   let detail = `${resp.status} ${resp.statusText}`;
   try {
     const b = await resp.json();
@@ -155,6 +155,14 @@ export function runInterpret({ runDate, scope, model, temperature, seed, think, 
     think,
     fields,
   });
+}
+
+// --- Extract page: the SSE run/stream (the one streaming endpoint) -----------
+// Returns the RAW Response (not getJSON): the caller checks the status (409 = a discover is
+// already running, 422 = a bad mode) and, on 200, reads the body as a text/event-stream.
+// `signal` is a per-run AbortController signal for teardown.
+export function streamExtract(mode, signal) {
+  return fetch(`/api/extract/stream?${new URLSearchParams({ mode })}`, { signal });
 }
 
 // --- Phase 5: the /models registry editor -----------------------------------

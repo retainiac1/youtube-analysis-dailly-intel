@@ -2,20 +2,31 @@
 // classifier model, a "Run discovery" button, a "Dry run" preview, a stopwatch, and a
 // status pill) sits above a monospace terminal that streams the run's progress.
 //
-// Phase 2 builds the SHELL ONLY: the selects are empty (Phase 4 populates them from the
-// model registry), the buttons have no handlers (Phase 3 opens the SSE stream and wires
-// them), the terminal shows a resting hint until streamed, and the status pill is an empty
-// slot. The right-column spend aside (#extract-spend-panel) is a sibling owned by spend.js
-// in Phase 5; this module never touches it.
+// Phase 3 wires the run: clicking a button opens GET /api/extract/stream (via fetch, NOT
+// EventSource: we need the 409/422 status and must not auto-reconnect/relaunch on the
+// server's stream-close), relays each `log` event into the terminal, and ends on the
+// terminal `result` event with a status pill from the pipeline exit contract. The selects
+// stay empty until Phase 4 (the run reads its classifier models from prefs server-side, so
+// it works without them); the #extract-spend-panel aside is Phase 5's (never touched here).
 //
 // Mirrors interpretation.js: it owns #extract-main only and builds the card + terminal as
-// the two children of that mount, exactly as Interpretation stacks its controls above the
-// result card. Empty temperature/seed/think controls are intentionally absent: the
+// the two children of that mount. Temperature/seed/think are intentionally absent: the
 // classifier runs deterministic.
 
+import * as api from "./api.js";
+
 let el = null;          // the page mount (#extract-main); this module owns ONLY this
-let controls = null;    // handles kept for Phases 3-4 (no listeners attached yet)
+let controls = null;    // the built handles (selects, buttons, stopwatch, pill, terminal)
 let built = false;      // the scaffold is built once, on first entry
+let running = false;    // a run is in flight (client single-flight; the server 409 is the
+                        // real authority across tabs/reloads)
+let timer = null;       // the live run-time stopwatch interval
+let currentRun = null;  // the in-flight run's AbortController (FRESH per run; see onRun)
+
+// Cap the retained terminal lines so a long run cannot grow the DOM without bound. A named
+// JS const (like main.js's MAX_TRACKED) since there is no JS<->config bridge; the oldest
+// line is dropped past the cap. Sized far above a normal discover's line count.
+const MAX_TERMINAL_LINES = 2000;
 
 export function init(mount) {
   el = mount;
@@ -39,6 +50,52 @@ function labeled(text, input) {
     node("span", { text }),
     input,
   ]);
+}
+
+// Milliseconds -> "3.2s" (mirrors interpretation.js); null when unmeasured.
+function formatDuration(ms) {
+  if (ms == null || Number.isNaN(ms)) return null;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// Map a pipeline result (exit code + reason slug) to the status pill's label + severity.
+// Keyed by REASON, not code: `timeout` and `other` are both code 5 but read differently. An
+// unknown reason (a future backend slug) falls back to a neutral pill showing the code, so
+// the UI never hides a result it does not recognize. Exported for the browser unit test.
+const STATUS_BY_REASON = {
+  ok:                       { label: "Complete",            severity: "success" },
+  no_rows:                  { label: "Ran, no new rows",    severity: "warn" },
+  quota_exceeded:           { label: "Quota reached",       severity: "warn" },
+  classify_budget_exceeded: { label: "Classify budget hit", severity: "warn" },
+  network:                  { label: "Network error",       severity: "error" },
+  auth:                     { label: "Auth error",          severity: "error" },
+  db_locked:                { label: "Database busy",        severity: "error" },
+  other:                    { label: "Failed",              severity: "error" },
+  timeout:                  { label: "Timed out",           severity: "error" },
+};
+
+export function statusForResult(code, reason) {
+  return STATUS_BY_REASON[reason]
+    || { label: `Finished (code ${code})`, severity: "neutral" };
+}
+
+// Parse one SSE frame ("event: X\ndata: {json}") into { event, data }. Returns null for a
+// keep-alive comment frame (a line starting with ':') or a frame with no event line. The
+// data line is JSON (the server JSON-encodes payloads). Exported for the browser unit test.
+export function parseSseFrame(frame) {
+  let event = null;
+  let dataRaw = null;
+  for (const line of frame.split("\n")) {
+    if (line.startsWith(":")) continue;             // comment / keep-alive
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataRaw = line.slice(5).trim();
+  }
+  if (!event) return null;
+  let data = null;
+  if (dataRaw != null) {
+    try { data = JSON.parse(dataRaw); } catch (_) { data = null; }
+  }
+  return { event, data };
 }
 
 function buildScaffold() {
@@ -69,9 +126,12 @@ function buildScaffold() {
     stopwatchEl,
   ]);
 
-  // Status-pill slot: empty now; Phase 3 fills it from the terminal `result` event
-  // (code -> {label, severity}).
-  const statusPill = node("span", { class: "extract-status" });
+  // Status pill: the page's polite live region (role=status + aria-live=polite), so only
+  // the run's status transitions announce (Running -> Complete/Failed), not the log flood.
+  // Filled from the terminal `result` event via statusForResult().
+  const statusPill = node("span", {
+    class: "extract-status", attrs: { role: "status", "aria-live": "polite" },
+  });
 
   // Inline error/status line (reuses the Interpretation error styling).
   const errorEl = node("p", { class: "interpret-error", attrs: { role: "alert" } });
@@ -91,11 +151,12 @@ function buildScaffold() {
   ]);
 
   // The terminal: the streamed-output surface, stacked below the card inside #extract-main
-  // (mirrors where Interpretation shows its result). aria-live is scoped HERE, not on the
-  // page <main>, so only run output announces (Phase 3 revisits the politeness of a fast
-  // log flood). Empty until a run; a muted resting hint stands in.
+  // (mirrors where Interpretation shows its result). aria-live is OFF: a fast discover emits
+  // many lines, which would flood a screen reader; the status pill carries the polite live
+  // region instead, announcing only the run's status transitions. Empty until a run; a
+  // muted resting hint stands in.
   const terminal = node("div", {
-    class: "extract-terminal", attrs: { "aria-live": "polite" },
+    class: "extract-terminal", attrs: { "aria-live": "off" },
   }, [
     node("span", {
       class: "extract-terminal-rest",
@@ -108,12 +169,133 @@ function buildScaffold() {
 
   // Owns #extract-main ONLY (card + terminal). Never touches the sibling spend aside.
   el.replaceChildren(card, terminal);
+
+  runBtn.addEventListener("click", () => onRun("discover"));
+  dryRunBtn.addEventListener("click", () => onRun("dry-run"));
 }
 
 function ensureBuilt() {
   if (built) return;
   buildScaffold();
   built = true;
+}
+
+// --- run / stream -----------------------------------------------------------
+
+function setPill(label, severity) {
+  controls.statusPill.textContent = label;
+  controls.statusPill.className = `extract-status extract-status-${severity}`;
+}
+
+// Append one streamed log line. textContent only (the line is untrusted process stderr).
+// Caps the retained lines, and auto-scrolls only when the view is already pinned to the
+// bottom, so a user who scrolled up to read is not yanked back down.
+function appendLine(text) {
+  const t = controls.terminal;
+  const pinned = t.scrollHeight - t.scrollTop - t.clientHeight < 4;
+  t.appendChild(node("div", { class: "extract-terminal-line", text }));
+  while (t.childElementCount > MAX_TERMINAL_LINES) t.removeChild(t.firstChild);
+  if (pinned) t.scrollTop = t.scrollHeight;
+}
+
+async function onRun(mode) {
+  if (running) return;                      // client single-flight (per tab)
+  running = true;
+  controls.runBtn.disabled = true;
+  controls.dryRunBtn.disabled = true;
+  controls.errorEl.textContent = "";
+  setPill("Running…", "running");
+  controls.terminal.replaceChildren();      // drop the resting hint / a prior run's lines
+
+  const start = performance.now();
+  const tick = () => {
+    controls.stopwatchEl.textContent = formatDuration(performance.now() - start) || "—";
+  };
+  tick();
+  timer = setInterval(tick, 100);
+
+  // FRESH AbortController per run: a controller is one-shot, so reusing one across runs
+  // would, once aborted, dead-letter every later fetch with AbortError. No caller aborts it
+  // this phase (no cancel UI), but the fresh-per-run pattern is set now to prevent that bug.
+  const ctrl = new AbortController();
+  currentRun = ctrl;
+
+  try {
+    const res = await api.streamExtract(mode, ctrl.signal);
+    if (res.status === 409) {
+      // The server is the single-flight authority: a discover is already running (another
+      // tab, or one that survived a reload). Show it; do NOT open a second stream. Returning
+      // here still runs the finally, so the buttons re-enable.
+      setPill("Busy", "warn");
+      controls.errorEl.textContent = (await api.errorFrom(res)).message;
+      return;
+    }
+    if (!res.ok) {
+      setPill("Failed", "error");
+      controls.errorEl.textContent = (await api.errorFrom(res)).message;
+      return;
+    }
+    await consumeStream(res.body, start);
+  } catch (err) {
+    if (err && err.name === "AbortError") return;   // cancelled (no caller yet): silent
+    setPill("Failed", "error");
+    controls.errorEl.textContent = err.message || String(err);
+  } finally {
+    clearInterval(timer);
+    timer = null;
+    running = false;
+    currentRun = null;
+    controls.runBtn.disabled = false;
+    controls.dryRunBtn.disabled = false;
+  }
+}
+
+// Read the SSE body to completion. ONE persistent TextDecoder with {stream:true} so a
+// multi-byte UTF-8 char split across read() chunks is decoded correctly (not a replacement
+// char). Parse only COMPLETE frames (split on the blank line) and keep the trailing partial
+// in `buf` for the next read; a TCP chunk can split a frame mid-boundary.
+async function consumeStream(body, start) {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let sawResult = false;
+
+  const drain = () => {
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const frame = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      const parsed = parseSseFrame(frame);
+      if (!parsed) continue;                          // keep-alive comment / blank
+      if (parsed.event === "log" && parsed.data) {
+        appendLine(parsed.data.text);
+      } else if (parsed.event === "result" && parsed.data) {
+        sawResult = true;
+        clearInterval(timer);                         // freeze the clock at the result
+        timer = null;
+        controls.stopwatchEl.textContent =
+          formatDuration(performance.now() - start) || "—";
+        const { label, severity } = statusForResult(parsed.data.code, parsed.data.reason);
+        setPill(label, severity);
+        // EVERY terminal result (success or failure) may have spent classifier tokens, so
+        // notify Phase 5's spend panel. Harmless now: no listener exists until Phase 5.
+        document.dispatchEvent(new CustomEvent("extract:completed"));
+      }
+    }
+  };
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (value) buf += dec.decode(value, { stream: true });
+    drain();                                          // parse whatever is now complete
+    if (done) break;
+  }
+  // drain() ran after the final chunk, so a result frame that arrived with the close was
+  // already parsed. Only if NO result EVER arrived is this a defective stream.
+  if (!sawResult) {
+    setPill("No result", "error");
+    controls.errorEl.textContent = "The run ended without a result line.";
+  }
 }
 
 // Page entry. Phase 2 only ensures the shell exists; Phase 3/4 add the stream + select
