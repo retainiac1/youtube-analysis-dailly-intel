@@ -401,6 +401,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .board[hidden],
 .trends[hidden],
 .interpretation[hidden],
+.extract[hidden],
 .models[hidden],
 .prices[hidden],
 .documentation[hidden] {
@@ -682,6 +683,29 @@ html { scroll-padding-top: var(--header-h, 0px); }
   font-size: 0.85rem;
   min-height: 1rem;
 }
+
+/* --- Extract page terminal (streamed run output) ------------------------- */
+/* The center output surface on the Extract page's #extract-main column, mirroring
+   where Interpretation shows its result card. A plain monospace log area; Phase 3
+   streams the run's stderr lines into it. Bounded height with its own scroll so a
+   long run never grows the page. Reuses the glass-theme tokens (no new color token);
+   the monospace stack is a generic font family, not a token. */
+.extract-terminal {
+  margin-top: 1.5rem;
+  padding: 1rem 1.25rem;
+  max-height: 28rem;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+/* The resting hint shown before the first run; dimmer than streamed output. */
+.extract-terminal-rest { color: var(--text-muted); }
 
 /* --- Trends interpretation rail (read-only, right column) ---------------- */
 /* Mirrors the left filter rail: sticky and offset below the pinned header by the

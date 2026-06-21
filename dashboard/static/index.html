@@ -42,6 +42,8 @@
                tabindex="-1">Trends</a>
             <a class="page-nav-link" data-route href="/interpretation"
                id="nav-interpretation" tabindex="-1">Interpretation</a>
+            <a class="page-nav-link" data-route href="/extract"
+               id="nav-extract" tabindex="-1">Extract</a>
             <a class="page-nav-link" data-route href="/models"
                id="nav-models" tabindex="-1">Models</a>
             <a class="page-nav-link" data-route href="/prices"
@@ -120,6 +122,18 @@
       <main class="interpretation page-aside" id="interpretation" aria-live="polite" hidden>
         <div id="interpretation-main" class="page-aside-main"></div>
         <aside class="glass-panel spend-panel" id="spend-panel" aria-label="LLM spend"></aside>
+      </main>
+
+      <!-- The Extract page on the shared .page-aside shell: extract.js owns #extract-main
+           (it replaceChildren's it) with the run controls + the streamed terminal; a
+           spend.js panel will own the #extract-spend-panel aside (Phase 5). Mounting the
+           aside as a sibling of #extract-main (not a child) means a run re-render never
+           wipes it. A global action surface, not run/lane scoped. No page-level aria-live:
+           the terminal carries its own, so only run output announces (not the whole page on
+           every navigation). -->
+      <main class="extract page-aside" id="extract" hidden>
+        <div id="extract-main" class="page-aside-main"></div>
+        <aside class="glass-panel spend-panel" id="extract-spend-panel" aria-label="LLM spend"></aside>
       </main>
 
       <!-- The model + price registry editor (models.js owns this region; it

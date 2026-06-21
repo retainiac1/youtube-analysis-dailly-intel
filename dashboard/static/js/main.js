@@ -9,6 +9,7 @@ import * as filters from "./filters.js";
 import * as board from "./board.js";
 import * as trends from "./trends.js";
 import * as interpretation from "./interpretation.js";
+import * as extract from "./extract.js";
 import * as interpRail from "./interpretation-rail.js";
 import * as spend from "./spend.js";
 import * as models from "./models.js";
@@ -22,6 +23,7 @@ const runSelect = document.getElementById("run-select");
 const boardEl = document.getElementById("board");
 const trendsEl = document.getElementById("trends");
 const interpretationEl = document.getElementById("interpretation");
+const extractEl = document.getElementById("extract");
 const modelsEl = document.getElementById("models");
 const pricesEl = document.getElementById("prices");
 const documentationEl = document.getElementById("documentation");
@@ -121,6 +123,7 @@ function enterBoard() {
   drawerToggle.hidden = false;
   trendsEl.hidden = true;
   interpretationEl.hidden = true;
+  extractEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
   pricesEl.hidden = true;
@@ -133,6 +136,7 @@ function enterTrends() {
   drawerToggle.hidden = true;
   trendsEl.hidden = false;
   interpretationEl.hidden = true;
+  extractEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
   pricesEl.hidden = true;
@@ -150,6 +154,7 @@ function enterInterpretation() {
   drawerToggle.hidden = true;
   trendsEl.hidden = true;
   interpretationEl.hidden = false;
+  extractEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
   pricesEl.hidden = true;
@@ -160,6 +165,24 @@ function enterInterpretation() {
   interpSpend.refresh(state);
 }
 
+// The Extract page: run a discovery from the UI. A global action surface (not run/lane
+// scoped), so it hides the filter rail/drawer and the lane tabs like Prices. Phase 2 only
+// builds the shell; the SSE stream wiring (Phase 3) and the spend panel (Phase 5) arrive
+// later, so entry just ensures the scaffold exists.
+function enterExtract() {
+  boardEl.hidden = true;
+  rail.hidden = true;
+  drawerToggle.hidden = true;
+  trendsEl.hidden = true;
+  interpretationEl.hidden = true;
+  extractEl.hidden = false;
+  modelsEl.hidden = true;
+  documentationEl.hidden = true;
+  pricesEl.hidden = true;
+  laneRow.hidden = true; // not lane-scoped; hide the lane tabs here
+  extract.refresh(state);
+}
+
 // The registry editor: a global admin page (not run/lane scoped). Hide every other
 // region + the filter rail/drawer, then load the models grid.
 function enterModels() {
@@ -168,6 +191,7 @@ function enterModels() {
   drawerToggle.hidden = true;
   trendsEl.hidden = true;
   interpretationEl.hidden = true;
+  extractEl.hidden = true;
   modelsEl.hidden = false;
   documentationEl.hidden = true;
   pricesEl.hidden = true;
@@ -184,6 +208,7 @@ function enterDocumentation() {
   drawerToggle.hidden = true;
   trendsEl.hidden = true;
   interpretationEl.hidden = true;
+  extractEl.hidden = true;
   modelsEl.hidden = true;
   pricesEl.hidden = true;
   documentationEl.hidden = false;
@@ -199,6 +224,7 @@ function enterPrices() {
   drawerToggle.hidden = true;
   trendsEl.hidden = true;
   interpretationEl.hidden = true;
+  extractEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
   pricesEl.hidden = false;
@@ -377,6 +403,9 @@ async function init() {
   // mount); spend.js owns the sibling panel, so a generation re-render never wipes
   // it. The outer #interpretation main stays the page region toggled by the router.
   interpretation.init(document.getElementById("interpretation-main"));
+  // extract.js owns the inner #extract-main column (it replaceChildren's it); the sibling
+  // #extract-spend-panel aside is left for Phase 5, so the mount mirrors Interpretation.
+  extract.init(document.getElementById("extract-main"));
   // One spend-panel instance per page, each bound to its own aside mount.
   interpSpend = spend.create(document.getElementById(INTERP_SPEND_ID));
   pricesSpend = spend.create(document.getElementById(PRICES_SPEND_ID));
@@ -399,6 +428,7 @@ async function init() {
       "/board": enterBoard,
       "/trends": enterTrends,
       "/interpretation": enterInterpretation,
+      "/extract": enterExtract,
       "/models": enterModels,
       "/prices": enterPrices,
       "/documentation": enterDocumentation,
