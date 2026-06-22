@@ -38,6 +38,7 @@ const MAX_TRACKED = 5;
 const TRENDS_ROUTE = "/trends";
 const INTERPRETATION_ROUTE = "/interpretation";
 const PRICES_ROUTE = "/prices";
+const EXTRACT_ROUTE = "/extract";
 
 // Mount container ids for the shared spend panel and the Prices content column.
 // Named here (not sprinkled as literals) so each id has one source; the spend panel
@@ -45,11 +46,13 @@ const PRICES_ROUTE = "/prices";
 const INTERP_SPEND_ID = "spend-panel";
 const PRICES_SPEND_ID = "prices-spend-panel";
 const PRICES_MAIN_ID = "prices-main";
+const EXTRACT_SPEND_ID = "extract-spend-panel";
 
 // One independent spend-panel instance per page, created in init(). Each owns its own
 // data cache + donut instances + resize listener, so they never collide.
 let interpSpend = null;
 let pricesSpend = null;
+let extractSpend = null;
 
 // The active page is owned by the router (router.current()); run/lane/tracked are
 // shared state that persists across pages. tracked is EPHEMERAL in-memory view
@@ -181,6 +184,10 @@ function enterExtract() {
   pricesEl.hidden = true;
   laneRow.hidden = true; // not lane-scoped; hide the lane tabs here
   extract.refresh(state);
+  // The same spend panel as Interpretation/Prices, in this page's right aside (its own
+  // instance), refreshed on entry. Re-entering after a background run completed catches up
+  // the panel here (the extract:completed listener only refreshes while the page is shown).
+  extractSpend.refresh(state);
 }
 
 // The registry editor: a global admin page (not run/lane scoped). Hide every other
@@ -270,6 +277,7 @@ function setupTheme() {
     // showing (Interpretation and Prices each have their own instance).
     if (router.current() === INTERPRETATION_ROUTE) interpSpend.rerenderFromCache();
     if (router.current() === PRICES_ROUTE) pricesSpend.rerenderFromCache();
+    if (router.current() === EXTRACT_ROUTE) extractSpend.rerenderFromCache();
   });
 }
 
@@ -403,12 +411,14 @@ async function init() {
   // mount); spend.js owns the sibling panel, so a generation re-render never wipes
   // it. The outer #interpretation main stays the page region toggled by the router.
   interpretation.init(document.getElementById("interpretation-main"));
-  // extract.js owns the inner #extract-main column (it replaceChildren's it); the sibling
-  // #extract-spend-panel aside is left for Phase 5, so the mount mirrors Interpretation.
+  // extract.js owns the inner #extract-main column (it replaceChildren's it); a spend.js
+  // panel owns the sibling #extract-spend-panel aside, so a run re-render never wipes it
+  // (the same two-stable-mounts pattern as Interpretation).
   extract.init(document.getElementById("extract-main"));
   // One spend-panel instance per page, each bound to its own aside mount.
   interpSpend = spend.create(document.getElementById(INTERP_SPEND_ID));
   pricesSpend = spend.create(document.getElementById(PRICES_SPEND_ID));
+  extractSpend = spend.create(document.getElementById(EXTRACT_SPEND_ID));
   interpRail.init(document.getElementById("trends-interp-rail"));
   models.init(modelsEl);
   // price-refresh.js owns the Prices content column (#prices-main), NOT the #prices
@@ -421,6 +431,16 @@ async function init() {
   // is dispatched by interpretation.js after a written run, keeping spend.js
   // decoupled (it never imports interpretation.js) while main.js owns `state`.
   document.addEventListener("interpretation:generated", () => interpSpend.refresh(state));
+
+  // A completed extract run (success OR failure) may have spent classifier tokens, so
+  // refresh the Extract spend panel. Unlike interpretation:generated (which only fires
+  // while you are on the page), an extract run survives navigation and can finish while you
+  // are off /extract, so gate on the route — refreshing a hidden panel would size ECharts on
+  // a zero-size element. `extractSpend &&` guards this document-level listener against a
+  // missing mount. The page-entry refresh catches up when you return.
+  document.addEventListener("extract:completed", () => {
+    if (extractSpend && router.current() === EXTRACT_ROUTE) extractSpend.refresh(state);
+  });
 
   // Register routes (wires page-nav clicks/keys); do not dispatch until data loads.
   router.initRouter({
@@ -455,6 +475,8 @@ async function init() {
     }
     // The Prices page shows the same panel; keep it in sync on a run change too.
     if (router.current() === PRICES_ROUTE) pricesSpend.refresh(state);
+    // The Extract page's spend panel is run-scoped too.
+    if (router.current() === EXTRACT_ROUTE) extractSpend.refresh(state);
   });
 
   let runs;
