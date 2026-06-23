@@ -20,6 +20,9 @@ data/database/backups/
 # Pipeline resume state
 state.json
 
+# Dashboard server log (traceback record; never committed)
+logs/
+
 # Python / virtualenv
 .venv/
 __pycache__/

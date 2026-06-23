@@ -8,6 +8,7 @@ short retry rather than a 500.
 """
 
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -22,8 +23,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from fastapi import Depends, FastAPI, HTTPException, Query  # noqa: E402
-from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
+from fastapi import Depends, FastAPI, HTTPException, Query, Request  # noqa: E402
+from fastapi.responses import (  # noqa: E402
+    FileResponse, JSONResponse, StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -36,6 +39,21 @@ from dashboard import discovery, extract  # noqa: E402
 from price_refresh import daily, store  # noqa: E402
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Server-side log so an endpoint failure leaves a full traceback to read after the
+# fact, not just a message-less 500 in the browser. Writes to logs/dashboard.log
+# (gitignored) and also propagates to the console uvicorn shows. Configured once at
+# import; the guard makes it idempotent under --reload re-imports.
+_LOG_DIR = _REPO_ROOT / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+logger = logging.getLogger("dashboard")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    _log_handler = logging.FileHandler(_LOG_DIR / "dashboard.log")
+    _log_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    logger.addHandler(_log_handler)
 
 # The three leaderboard lanes. health/habit are rankings.bucket values and also
 # videos.buckets members; overall is the whole-pool lane (a rankings.bucket
@@ -57,6 +75,54 @@ async def _lifespan(app: "FastAPI"):
 
 app = FastAPI(title="daily-intel dashboard", docs_url="/api/docs",
               lifespan=_lifespan)
+
+
+# --- App-wide error mapping -------------------------------------------------
+# One place turns the failures that can hit ANY endpoint into a clean, actionable
+# {detail} message, never a message-less 500. The frontend's errorFrom() renders
+# {detail} verbatim, so these reach the user as-is. Per-endpoint try/except still
+# takes precedence (it catches before the exception reaches these handlers); these
+# only own what would otherwise escape. HTTPException and 422 validation keep their
+# own built-in handlers.
+
+@app.exception_handler(sqlite3.OperationalError)
+async def _on_operational_error(request: Request, exc: sqlite3.OperationalError):
+    """The recurring one: another program (almost always DB Browser for SQLite,
+    open with an uncommitted transaction) holds a write lock on swipefile.db, so
+    every DB read/write fails. run_with_db_retry already retried and gave up. Map
+    it to a 503 with an actionable message instead of an opaque 500. Any other
+    OperationalError is a real fault: log the traceback and 500 with its message."""
+    if "database is locked" in str(exc).lower():
+        logger.warning("database is locked (%s %s): %s",
+                       request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": (
+                "The database is locked by another program, most often DB "
+                "Browser for SQLite open with an uncommitted transaction. Close "
+                "it (or commit/rollback there), then retry."
+            )},
+        )
+    logger.exception("OperationalError (%s %s)", request.method, request.url.path)
+    return JSONResponse(status_code=500,
+                        content={"detail": f"OperationalError: {exc}"})
+
+
+@app.exception_handler(llm.LLMError)
+async def _on_llm_error(request: Request, exc: llm.LLMError):
+    """A provider-seam failure (missing key, out-of-range temperature, unknown
+    provider, malformed response) is a clean 400 with the message, never a 500."""
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(Exception)
+async def _on_unhandled(request: Request, exc: Exception):
+    """The backstop: anything not mapped above is logged with a full traceback to
+    logs/dashboard.log and returned as a 500 carrying the real error (type +
+    message), so the UI shows something actionable instead of a bare 500."""
+    logger.exception("unhandled error (%s %s)", request.method, request.url.path)
+    return JSONResponse(status_code=500,
+                        content={"detail": f"{type(exc).__name__}: {exc}"})
 
 
 def _lane_to_bucket(lane: str) -> str:
@@ -482,16 +548,15 @@ def api_interpret(
             db.set_preference(conn, PROMPT_FIELDS_PREF,
                               json.dumps(fields), config.now_local_iso())
 
+    # No try/except here: the app-wide handlers map llm.LLMError → 400, a locked
+    # DB → 503 with an actionable message, and anything else → a logged 500 that
+    # still carries the real error. Catching inline would shadow those.
     db.run_with_db_retry(_save_pref)
-
-    try:
-        result = interpret.synthesize_lane(
-            conn, body.run_date, body.scope, body.model,
-            temperature=body.temperature, seed=body.seed, think=body.think,
-            fields=fields,
-        )
-    except llm.LLMError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    result = interpret.synthesize_lane(
+        conn, body.run_date, body.scope, body.model,
+        temperature=body.temperature, seed=body.seed, think=body.think,
+        fields=fields,
+    )
     # On the written path, echo the model so the client renders the "Generated by"
     # meta line immediately; a skipped result carries no model (nothing was
     # generated, so the UI shows the empty/skip state, not a card).
