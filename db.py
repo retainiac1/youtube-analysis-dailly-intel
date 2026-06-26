@@ -2110,3 +2110,238 @@ def fetch_rank_history(
         "run_dates": run_dates,
         "series": list(series.values()),
     }
+
+
+# --- Dashboard tab: lane-scoped, period-aggregated read helpers ---------------
+# All three dedup the videos that ranked in `bucket` within [start_date, end_date]
+# (a bound is omitted when None; run_date is a date key so the compare is lexical,
+# NOT an instant) and aggregate fields in Python, mirroring fetch_filter_options.
+# Read-only: NO schema change, no writes.
+
+# Ratio bands for the breakout chart. Unlike DURATION_BANDS (non-overlapping int
+# ranges, inclusive both ends), ratios are floats with shared edges, so binning is
+# lower-inclusive / upper-exclusive: lo <= r < hi (None = unbounded that side), so
+# each ratio lands in exactly one band. Display order is list order.
+RATIO_BANDS: list[tuple[str, float | None, float | None]] = [
+    ("<1x", None, 1.0),
+    ("1-10x", 1.0, 10.0),
+    ("10-100x", 10.0, 100.0),
+    ("100x+", 100.0, None),
+]
+
+
+def _ratio_band_for(r: float) -> str | None:
+    """The RATIO_BANDS label a ratio falls in (lower-inclusive, upper-exclusive)."""
+    for label, lo, hi in RATIO_BANDS:
+        if (lo is None or r >= lo) and (hi is None or r < hi):
+            return label
+    return None
+
+
+def _split_pipe(s: str | None) -> list[str]:
+    """Split a pipe-delimited field (the pipeline's delimiter), dropping empties."""
+    return [x for x in (s or "").split("|") if x]
+
+
+def _counts_desc(counts: dict[str, int]) -> list[dict]:
+    """A {label,count} list sorted by count DESC, label ASC for stable ties."""
+    return [
+        {"label": label, "count": n}
+        for label, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+def _dashboard_video_rows(
+    conn: sqlite3.Connection,
+    bucket: str,
+    start_date: str | None,
+    end_date: str | None,
+    select_cols: str,
+    extra_join: str = "",
+) -> list:
+    """One row per unique video that ranked in `bucket` within the window. The
+    rankings subquery dedups to distinct video_id; the outer query reads the wanted
+    columns from videos (plus any extra_join, e.g. channels)."""
+    where = ["r.bucket = :bucket"]
+    params: dict = {"bucket": bucket}
+    if start_date:
+        where.append("r.run_date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where.append("r.run_date <= :end_date")
+        params["end_date"] = end_date
+    return conn.execute(
+        f"""
+        SELECT {select_cols}
+        FROM videos v
+        {extra_join}
+        WHERE v.video_id IN (
+            SELECT DISTINCT r.video_id
+            FROM rankings r
+            WHERE {" AND ".join(where)}
+        )
+        """,
+        params,
+    ).fetchall()
+
+
+def fetch_dashboard_topic_mix(
+    conn: sqlite3.Connection,
+    bucket: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """{subniche_counts, category_counts, topic_counts} for the deduped lane+window
+    set. matched_queries / topic_categories are pipe-delimited; category_id is
+    resolved to categories.title (NULL or unknown -> "Uncategorized", merged). Each
+    list is [{label, count}] sorted by count DESC."""
+    rows = _dashboard_video_rows(
+        conn, bucket, start_date, end_date,
+        "v.matched_queries, v.category_id, v.topic_categories",
+    )
+    title_by_id = {
+        r["category_id"]: r["title"]
+        for r in conn.execute("SELECT category_id, title FROM categories").fetchall()
+    }
+    subniche: dict[str, int] = {}
+    topics: dict[str, int] = {}
+    categories: dict[str, int] = {}
+    for row in rows:
+        for q in _split_pipe(row["matched_queries"]):
+            subniche[q] = subniche.get(q, 0) + 1
+        for t in _split_pipe(row["topic_categories"]):
+            topics[t] = topics.get(t, 0) + 1
+        cid = row["category_id"]
+        label = (title_by_id.get(cid) if cid else None) or "Uncategorized"
+        categories[label] = categories.get(label, 0) + 1
+    return {
+        "subniche_counts": _counts_desc(subniche),
+        "category_counts": _counts_desc(categories),
+        "topic_counts": _counts_desc(topics),
+    }
+
+
+def fetch_dashboard_breakout(
+    conn: sqlite3.Connection,
+    bucket: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """{leaderboard, band_counts, survivorship_note} for the deduped lane+window set.
+    leaderboard = top 20 by views_to_subs_ratio DESC, excluding rows with a NULL
+    ratio or NULL subscriber_count (a NULL must never rank #1). band_counts bins the
+    non-NULL ratios into RATIO_BANDS, emitted in band order. channel_title comes from
+    videos; subscriber_count from channels via LEFT JOIN."""
+    rows = _dashboard_video_rows(
+        conn, bucket, start_date, end_date,
+        "v.video_id, v.title, v.channel_title, v.view_count, "
+        "v.views_to_subs_ratio, c.subscriber_count",
+        "LEFT JOIN channels c ON c.channel_id = v.channel_id",
+    )
+    ranked = [
+        {
+            "video_id": r["video_id"],
+            "title": r["title"],
+            "channel_title": r["channel_title"],
+            "view_count": r["view_count"],
+            "views_to_subs_ratio": r["views_to_subs_ratio"],
+            "subscriber_count": r["subscriber_count"],
+        }
+        for r in rows
+        if r["views_to_subs_ratio"] is not None and r["subscriber_count"] is not None
+    ]
+    ranked.sort(key=lambda d: d["views_to_subs_ratio"], reverse=True)
+
+    band_totals = {label: 0 for label, _, _ in RATIO_BANDS}
+    for r in rows:
+        ratio = r["views_to_subs_ratio"]
+        if ratio is None:
+            continue
+        band = _ratio_band_for(ratio)
+        if band is not None:
+            band_totals[band] += 1
+    band_counts = [
+        {"label": label, "count": band_totals[label]} for label, _, _ in RATIO_BANDS
+    ]
+    return {
+        "leaderboard": ranked[:20],
+        "band_counts": band_counts,
+        "survivorship_note": True,
+    }
+
+
+def fetch_dashboard_format(
+    conn: sqlite3.Connection,
+    bucket: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """{duration_dist, title_stats, like_comment_pairs, publish_heatmap} for the
+    deduped lane+window set. duration_dist bins duration_seconds into DURATION_BANDS
+    (band order, human labels). title_stats are 0-100 percentages over non-null
+    titles (emoji test is the rough ord(c) > 0x1F300, approximate). like_comment_pairs
+    excludes comment_count <= 0 / NULL (server-side guard). publish_heatmap converts
+    published_at to Eastern via _parse_instant; videos with null/unparseable
+    published_at are skipped, so its total can be less than the video count."""
+    rows = _dashboard_video_rows(
+        conn, bucket, start_date, end_date,
+        "v.duration_seconds, v.title, v.like_count, v.comment_count, v.published_at",
+    )
+
+    dur_totals = {key: 0 for key in DURATION_BANDS}
+    for row in rows:
+        seconds = row["duration_seconds"]
+        if seconds is None:
+            continue
+        band = _duration_band_for(seconds)
+        if band is not None:
+            dur_totals[band] += 1
+    duration_dist = [
+        {"label": DURATION_BAND_LABELS[key], "count": dur_totals[key]}
+        for key in DURATION_BANDS
+    ]
+
+    titles = [row["title"] for row in rows if row["title"]]
+    n = len(titles)
+
+    def _pct(predicate) -> float:
+        return round(100.0 * sum(1 for t in titles if predicate(t)) / n, 1) if n else 0.0
+
+    title_stats = {
+        "avg_length": round(sum(len(t) for t in titles) / n, 1) if n else 0.0,
+        "pct_has_number": _pct(lambda t: any(ch.isdigit() for ch in t)),
+        "pct_has_question": _pct(lambda t: "?" in t),
+        "pct_has_emoji": _pct(lambda t: any(ord(c) > 0x1F300 for c in t)),
+    }
+
+    like_comment_pairs = [
+        {
+            "like_count": row["like_count"],
+            "comment_count": row["comment_count"],
+            "ratio": row["like_count"] / row["comment_count"],
+        }
+        for row in rows
+        if row["comment_count"]
+        and row["comment_count"] > 0
+        and row["like_count"] is not None
+    ]
+
+    heat: dict[tuple[int, int], int] = {}
+    for row in rows:
+        dt = _parse_instant(row["published_at"])
+        if dt is None:
+            continue
+        eastern = dt.astimezone(ZoneInfo(config.LOCAL_TZ))
+        key = (eastern.weekday(), eastern.hour)  # weekday(): Monday == 0
+        heat[key] = heat.get(key, 0) + 1
+    publish_heatmap = [
+        {"day_of_week": dow, "hour": hour, "count": count}
+        for (dow, hour), count in sorted(heat.items())
+    ]
+
+    return {
+        "duration_dist": duration_dist,
+        "title_stats": title_stats,
+        "like_comment_pairs": like_comment_pairs,
+        "publish_heatmap": publish_heatmap,
+    }
