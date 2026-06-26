@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>daily-intel · visualization mockups</title>
+
+<!-- Distinctive type: chunky editorial display + clean grotesque body + plex mono for data -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Spline+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- Same ECharts the real dashboard vendors, loaded offline from the repo -->
+<script src="../dashboard/static/vendor/echarts-5.5.1.min.js"></script>
+
+<style>
+  :root {
+    --bg:        #080b11;
+    --bg-2:      #0c1119;
+    --panel:     rgba(255,255,255,0.025);
+    --panel-brd: rgba(255,255,255,0.07);
+    --panel-hi:  rgba(255,255,255,0.045);
+    --ink:       #e9eef5;
+    --ink-soft:  #aeb9c7;
+    --ink-mute:  #6b7787;
+    --health:    #00f2a9;   /* cyan/mint  */
+    --habit:     #2d7cff;   /* blue       */
+    --both:      #a855f7;   /* purple     */
+    --breakout:  #ffb84d;   /* amber hero */
+    --grid:      rgba(255,255,255,0.05);
+    --r:         18px;
+    --display: "Bricolage Grotesque", Georgia, serif;
+    --body: "Spline Sans", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--body);
+    color: var(--ink);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.5;
+    position: relative;
+    overflow-x: hidden;
+  }
+
+  /* Atmosphere: layered radial meshes + faint engineering grid + grain */
+  body::before {
+    content: "";
+    position: fixed; inset: 0; z-index: -2;
+    background:
+      radial-gradient(900px 600px at 12% -5%, rgba(0,242,169,0.10), transparent 60%),
+      radial-gradient(1000px 700px at 100% 0%, rgba(45,124,255,0.10), transparent 55%),
+      radial-gradient(800px 800px at 70% 110%, rgba(168,85,247,0.08), transparent 60%),
+      linear-gradient(180deg, var(--bg), var(--bg-2));
+  }
+  body::after {
+    content: "";
+    position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 64px 64px;
+    mask-image: radial-gradient(circle at 50% 25%, black, transparent 85%);
+    opacity: 0.5;
+  }
+
+  /* ---------- Header ---------- */
+  header.masthead {
+    max-width: 1320px; margin: 0 auto; padding: 64px 32px 28px;
+  }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.32em;
+    text-transform: uppercase; color: var(--health);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .eyebrow::before {
+    content: ""; width: 34px; height: 1px;
+    background: linear-gradient(90deg, var(--health), transparent);
+  }
+  h1.title {
+    font-family: var(--display); font-weight: 800;
+    font-size: clamp(40px, 6vw, 76px); line-height: 0.98;
+    margin: 16px 0 14px; letter-spacing: -0.02em;
+    background: linear-gradient(110deg, #ffffff 30%, #9fb4c9 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .subtitle {
+    max-width: 720px; color: var(--ink-soft); font-size: 17px;
+  }
+  .subtitle b { color: var(--ink); font-weight: 600; }
+
+  .meta-row {
+    display: flex; flex-wrap: wrap; gap: 10px 22px; margin-top: 26px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-mute);
+  }
+  .meta-row span b { color: var(--ink-soft); font-weight: 500; }
+
+  .legend { display: flex; gap: 18px; margin-top: 22px; flex-wrap: wrap; }
+  .legend .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-soft);
+  }
+  .legend .dot { width: 11px; height: 11px; border-radius: 3px; }
+
+  /* ---------- Section ---------- */
+  section.lens { max-width: 1320px; margin: 0 auto; padding: 30px 32px 8px; }
+  .lens-head { display: flex; align-items: baseline; gap: 16px; margin: 34px 0 6px; }
+  .lens-num {
+    font-family: var(--mono); font-size: 13px; color: var(--ink-mute);
+    border: 1px solid var(--panel-brd); border-radius: 8px;
+    padding: 3px 9px; letter-spacing: 0.1em;
+  }
+  .lens-head h2 {
+    font-family: var(--display); font-weight: 700; font-size: 27px;
+    margin: 0; letter-spacing: -0.01em;
+  }
+  .lens-head .star { color: var(--breakout); font-size: 15px; }
+  .lens-sub { color: var(--ink-mute); font-size: 14px; margin: 2px 0 18px; }
+
+  /* ---------- Grid + cards ---------- */
+  .grid {
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 20px;
+  }
+  .card {
+    grid-column: span 3;
+    background: var(--panel);
+    border: 1px solid var(--panel-brd);
+    border-radius: var(--r);
+    padding: 20px 20px 18px;
+    backdrop-filter: blur(7px);
+    position: relative; overflow: hidden;
+    transition: transform .25s ease, border-color .25s ease, background .25s ease;
+  }
+  .card:hover { transform: translateY(-3px); border-color: rgba(255,255,255,0.14); background: var(--panel-hi); }
+  .card::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, var(--health), var(--habit), var(--both));
+    opacity: 0.0; transition: opacity .25s ease;
+  }
+  .card:hover::before { opacity: 0.85; }
+  .span-2 { grid-column: span 2; }
+  .span-3 { grid-column: span 3; }
+  .span-4 { grid-column: span 4; }
+  .span-6 { grid-column: span 6; }
+
+  .card .id {
+    font-family: var(--mono); font-size: 11px; color: var(--ink-mute);
+    letter-spacing: 0.18em; text-transform: uppercase;
+  }
+  .card h3 {
+    font-family: var(--display); font-weight: 600; font-size: 18.5px;
+    margin: 4px 0 2px; letter-spacing: -0.01em;
+  }
+  .card .chart { width: 100%; height: 260px; margin-top: 6px; }
+  .card .chart.tall { height: 320px; }
+  .card .read {
+    font-size: 13px; color: var(--ink-soft); margin-top: 12px;
+    border-top: 1px solid var(--panel-brd); padding-top: 10px;
+  }
+  .card .read b { color: var(--ink); }
+  .card .read .hot { color: var(--breakout); font-weight: 600; }
+
+  /* ---------- Breakout leaderboard (HTML, not a chart) ---------- */
+  .board { margin-top: 8px; display: flex; flex-direction: column; gap: 9px; }
+  .board .row {
+    display: grid; grid-template-columns: 22px 1fr auto; align-items: center;
+    gap: 14px; padding: 11px 14px; border-radius: 12px;
+    background: rgba(255,255,255,0.022); border: 1px solid var(--panel-brd);
+    position: relative; overflow: hidden;
+  }
+  .board .row .rk { font-family: var(--mono); font-size: 12px; color: var(--ink-mute); }
+  .board .row .nm { font-size: 13.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .board .row .nm small { display: block; font-family: var(--mono); font-size: 11px; color: var(--ink-mute); margin-top: 1px; }
+  .board .row .ratio {
+    font-family: var(--mono); font-weight: 600; font-size: 19px;
+    color: var(--breakout); text-align: right; white-space: nowrap;
+  }
+  .board .row .ratio span { font-size: 11px; color: var(--ink-mute); font-weight: 400; }
+  .board .row .bar {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: linear-gradient(90deg, rgba(255,184,77,0.16), transparent);
+    z-index: 0;
+  }
+  .board .row > * { position: relative; z-index: 1; }
+
+  footer {
+    max-width: 1320px; margin: 0 auto; padding: 30px 32px 70px;
+    font-family: var(--mono); font-size: 12px; color: var(--ink-mute);
+    border-top: 1px solid var(--panel-brd); margin-top: 40px;
+  }
+  footer b { color: var(--ink-soft); }
+
+  @media (max-width: 980px) {
+    .grid { grid-template-columns: repeat(2, 1fr); }
+    .card, .span-2, .span-3, .span-4, .span-6 { grid-column: span 2; }
+  }
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: 1fr; }
+    .card, .span-2, .span-3, .span-4, .span-6 { grid-column: span 1; }
+  }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="eyebrow">daily-intel · swipefile signal</div>
+  <h1 class="title">Visualization mockups</h1>
+  <p class="subtitle">Nine proposed dashboard views, rendered from the <b>live swipefile data</b>
+    (298 in-niche Shorts &middot; 225 channels &middot; 10 daily runs, Jun 8&ndash;18). Lane colors match
+    the dashboard. This is a look-and-feel preview, not the production build.</p>
+  <div class="meta-row">
+    <span><b>298</b> in-niche videos</span>
+    <span><b>225</b> channels</span>
+    <span><b>516</b> rankings</span>
+    <span><b>10</b> runs</span>
+    <span><b>15</b> kid videos excluded</span>
+    <span>data read <b>2026-06-22</b> (read-only)</span>
+  </div>
+  <div class="legend">
+    <span class="chip"><span class="dot" style="background:var(--health)"></span>health lane</span>
+    <span class="chip"><span class="dot" style="background:var(--habit)"></span>habit lane</span>
+    <span class="chip"><span class="dot" style="background:var(--both)"></span>both / overall</span>
+    <span class="chip"><span class="dot" style="background:var(--breakout)"></span>breakout signal</span>
+  </div>
+</header>
+
+<!-- ============ LENS 1 ============ -->
+<section class="lens">
+  <div class="lens-head"><span class="lens-num">LENS 01</span><h2>Sub-niche mix</h2><span class="star">★ priority</span></div>
+  <p class="lens-sub">The "protein / zone-2" level &mdash; matched_queries. What topics we actually capture, and which over-perform.</p>
+  <div class="grid">
+    <div class="card span-3">
+      <div class="id">#1 · matched_queries</div><h3>Sub-niche volume</h3>
+      <div class="chart" id="c1"></div>
+      <div class="read"><b>Read:</b> one query, <b>high protein</b>, is 54% of the whole library; the habit lane is all long-tail.</div>
+    </div>
+    <div class="card span-3">
+      <div class="id">#2 · rankings × time</div><h3>Sub-niche over time</h3>
+      <div class="chart" id="c2"></div>
+      <div class="read"><b>Read:</b> protein is a flat ceiling; habit topics creep up late; sleep never gains traction.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LENS 2 ============ -->
+<section class="lens">
+  <div class="lens-head"><span class="lens-num">LENS 02</span><h2>Breakout signal</h2><span class="star">★ priority</span></div>
+  <p class="lens-sub">views-to-subs ratio &mdash; small channels going viral. The brand's core "find the breakout" instinct.</p>
+  <div class="grid">
+    <div class="card span-3">
+      <div class="id">#5 · ratio bands × lane</div><h3>Breakout bands</h3>
+      <div class="chart tall" id="c5"></div>
+      <div class="read"><b>Read:</b> habit is the smaller lane but over-indexes in the <span class="hot">100&times;+ tier</span>.</div>
+    </div>
+    <div class="card span-3">
+      <div class="id">#6 · top over-performers</div><h3>Breakout leaderboard &mdash; views&#8201;&divide;&#8201;subscribers</h3>
+      <div class="board" id="c6"></div>
+      <div class="read"><b>Read:</b> the <span class="hot">&times; number = views &divide; subscribers</span> &mdash; how far each Short
+        outran its channel size. Kid/parenting content is filtered out.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LENS 3 ============ -->
+<section class="lens">
+  <div class="lens-head"><span class="lens-num">LENS 03</span><h2>Lane &amp; category mix</h2><span class="star">★ priority</span></div>
+  <p class="lens-sub">How the library splits across lanes, YouTube categories, and topic tags.</p>
+  <div class="grid">
+    <div class="card span-2">
+      <div class="id">#7 · buckets</div><h3>Lane composition</h3>
+      <div class="chart" id="c7"></div>
+      <div class="read"><b>Read:</b> health 77% / habit 23% (+1 video in both).</div>
+    </div>
+    <div class="card span-2">
+      <div class="id">#8 · category_id</div><h3>YouTube category</h3>
+      <div class="chart" id="c8"></div>
+      <div class="read"><b>Read:</b> 2/3 filed under generic "People &amp; Blogs".</div>
+    </div>
+    <div class="card span-2">
+      <div class="id">#9 · topic_categories</div><h3>Topic tags</h3>
+      <div class="chart" id="c9"></div>
+      <div class="read"><b>Read:</b> Food-heavy; true "Physical fitness" tagging is thin (19).</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SECONDARY ============ -->
+<section class="lens">
+  <div class="lens-head"><span class="lens-num">LENS 04</span><h2>Channel diversity &amp; engagement</h2></div>
+  <p class="lens-sub">Secondary lenses: who posts, and how hard viewers react.</p>
+  <div class="grid">
+    <div class="card span-2">
+      <div class="id">#11 · channel concentration</div><h3>Creator diversity</h3>
+      <div class="chart" id="c11"></div>
+      <div class="read"><b>Read:</b> long-tail &mdash; 187 of 225 channels appear once. No creator dominates.</div>
+    </div>
+    <div class="card span-4">
+      <div class="id">#14 · avg likes &amp; comments per video</div><h3>Engagement quality</h3>
+      <div class="chart tall" id="c14"></div>
+      <div class="read"><b>Read:</b> <span class="hot">high protein dominates both</span> (2,038 likes / 44.9 comments per video);
+        morning routine and VO2 max over-index on engagement for their size; among the big niches longevity habits engages least.
+        Bars colored by lane. Sub-niches with n&lt;5 (atomic habits, VO2 max, habit stacking, habit tracker) are tiny samples.</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  daily-intel · mockup generated from live read-only query of <b>data/database/swipefile.db</b> ·
+  ECharts 5.5.1 (same vendored build as the dashboard) · all timestamps Eastern, never UTC.
+</footer>
+
+<script>
+/* ---------------- real data (from live DB) ---------------- */
+const C = {
+  health:'#00f2a9', habit:'#2d7cff', both:'#a855f7', breakout:'#ffb84d',
+  ink:'#e9eef5', soft:'#aeb9c7', mute:'#6b7787', grid:'rgba(255,255,255,0.06)', axis:'rgba(255,255,255,0.18)'
+};
+const laneColor = l => l==='habit' ? C.habit : l==='both' ? C.both : C.health;
+
+const subniche = [
+  {q:'high protein',n:168,lane:'health'}, {q:'build habits',n:39,lane:'habit'},
+  {q:'sleep routine',n:32,lane:'health'}, {q:'longevity habits',n:23,lane:'health'},
+  {q:'morning routine habits',n:20,lane:'habit'}, {q:'strength training 50+',n:6,lane:'health'},
+  {q:'break bad habits',n:5,lane:'habit'}, {q:'atomic habits',n:2,lane:'habit'},
+  {q:'VO2 max',n:2,lane:'health'}, {q:'habit stacking',n:2,lane:'habit'},
+  {q:'habit tracker',n:1,lane:'habit'},
+];
+
+const runDates = ['06-08','06-09','06-10','06-11','06-12','06-13','06-14','06-15','06-16','06-18'];
+const overTime = {
+  protein:[10,7,8,9,9,9,10,10,7,10],
+  habits: [5,7,5,3,3,5,6,5,5,4],
+  sleep:  [2,3,4,4,1,3,1,3,1,3],
+};
+
+const bands = ['<1x','1-10x','10-100x','100x+'];
+const bandHealth = [123,73,29,6];
+const bandHabit  = [26,28,11,3];
+
+const leaderboard = [
+  ['Summer special high protein drink',22226,7,3175],
+  ['Everyone has a bedtime routine. #funny',28913,29,997],
+  ['Erly is the only thing that wakes me',27504,70,393],
+  ["This Dog's Bedtime Routine is Too Cute! 🐶",16020,47,341],
+  ['High Calories Shake For Gain Muscle Mass',15812,75,211],
+  ['5 Day High-Protein Meal Prep | 750g Protein',29644,165,180],
+  ['💪 Man to Man Challenge | Build Discipline',23201,184,126],
+  ['Simple Money Habits That Can Make You Rich',72035,660,109],
+];
+
+const lane = [{name:'health',value:230},{name:'habit',value:67},{name:'both',value:1}];
+
+const cats = [
+  ['People & Blogs',196],['Howto & Style',43],['Education',41],['Sports',8],
+  ['Science & Tech',3],['Pets & Animals',2],['Comedy',2],['Nonprofits',1],['News',1],
+];
+const topics = [
+  ['Lifestyle',229],['Food',170],['Health',81],['Physical fitness',19],
+  ['Entertainment',7],['Society',2],['Religion',2],['Sport',1],
+];
+
+const conc = [ // band, channels, videos
+  ['1 video (one-off)',187,187],['2 videos',23,46],['3-4 videos',10,34],['5+ videos',5,31],
+];
+
+// avg likes & avg comments PER VIDEO, by sub-niche (matched_queries exploded), kids excluded.
+// order = by avg likes desc; lane drives bar color.
+const engageSub = [
+  {q:'high protein',          likes:2038, comments:44.9, lane:'health'},
+  {q:'morning routine',       likes:1149, comments:15.2, lane:'habit'},
+  {q:'VO2 max',               likes:880,  comments:23.0, lane:'health'},
+  {q:'sleep routine',         likes:844,  comments:11.4, lane:'health'},
+  {q:'break bad habits',      likes:694,  comments:11.4, lane:'habit'},
+  {q:'strength training 50+', likes:517,  comments:13.2, lane:'health'},
+  {q:'atomic habits',         likes:483,  comments:11.5, lane:'habit'},
+  {q:'build habits',          likes:318,  comments:7.1,  lane:'habit'},
+  {q:'longevity habits',      likes:267,  comments:3.9,  lane:'health'},
+  {q:'habit stacking',        likes:218,  comments:2.5,  lane:'habit'},
+  {q:'habit tracker',         likes:23,   comments:0.0,  lane:'habit'},
+];
+
+/* ---------------- ECharts dark base ---------------- */
+const FT = { fontFamily: 'IBM Plex Mono, monospace' };
+const axisBase = {
+  axisLine:{ lineStyle:{ color:C.axis } },
+  axisTick:{ show:false },
+  axisLabel:{ color:C.soft, fontFamily:'IBM Plex Mono', fontSize:11 },
+  splitLine:{ lineStyle:{ color:C.grid } },
+  nameTextStyle:{ color:C.mute, fontFamily:'IBM Plex Mono', fontSize:11 },
+};
+const tip = {
+  backgroundColor:'rgba(12,17,25,0.94)', borderColor:'rgba(255,255,255,0.12)',
+  textStyle:{ color:C.ink, fontFamily:'IBM Plex Mono', fontSize:12 },
+};
+const charts = [];
+const mk = (id, opt) => { const el=document.getElementById(id); if(!el) return;
+  const ch = echarts.init(el, null, {renderer:'canvas'}); ch.setOption(opt); charts.push(ch); };
+
+function render() {
+  /* #1 sub-niche volume — horizontal bar, lane color */
+  const s1 = [...subniche].sort((a,b)=>a.n-b.n);
+  mk('c1', {
+    grid:{left:8,right:38,top:10,bottom:6,containLabel:true}, tooltip:{...tip,trigger:'item'},
+    xAxis:{type:'value', ...axisBase}, textStyle:FT,
+    yAxis:{type:'category', data:s1.map(d=>d.q), ...axisBase, axisLabel:{...axisBase.axisLabel,fontSize:10.5}},
+    series:[{type:'bar', data:s1.map(d=>({value:d.n,itemStyle:{color:laneColor(d.lane),borderRadius:[0,4,4,0]}})),
+      barWidth:'62%', label:{show:true,position:'right',color:C.soft,fontFamily:'IBM Plex Mono',fontSize:11}}]
+  });
+
+  /* #2 sub-niche over time — smooth area lines */
+  mk('c2', {
+    grid:{left:8,right:14,top:24,bottom:6,containLabel:true}, tooltip:{...tip,trigger:'axis'},
+    legend:{data:['high protein','habit topics','sleep routine'],textStyle:{color:C.soft,fontFamily:'IBM Plex Mono',fontSize:10},top:0,right:0},
+    xAxis:{type:'category',data:runDates,boundaryGap:false,...axisBase}, textStyle:FT,
+    yAxis:{type:'value',...axisBase},
+    series:[
+      {name:'high protein',type:'line',smooth:true,data:overTime.protein,symbol:'circle',symbolSize:5,
+        lineStyle:{color:C.health,width:2.5},itemStyle:{color:C.health},
+        areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:'rgba(0,242,169,0.28)'},{offset:1,color:'rgba(0,242,169,0)'}])}},
+      {name:'habit topics',type:'line',smooth:true,data:overTime.habits,symbol:'circle',symbolSize:5,
+        lineStyle:{color:C.habit,width:2.5},itemStyle:{color:C.habit}},
+      {name:'sleep routine',type:'line',smooth:true,data:overTime.sleep,symbol:'circle',symbolSize:5,
+        lineStyle:{color:C.both,width:2,type:'dashed'},itemStyle:{color:C.both}},
+    ]
+  });
+
+  /* #5 breakout bands × lane — stacked horizontal */
+  mk('c5', {
+    grid:{left:8,right:14,top:24,bottom:6,containLabel:true}, tooltip:{...tip,trigger:'axis',axisPointer:{type:'shadow'}},
+    legend:{data:['health','habit'],textStyle:{color:C.soft,fontFamily:'IBM Plex Mono',fontSize:10},top:0},
+    xAxis:{type:'value',...axisBase}, textStyle:FT,
+    yAxis:{type:'category',data:bands,...axisBase},
+    series:[
+      {name:'health',type:'bar',stack:'t',data:bandHealth,itemStyle:{color:C.health}},
+      {name:'habit', type:'bar',stack:'t',data:bandHabit, itemStyle:{color:C.habit,borderRadius:[0,4,4,0]}},
+    ]
+  });
+
+  /* #6 leaderboard — HTML */
+  const maxR = leaderboard[0][3];
+  document.getElementById('c6').innerHTML = leaderboard.map((d,i)=>`
+    <div class="row">
+      <div class="bar" style="width:${(d[3]/maxR*100).toFixed(1)}%"></div>
+      <div class="rk">${String(i+1).padStart(2,'0')}</div>
+      <div class="nm">${d[0]}<small>${d[1].toLocaleString()} views · ${d[2]} subs</small></div>
+      <div class="ratio">${d[3].toLocaleString()}<span>×</span></div>
+    </div>`).join('');
+
+  /* #7 lane donut */
+  mk('c7', {
+    tooltip:{...tip,trigger:'item',formatter:'{b}: {c} ({d}%)'}, textStyle:FT,
+    series:[{type:'pie',radius:['52%','78%'],center:['50%','52%'],avoidLabelOverlap:true,
+      itemStyle:{borderColor:'#0c1119',borderWidth:3},
+      label:{color:C.soft,fontFamily:'IBM Plex Mono',fontSize:11,formatter:'{b}\n{d}%'},
+      data:lane.map(d=>({...d,itemStyle:{color:laneColor(d.name)}}))}]
+  });
+
+  /* #8 youtube category */
+  const c8=[...cats].reverse();
+  mk('c8', {
+    grid:{left:8,right:34,top:8,bottom:6,containLabel:true}, tooltip:{...tip,trigger:'item'},
+    xAxis:{type:'value',...axisBase}, textStyle:FT,
+    yAxis:{type:'category',data:c8.map(d=>d[0]),...axisBase,axisLabel:{...axisBase.axisLabel,fontSize:10}},
+    series:[{type:'bar',data:c8.map(d=>d[1]),barWidth:'58%',
+      itemStyle:{color:new echarts.graphic.LinearGradient(1,0,0,0,[{offset:0,color:C.health},{offset:1,color:'rgba(0,242,169,0.35)'}]),borderRadius:[0,4,4,0]},
+      label:{show:true,position:'right',color:C.soft,fontFamily:'IBM Plex Mono',fontSize:10}}]
+  });
+
+  /* #9 topics */
+  const c9=[...topics].reverse();
+  mk('c9', {
+    grid:{left:8,right:34,top:8,bottom:6,containLabel:true}, tooltip:{...tip,trigger:'item'},
+    xAxis:{type:'value',...axisBase}, textStyle:FT,
+    yAxis:{type:'category',data:c9.map(d=>d[0]),...axisBase,axisLabel:{...axisBase.axisLabel,fontSize:10}},
+    series:[{type:'bar',data:c9.map(d=>d[1]),barWidth:'58%',
+      itemStyle:{color:new echarts.graphic.LinearGradient(1,0,0,0,[{offset:0,color:C.both},{offset:1,color:'rgba(168,85,247,0.3)'}]),borderRadius:[0,4,4,0]},
+      label:{show:true,position:'right',color:C.soft,fontFamily:'IBM Plex Mono',fontSize:10}}]
+  });
+
+  /* #11 concentration — videos vs channels grouped */
+  mk('c11', {
+    grid:{left:8,right:14,top:24,bottom:6,containLabel:true}, tooltip:{...tip,trigger:'axis',axisPointer:{type:'shadow'}},
+    legend:{data:['videos','channels'],textStyle:{color:C.soft,fontFamily:'IBM Plex Mono',fontSize:10},top:0},
+    xAxis:{type:'value',...axisBase}, textStyle:FT,
+    yAxis:{type:'category',data:conc.map(d=>d[0]).reverse(),...axisBase,axisLabel:{...axisBase.axisLabel,fontSize:10}},
+    series:[
+      {name:'videos',type:'bar',data:conc.map(d=>d[2]).reverse(),itemStyle:{color:C.habit,borderRadius:[0,4,4,0]},barGap:0},
+      {name:'channels',type:'bar',data:conc.map(d=>d[1]).reverse(),itemStyle:{color:'rgba(255,255,255,0.18)',borderRadius:[0,4,4,0]}},
+    ]
+  });
+
+  /* #14 engagement quality — avg likes & comments PER VIDEO, by sub-niche, colored by lane */
+  const esLabels = engageSub.map(d=>d.q);
+  const esPick = (metric,lane) => engageSub.map(d => d.lane===lane ? d[metric] : null);
+  const esLabel = {show:true,position:'right',color:C.soft,fontFamily:'IBM Plex Mono',fontSize:9};
+  mk('c14', {
+    grid:[{left:'2%',right:'53%',top:48,bottom:22,containLabel:true},{left:'52%',right:'3%',top:48,bottom:22,containLabel:true}],
+    tooltip:{...tip,trigger:'axis',axisPointer:{type:'shadow'}}, textStyle:FT,
+    legend:{data:['health','habit'],textStyle:{color:C.soft,fontFamily:'IBM Plex Mono',fontSize:10},top:2},
+    title:[{text:'avg likes / video',left:'2%',top:24,textStyle:{color:C.mute,fontFamily:'IBM Plex Mono',fontSize:10.5,fontWeight:400}},
+           {text:'avg comments / video',left:'53%',top:24,textStyle:{color:C.mute,fontFamily:'IBM Plex Mono',fontSize:10.5,fontWeight:400}}],
+    xAxis:[{type:'value',gridIndex:0,...axisBase,axisLabel:{...axisBase.axisLabel,fontSize:9}},
+           {type:'value',gridIndex:1,...axisBase,axisLabel:{...axisBase.axisLabel,fontSize:9}}],
+    yAxis:[{type:'category',gridIndex:0,data:esLabels,inverse:true,...axisBase,axisLabel:{...axisBase.axisLabel,fontSize:9}},
+           {type:'category',gridIndex:1,data:esLabels,inverse:true,...axisBase,axisLabel:{show:false}}],
+    series:[
+      {name:'health',type:'bar',stack:'L',xAxisIndex:0,yAxisIndex:0,data:esPick('likes','health'),itemStyle:{color:C.health,borderRadius:[0,3,3,0]},label:esLabel},
+      {name:'habit', type:'bar',stack:'L',xAxisIndex:0,yAxisIndex:0,data:esPick('likes','habit'), itemStyle:{color:C.habit, borderRadius:[0,3,3,0]},label:esLabel},
+      {name:'health',type:'bar',stack:'R',xAxisIndex:1,yAxisIndex:1,data:esPick('comments','health'),itemStyle:{color:C.health,borderRadius:[0,3,3,0]},label:esLabel},
+      {name:'habit', type:'bar',stack:'R',xAxisIndex:1,yAxisIndex:1,data:esPick('comments','habit'), itemStyle:{color:C.habit, borderRadius:[0,3,3,0]},label:esLabel},
+    ]
+  });
+}
+
+/* render after fonts settle so labels measure correctly */
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(render);
+  setTimeout(()=>{ if(!charts.length) render(); }, 600); // fallback if fonts hang
+} else { render(); }
+window.addEventListener('resize', ()=>charts.forEach(c=>c.resize()));
+</script>
+</body>
+</html>
