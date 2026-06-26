@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 import config
@@ -29,7 +31,8 @@ EXPECTED_COLUMNS = {
         "matched_queries", "buckets", "view_count", "like_count", "comment_count",
         "views_to_subs_ratio", "views_per_day", "first_seen_at",
         "last_api_refresh_at", "user_notes", "starred", "starred_at", "hook",
-        "first_10_sec", "saves",
+        "first_10_sec", "saves", "status", "status_changed_at",
+        "last_view_growth_at",
     },
     "channels": {
         "channel_id", "subscriber_count", "channel_video_count",
@@ -129,7 +132,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 11
+        assert version == db.SCHEMA_VERSION == 12
     finally:
         conn.close()
 
@@ -1867,3 +1870,384 @@ def test_preference_set_get_and_overwrite(tmp_path):
             "SELECT count(*) c FROM app_preferences").fetchone()["c"] == 1
     finally:
         conn.close()
+
+
+# The videos CREATE BEFORE v12 (no status / status_changed_at / last_view_growth_at).
+# Used to build a genuine v11 DB so the v11->v12 ADD COLUMN + backfill path is
+# actually exercised — building it from the CURRENT statement (which already has
+# the three columns) would test nothing.
+_PRE_V12_VIDEOS = """
+CREATE TABLE videos (
+    video_id TEXT PRIMARY KEY,
+    title TEXT,
+    channel_id TEXT,
+    channel_title TEXT,
+    published_at TEXT,
+    duration_seconds INTEGER,
+    is_short INTEGER,
+    link TEXT,
+    thumbnail_url TEXT,
+    description TEXT,
+    category_id TEXT,
+    audio_language TEXT,
+    definition TEXT,
+    has_captions INTEGER,
+    made_for_kids INTEGER,
+    tags TEXT,
+    topic_categories TEXT,
+    top_comments TEXT,
+    matched_queries TEXT,
+    buckets TEXT,
+    view_count INTEGER,
+    like_count INTEGER,
+    comment_count INTEGER,
+    views_to_subs_ratio REAL,
+    views_per_day REAL,
+    first_seen_at TEXT,
+    last_api_refresh_at TEXT,
+    user_notes TEXT DEFAULT '',
+    starred INTEGER DEFAULT 0,
+    starred_at TEXT,
+    hook TEXT DEFAULT '',
+    first_10_sec TEXT DEFAULT '',
+    saves TEXT DEFAULT ''
+)
+"""
+
+
+def _build_v11_db(db_path):
+    """A real v11 schema: every current CREATE EXCEPT videos at its pre-v12 shape
+    (no status / status_changed_at / last_view_growth_at), stamped user_version=11,
+    seeded with three videos and a stats_snapshots history that exercises every
+    backfill branch:
+      - 'vid_grow':   3 snapshots, rose at run 2 then flat at run 3
+                      -> last_view_growth_at = run-2 captured_at
+      - 'vid_oneshot': 1 snapshot (fewer than two) -> fallback first_seen_at
+      - 'vid_flat':   2 snapshots, never rose      -> fallback first_seen_at
+    Returns the expected last_view_growth_at per video_id."""
+    conn = db.get_connection(db_path)
+    try:
+        for statement in db.SCHEMA_STATEMENTS:
+            if "EXISTS videos" in statement:  # use the pre-v12 videos DDL instead
+                continue
+            conn.execute(statement)
+        conn.execute(_PRE_V12_VIDEOS)
+        conn.execute("PRAGMA user_version = 11")
+
+        videos = [
+            ("vid_grow", "Grower", "2026-06-08T09:00:00-04:00"),
+            ("vid_oneshot", "One Shot", "2026-06-08T08:00:00-04:00"),
+            ("vid_flat", "Flatliner", "2026-06-08T07:00:00-04:00"),
+        ]
+        for vid, title, first_seen in videos:
+            conn.execute(
+                "INSERT INTO videos (video_id, title, first_seen_at, "
+                "last_api_refresh_at) VALUES (?, ?, ?, ?)",
+                (vid, title, first_seen, first_seen),
+            )
+        # (run_id, video_id, captured_at, view_count)
+        snaps = [
+            (1, "vid_grow", "2026-06-08T10:00:00-04:00", 100),
+            (2, "vid_grow", "2026-06-09T10:00:00-04:00", 150),   # rose
+            (3, "vid_grow", "2026-06-10T10:00:00-04:00", 150),   # flat
+            (1, "vid_oneshot", "2026-06-08T10:00:00-04:00", 200),
+            (1, "vid_flat", "2026-06-08T10:00:00-04:00", 300),
+            (2, "vid_flat", "2026-06-09T10:00:00-04:00", 300),   # flat
+        ]
+        for run_id, vid, captured_at, views in snaps:
+            conn.execute(
+                "INSERT INTO stats_snapshots (run_id, video_id, captured_at, "
+                "view_count, like_count, comment_count) VALUES (?, ?, ?, ?, 0, 0)",
+                (run_id, vid, captured_at, views),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "vid_grow": "2026-06-09T10:00:00-04:00",   # captured_at of the run it rose
+        "vid_oneshot": "2026-06-08T08:00:00-04:00",  # first_seen_at fallback
+        "vid_flat": "2026-06-08T07:00:00-04:00",     # first_seen_at fallback
+    }
+
+
+def test_v11_to_v12_adds_status_and_growth_columns(tmp_path):
+    """An existing v11 DB gains videos.status (backfilled 'active' via its NOT NULL
+    DEFAULT), status_changed_at (NULL), and last_view_growth_at (seeded from the
+    snapshot history), bumps to the current schema, and leaves the seeded rows'
+    other fields unchanged."""
+    db_path = str(tmp_path / "test.db")
+    expected_growth = _build_v11_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        assert "status" not in _columns(conn, "videos")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        titles_before = dict(
+            conn.execute("SELECT video_id, title FROM videos").fetchall()
+        )
+    finally:
+        conn.close()
+
+    db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        assert {"status", "status_changed_at", "last_view_growth_at"}.issubset(
+            _columns(conn, "videos")
+        )
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        rows = {
+            r["video_id"]: r
+            for r in conn.execute(
+                "SELECT video_id, title, status, status_changed_at, "
+                "last_view_growth_at FROM videos"
+            ).fetchall()
+        }
+        for vid, expected in expected_growth.items():
+            assert rows[vid]["status"] == "active"
+            assert rows[vid]["status_changed_at"] is None
+            assert rows[vid]["last_view_growth_at"] == expected, vid
+            assert rows[vid]["title"] == titles_before[vid]  # untouched
+    finally:
+        conn.close()
+
+
+def test_v11_to_v12_migration_is_atomic(tmp_path):
+    """The videos ALTERs and the user_version stamp are one atomic unit: a rollback
+    after them must leave version 11 AND no status column, proving the PRAGMA
+    participates in the migration transaction rather than committing on its own."""
+    db_path = str(tmp_path / "test.db")
+    _build_v11_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        conn.execute("BEGIN")
+        conn.execute("ALTER TABLE videos ADD COLUMN status TEXT NOT NULL "
+                     "DEFAULT 'active'")
+        conn.execute("PRAGMA user_version = 12")
+        conn.execute("ROLLBACK")
+
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert "status" not in _columns(conn, "videos")
+    finally:
+        conn.close()
+
+
+def test_is_view_growth_definition():
+    """The shared growth predicate: strictly-higher is growth; equal, lower, and an
+    absent prior are all not-growth (so a new video keeps its catch-day clock)."""
+    assert db.is_view_growth(100, 150) is True
+    assert db.is_view_growth(150, 150) is False
+    assert db.is_view_growth(150, 100) is False
+    assert db.is_view_growth(None, 150) is False   # no prior snapshot
+    assert db.is_view_growth(100, None) is False   # missing fresh count
+
+
+def _insert_video(conn, video_id, *, status="active", starred=0,
+                  last_view_growth_at="2026-06-08T10:00:00-04:00"):
+    conn.execute(
+        "INSERT INTO videos (video_id, title, channel_id, matched_queries, "
+        "buckets, top_comments, first_seen_at, status, starred, "
+        "last_view_growth_at) VALUES (?, ?, 'chan', '[]', '[]', '[]', "
+        "'2026-06-08T09:00:00-04:00', ?, ?, ?)",
+        (video_id, f"T-{video_id}", status, starred, last_view_growth_at),
+    )
+
+
+def test_fetch_videos_for_refresh_returns_only_active(tmp_path):
+    """The sweep batch is the active catalog: gone and aged_out are excluded, and
+    each row still carries the five preserve columns videos.list won't re-supply."""
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        _insert_video(conn, "act1")
+        _insert_video(conn, "act2")
+        _insert_video(conn, "gone1", status="gone")
+        _insert_video(conn, "aged1", status="aged_out")
+        conn.commit()
+
+        rows = db.fetch_videos_for_refresh(conn)
+        assert {r["video_id"] for r in rows} == {"act1", "act2"}
+        assert set(rows[0].keys()) == {
+            "video_id", "channel_id", "matched_queries", "buckets", "top_comments",
+        }
+    finally:
+        conn.close()
+
+
+def test_count_eligible_for_refresh_counts_only_active(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        _insert_video(conn, "act1")
+        _insert_video(conn, "act2")
+        _insert_video(conn, "gone1", status="gone")
+        _insert_video(conn, "aged1", status="aged_out")
+        conn.commit()
+        assert db.count_eligible_for_refresh(conn) == 2
+    finally:
+        conn.close()
+
+
+def test_fetch_aging_candidates_excludes_starred_and_non_active(tmp_path):
+    """Aging candidates are active AND unstarred: a starred-and-stale video stays
+    (exempt) and a gone video is never returned, so the pure decision never sees
+    them."""
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        _insert_video(conn, "act_unstarred", starred=0)
+        _insert_video(conn, "act_starred", starred=1)       # exempt
+        _insert_video(conn, "gone1", status="gone")          # excluded
+        _insert_video(conn, "aged1", status="aged_out")      # excluded
+        conn.commit()
+
+        cands = db.fetch_aging_candidates(conn)
+        assert {c["video_id"] for c in cands} == {"act_unstarred"}
+        assert set(cands[0].keys()) == {"video_id", "last_view_growth_at"}
+    finally:
+        conn.close()
+
+
+def test_set_video_status_transitions_only_on_change(tmp_path):
+    """A real transition stamps status_changed_at; re-marking the same status is a
+    no-op (rowcount 0) that leaves the original timestamp intact."""
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        _insert_video(conn, "v1")  # status='active', status_changed_at NULL
+        conn.commit()
+
+        with db.transaction(conn):
+            n = db.set_video_status(conn, "v1", "gone", "2026-06-20T10:00:00-04:00")
+        assert n == 1
+        row = conn.execute(
+            "SELECT status, status_changed_at FROM videos WHERE video_id='v1'"
+        ).fetchone()
+        assert row["status"] == "gone"
+        assert row["status_changed_at"] == "2026-06-20T10:00:00-04:00"
+
+        # Re-marking gone is a no-op: rowcount 0, timestamp NOT overwritten.
+        with db.transaction(conn):
+            n = db.set_video_status(conn, "v1", "gone", "2026-06-21T10:00:00-04:00")
+        assert n == 0
+        assert conn.execute(
+            "SELECT status_changed_at FROM videos WHERE video_id='v1'"
+        ).fetchone()["status_changed_at"] == "2026-06-20T10:00:00-04:00"
+    finally:
+        conn.close()
+
+
+def test_bump_view_growth_moves_only_listed_ids(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        old = "2026-06-01T10:00:00-04:00"
+        new = "2026-06-20T10:00:00-04:00"
+        _insert_video(conn, "v1", last_view_growth_at=old)
+        _insert_video(conn, "v2", last_view_growth_at=old)
+        conn.commit()
+
+        with db.transaction(conn):
+            db.bump_view_growth(conn, ["v1"], new)
+        clocks = {r["video_id"]: r["last_view_growth_at"] for r in conn.execute(
+            "SELECT video_id, last_view_growth_at FROM videos")}
+        assert clocks == {"v1": new, "v2": old}
+
+        # Empty list is a no-op (must not touch anything or raise).
+        with db.transaction(conn):
+            db.bump_view_growth(conn, [], "2026-07-01T10:00:00-04:00")
+        assert conn.execute(
+            "SELECT last_view_growth_at FROM videos WHERE video_id='v1'"
+        ).fetchone()["last_view_growth_at"] == new
+    finally:
+        conn.close()
+
+
+def test_latest_snapshot_view_counts_most_recent_strictly_before(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        for run_id, vc in [(1, 100), (2, 150), (3, 175)]:
+            conn.execute(
+                "INSERT INTO stats_snapshots (run_id, video_id, captured_at, "
+                "view_count, like_count, comment_count) VALUES (?, 'v1', ?, ?, 0, 0)",
+                (run_id, f"2026-06-0{run_id}T10:00:00-04:00", vc))
+        conn.commit()
+
+        # Strictly before run 3 -> run 2's value.
+        assert db.latest_snapshot_view_counts(conn, 3) == {"v1": 150}
+        # Strictly before run 2 -> run 1's value.
+        assert db.latest_snapshot_view_counts(conn, 2) == {"v1": 100}
+        # Strictly before run 1 -> no prior snapshot, absent.
+        assert db.latest_snapshot_view_counts(conn, 1) == {}
+    finally:
+        conn.close()
+
+
+def test_run_change_counts_partition(tmp_path):
+    """The four run-summary counts, partitioned by existed-at-run-start via the
+    insert-only first_seen_at: a pre-existing-and-re-swept video is `updated`, never
+    `added`, even though it was re-fetched this run."""
+    now = "2026-06-25T10:00:00-04:00"
+    old = "2026-05-01T10:00:00-04:00"
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        # v_old pre-existed (first_seen=old) and is re-snapshotted this run -> updated.
+        _insert_video(conn, "v_old")
+        conn.execute("UPDATE videos SET first_seen_at=? WHERE video_id='v_old'", (old,))
+        # v_new was inserted this run (first_seen=now) -> added (not also updated).
+        _insert_video(conn, "v_new")
+        conn.execute("UPDATE videos SET first_seen_at=? WHERE video_id='v_new'", (now,))
+        # A gone and an aged_out transition stamped this run.
+        _insert_video(conn, "v_gone")
+        conn.execute("UPDATE videos SET first_seen_at=?, status='gone', "
+                     "status_changed_at=? WHERE video_id='v_gone'", (old, now))
+        _insert_video(conn, "v_aged")
+        conn.execute("UPDATE videos SET first_seen_at=?, status='aged_out', "
+                     "status_changed_at=? WHERE video_id='v_aged'", (old, now))
+        for vid in ("v_old", "v_new"):
+            conn.execute(
+                "INSERT INTO stats_snapshots (run_id, video_id, captured_at, "
+                "view_count, like_count, comment_count) VALUES (2, ?, ?, 1, 0, 0)",
+                (vid, now))
+        conn.commit()
+
+        counts = db.run_change_counts(conn, 2, now)
+        assert counts == {"added": 1, "updated": 1, "gone": 1, "aged_out": 1}
+    finally:
+        conn.close()
+
+
+def test_get_readonly_connection_refuses_writes(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_readonly_connection(db_path)
+    try:
+        # Reads work...
+        assert conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0] == 0
+        # ...writes are physically refused by SQLite (mode=ro).
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("CREATE TABLE _x(a)")
+    finally:
+        conn.close()
+
+
+def test_migration_pending(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    assert db.migration_pending(db_path) is False     # missing file -> not pending
+    db.init_db(db_path)
+    assert db.migration_pending(db_path) is False      # freshly migrated -> current
+    conn = db.get_connection(db_path)
+    conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION - 1}")
+    conn.commit()
+    conn.close()
+    assert db.migration_pending(db_path) is True        # stamped behind -> pending

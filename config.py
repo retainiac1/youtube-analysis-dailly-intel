@@ -17,6 +17,12 @@ from zoneinfo import ZoneInfo
 # ---------------------------------------------------------------------------
 DEFAULT_MIN_VIEWS = 10_000
 DEFAULT_WINDOW_DAYS = 3
+# Max days a tracked video may go without view-count growth before the daily
+# catalog sweep retires it (status -> aged_out). The discovery window is only
+# WINDOW_DAYS, so after that a video is reachable solely by the sweep; 30 days
+# covers dwell + drop-off + the decay tail we want to keep snapshotting. Starred
+# videos are exempt. Positive int; do not go below 21.
+DEFAULT_REFRESH_MAX_AGE_DAYS = 30
 DEFAULT_TOP_N = 20
 DEFAULT_SHORT_MAX_SECONDS = 180
 DEFAULT_SEARCH_RELEVANCE_LANGUAGE = "en"
@@ -250,6 +256,7 @@ DEFAULT_EXTRACT_SSE_KEEPALIVE_SECONDS = 15
 SETTINGS_DEFAULTS: dict[str, object] = {
     "MIN_VIEWS": DEFAULT_MIN_VIEWS,
     "WINDOW_DAYS": DEFAULT_WINDOW_DAYS,
+    "REFRESH_MAX_AGE_DAYS": DEFAULT_REFRESH_MAX_AGE_DAYS,
     "TOP_N": DEFAULT_TOP_N,
     "SHORT_MAX_SECONDS": DEFAULT_SHORT_MAX_SECONDS,
     "SEARCH_RELEVANCE_LANGUAGE": DEFAULT_SEARCH_RELEVANCE_LANGUAGE,
@@ -347,6 +354,7 @@ def load_settings(path: Path | str = _SETTINGS_PATH) -> dict:
 _settings = load_settings()
 MIN_VIEWS = _settings["MIN_VIEWS"]
 WINDOW_DAYS = _settings["WINDOW_DAYS"]
+REFRESH_MAX_AGE_DAYS = _settings["REFRESH_MAX_AGE_DAYS"]
 TOP_N = _settings["TOP_N"]
 SHORT_MAX_SECONDS = _settings["SHORT_MAX_SECONDS"]
 SEARCH_RELEVANCE_LANGUAGE = _settings["SEARCH_RELEVANCE_LANGUAGE"]
@@ -577,6 +585,7 @@ COMMENTS_SHEET_COLUMNS = [
 REQUIRED_KEYS: dict[str, type] = {
     "DB_PATH": str,
     "WINDOW_DAYS": int,
+    "REFRESH_MAX_AGE_DAYS": int,
     "TOP_N": int,
     "DAILY_QUOTA_LIMIT": int,
     "SAFETY_BUFFER": int,
@@ -603,7 +612,7 @@ REQUIRED_KEYS: dict[str, type] = {
 
 # Keys that must be strictly positive ints (type is checked via REQUIRED_KEYS).
 POSITIVE_INT_KEYS: frozenset[str] = frozenset(
-    {"MIN_VIEWS", "WINDOW_DAYS", "TOP_N", "SHORT_MAX_SECONDS",
+    {"MIN_VIEWS", "WINDOW_DAYS", "REFRESH_MAX_AGE_DAYS", "TOP_N", "SHORT_MAX_SECONDS",
      "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER", "OLLAMA_TIMEOUT_SECONDS",
      "DEFAULT_MAX_TOKENS", "DEFAULT_MAX_TOKENS_REASONING", "MAX_TOKENS_UPPER_BOUND",
      "EXTRACT_RUN_TIMEOUT_SECONDS", "EXTRACT_TERMINATE_GRACE_SECONDS",

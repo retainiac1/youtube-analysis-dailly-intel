@@ -187,7 +187,7 @@ def test_refresh_updates_stats_preserves_user_and_content(tmp_path):
         budget = swipefile.QuotaBudget(0, 9500)
         youtube = FakeYouTube(video_items={"v1": fake_video("v1", view_count="200000")})
 
-        seen, partial = swipefile._run_refresh(youtube, conn, run_id, budget, NOW1, NOW1[:10])
+        seen, partial = swipefile._run_catalog_sweep(youtube, conn, run_id, budget, NOW1, NOW1[:10])
 
         assert (seen, partial) == (1, False)
         row = conn.execute("SELECT * FROM videos WHERE video_id='v1'").fetchone()
@@ -221,7 +221,7 @@ def test_refresh_no_tracked_videos_is_noop(tmp_path):
     try:
         run_id = db.start_run(conn, "refresh", NOW1)
         budget = swipefile.QuotaBudget(0, 9500)
-        seen, partial = swipefile._run_refresh(None, conn, run_id, budget, NOW1, NOW1[:10])
+        seen, partial = swipefile._run_catalog_sweep(None, conn, run_id, budget, NOW1, NOW1[:10])
         assert (seen, partial) == (0, False)
         assert budget.run_units == 0
     finally:
@@ -235,13 +235,248 @@ def test_near_cap_refresh_guard_stops(tmp_path):
     try:
         run_id = db.start_run(conn, "refresh", NOW1)
         budget = swipefile.QuotaBudget(baseline=9500, cap=9500)  # nothing affordable
-        seen, partial = swipefile._run_refresh(None, conn, run_id, budget, NOW1, NOW1[:10])
+        seen, partial = swipefile._run_catalog_sweep(None, conn, run_id, budget, NOW1, NOW1[:10])
         assert budget.guard_stopped is True
         assert seen == 0
         # untouched stat
         row = conn.execute("SELECT view_count FROM videos WHERE video_id='v1'").fetchone()
         assert row["view_count"] == 1000
         assert swipefile._pick_status(budget, False, partial, False) == "quota_guard_stop"
+    finally:
+        conn.close()
+
+
+# --- Phase 4: catalog sweep status transitions + growth clock ---------------
+
+SWEEP_NOW = "2026-06-25T10:00:00-04:00"          # the sweep run's instant
+CLOCK_OLD = "2026-05-01T10:00:00-04:00"          # 55d before -> past the 30d cutoff
+CLOCK_RECENT = "2026-06-20T10:00:00-04:00"       # 5d before -> inside the cutoff
+SWEEP_RUN_ID = 2                                  # prior snapshots live at run_id 1
+
+
+def _sweep_db(tmp_path):
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    db.upsert_channel(conn, {
+        "channel_id": "c1", "subscriber_count": 100000, "channel_video_count": 10,
+        "channel_total_views": 1000000, "channel_created_date": "2020-01-01",
+        "channel_country": "US", "channel_keywords": "k"}, CLOCK_OLD)
+    conn.commit()
+    return conn
+
+
+def _seed_active(conn, vid, *, view_count=1000, clock=CLOCK_RECENT, starred=0):
+    db.upsert_video(conn, make_video_record(vid, view_count=view_count), clock)
+    conn.execute(
+        "UPDATE videos SET last_view_growth_at=?, starred=? WHERE video_id=?",
+        (clock, starred, vid))
+    conn.commit()
+
+
+def _prior_snapshot(conn, vid, view_count, run_id=1):
+    conn.execute(
+        "INSERT INTO stats_snapshots (run_id, video_id, captured_at, view_count, "
+        "like_count, comment_count) VALUES (?, ?, ?, ?, 0, 0)",
+        (run_id, vid, CLOCK_OLD, view_count))
+    conn.commit()
+
+
+def _status(conn, vid):
+    return conn.execute(
+        "SELECT status, status_changed_at, last_view_growth_at FROM videos "
+        "WHERE video_id=?", (vid,)).fetchone()
+
+
+def test_sweep_growth_bump_and_snapshot_cooccur(tmp_path):
+    """A grown video gets BOTH a new snapshot row AND a bumped clock in the same
+    run — the seam where the order-immune property lives at runtime."""
+    conn = _sweep_db(tmp_path)
+    try:
+        _seed_active(conn, "v1", view_count=100, clock=CLOCK_RECENT)
+        _prior_snapshot(conn, "v1", 100)
+        youtube = FakeYouTube(video_items={"v1": fake_video("v1", view_count="200")})
+        swipefile._run_catalog_sweep(youtube, conn, SWEEP_RUN_ID,
+                                     swipefile.QuotaBudget(0, 9500), SWEEP_NOW,
+                                     SWEEP_NOW[:10])
+        assert _status(conn, "v1")["last_view_growth_at"] == SWEEP_NOW   # bumped
+        snap = conn.execute(
+            "SELECT view_count FROM stats_snapshots WHERE run_id=? AND video_id='v1'",
+            (SWEEP_RUN_ID,)).fetchone()
+        assert snap["view_count"] == 200                                 # co-occurs
+    finally:
+        conn.close()
+
+
+def test_sweep_no_bump_on_flat_or_absent_prior(tmp_path):
+    conn = _sweep_db(tmp_path)
+    try:
+        _seed_active(conn, "flat", view_count=100, clock=CLOCK_RECENT)
+        _prior_snapshot(conn, "flat", 100)              # prior == fetched -> flat
+        _seed_active(conn, "noprior", view_count=100, clock=CLOCK_RECENT)  # no prior
+        youtube = FakeYouTube(video_items={
+            "flat": fake_video("flat", view_count="100"),
+            "noprior": fake_video("noprior", view_count="500")})
+        swipefile._run_catalog_sweep(youtube, conn, SWEEP_RUN_ID,
+                                     swipefile.QuotaBudget(0, 9500), SWEEP_NOW,
+                                     SWEEP_NOW[:10])
+        assert _status(conn, "flat")["last_view_growth_at"] == CLOCK_RECENT
+        assert _status(conn, "noprior")["last_view_growth_at"] == CLOCK_RECENT
+    finally:
+        conn.close()
+
+
+def test_sweep_marks_missing_id_gone_and_excludes_next_sweep(tmp_path):
+    conn = _sweep_db(tmp_path)
+    try:
+        _seed_active(conn, "here", clock=CLOCK_RECENT)
+        _seed_active(conn, "missing", clock=CLOCK_RECENT)
+        # The API answers the batch but omits 'missing' -> deleted/private = gone.
+        youtube = FakeYouTube(video_items={"here": fake_video("here")})
+        swipefile._run_catalog_sweep(youtube, conn, SWEEP_RUN_ID,
+                                     swipefile.QuotaBudget(0, 9500), SWEEP_NOW,
+                                     SWEEP_NOW[:10])
+        gone = _status(conn, "missing")
+        assert gone["status"] == "gone"
+        assert gone["status_changed_at"] == SWEEP_NOW
+        assert _status(conn, "here")["status"] == "active"
+        # gone is dropped from the next sweep's batch.
+        assert {r["video_id"] for r in db.fetch_videos_for_refresh(conn)} == {"here"}
+    finally:
+        conn.close()
+
+
+def test_sweep_revive_on_threshold_survives_aging(tmp_path):
+    """A stale-clock video that GREW this run is bumped before aging judges it, so
+    it survives — the revival signal is not silently dropped."""
+    conn = _sweep_db(tmp_path)
+    try:
+        _seed_active(conn, "v1", view_count=100, clock=CLOCK_OLD)  # stale clock
+        _prior_snapshot(conn, "v1", 100)
+        youtube = FakeYouTube(video_items={"v1": fake_video("v1", view_count="200")})
+        swipefile._run_catalog_sweep(youtube, conn, SWEEP_RUN_ID,
+                                     swipefile.QuotaBudget(0, 9500), SWEEP_NOW,
+                                     SWEEP_NOW[:10])
+        row = _status(conn, "v1")
+        assert row["last_view_growth_at"] == SWEEP_NOW   # bumped first
+        assert row["status"] == "active"                 # so aging keeps it
+    finally:
+        conn.close()
+
+
+def test_sweep_ages_out_old_unstarred_keeps_old_starred(tmp_path):
+    conn = _sweep_db(tmp_path)
+    try:
+        _seed_active(conn, "stale", view_count=100, clock=CLOCK_OLD, starred=0)
+        _prior_snapshot(conn, "stale", 100)              # flat -> no bump
+        _seed_active(conn, "star", view_count=100, clock=CLOCK_OLD, starred=1)
+        _prior_snapshot(conn, "star", 100)
+        youtube = FakeYouTube(video_items={
+            "stale": fake_video("stale", view_count="100"),
+            "star": fake_video("star", view_count="100")})
+        swipefile._run_catalog_sweep(youtube, conn, SWEEP_RUN_ID,
+                                     swipefile.QuotaBudget(0, 9500), SWEEP_NOW,
+                                     SWEEP_NOW[:10])
+        stale = _status(conn, "stale")
+        assert stale["status"] == "aged_out"
+        assert stale["status_changed_at"] == SWEEP_NOW
+        assert _status(conn, "star")["status"] == "active"   # starred is exempt
+    finally:
+        conn.close()
+
+
+def test_sweep_aging_leaves_gone_status_changed_at_intact(tmp_path):
+    conn = _sweep_db(tmp_path)
+    try:
+        _seed_active(conn, "stale", view_count=100, clock=CLOCK_OLD)
+        _prior_snapshot(conn, "stale", 100)
+        # A pre-existing gone row with a known disappearance time; not in the batch.
+        _seed_active(conn, "ghost", clock=CLOCK_RECENT)
+        conn.execute("UPDATE videos SET status='gone', status_changed_at=? "
+                     "WHERE video_id='ghost'", (CLOCK_OLD,))
+        conn.commit()
+        youtube = FakeYouTube(video_items={"stale": fake_video("stale", view_count="100")})
+        swipefile._run_catalog_sweep(youtube, conn, SWEEP_RUN_ID,
+                                     swipefile.QuotaBudget(0, 9500), SWEEP_NOW,
+                                     SWEEP_NOW[:10])
+        ghost = _status(conn, "ghost")
+        assert ghost["status"] == "gone"
+        assert ghost["status_changed_at"] == CLOCK_OLD   # aging never touched it
+    finally:
+        conn.close()
+
+
+def test_sweep_guard_stop_marks_no_gone_and_ages_nothing(tmp_path, monkeypatch):
+    """A truncated (guard-stopped) sweep must not mark un-fetched videos gone and
+    must defer aging entirely — no video is retired without a confirming fetch."""
+    monkeypatch.setattr(swipefile, "CHANNEL_BATCH_SIZE", 1)   # one id per batch
+    conn = _sweep_db(tmp_path)
+    try:
+        _seed_active(conn, "a", view_count=100, clock=CLOCK_OLD)  # old: would age
+        _seed_active(conn, "b", view_count=100, clock=CLOCK_OLD)
+        youtube = FakeYouTube(video_items={
+            "a": fake_video("a", view_count="100"),
+            "b": fake_video("b", view_count="100")})
+        # Affords exactly one 1-unit videos.list call; the second batch guard-stops.
+        budget = swipefile.QuotaBudget(baseline=9499, cap=9500)
+        swipefile._run_catalog_sweep(youtube, conn, SWEEP_RUN_ID, budget, SWEEP_NOW,
+                                     SWEEP_NOW[:10])
+        assert budget.guard_stopped is True
+        # Neither video is gone (the un-fetched one was never asked about), and the
+        # truncated sweep aged nothing despite both clocks being stale.
+        assert _status(conn, "a")["status"] == "active"
+        assert _status(conn, "b")["status"] == "active"
+    finally:
+        conn.close()
+
+
+def test_sweep_never_classifies(tmp_path, monkeypatch):
+    """LLM-cost attribution invariant: the sweep is a pure videos.list pass and must
+    never invoke the classify lane (so all classify spend is discover's)."""
+    def boom(*a, **k):
+        raise AssertionError("sweep must not classify")
+    monkeypatch.setattr(swipefile, "_run_classification_phase", boom)
+    conn = _sweep_db(tmp_path)
+    try:
+        _seed_active(conn, "v1", clock=CLOCK_RECENT)
+        youtube = FakeYouTube(video_items={"v1": fake_video("v1")})
+        seen, _ = swipefile._run_catalog_sweep(youtube, conn, SWEEP_RUN_ID,
+                                               swipefile.QuotaBudget(0, 9500),
+                                               SWEEP_NOW, SWEEP_NOW[:10])
+        assert seen == 1   # completed without ever calling classify
+    finally:
+        conn.close()
+
+
+def test_sweep_growth_predicate_matches_backfill(tmp_path):
+    """One-definition guard: the v12 backfill and the runtime bump route through the
+    same db.is_view_growth, so a flat live sweep preserves exactly the clock the
+    backfill computed (a divergent runtime predicate would move it)."""
+    conn = _sweep_db(tmp_path)
+    try:
+        _seed_active(conn, "v1", view_count=150, clock=CLOCK_RECENT)
+        # Snapshots: rose at run 1->2 (100->150), flat 2->3 (150->150).
+        ts2 = "2026-06-18T10:00:00-04:00"
+        conn.execute("INSERT INTO stats_snapshots (run_id, video_id, captured_at, "
+                     "view_count, like_count, comment_count) VALUES "
+                     "(1,'v1','2026-06-17T10:00:00-04:00',100,0,0)")
+        conn.execute("INSERT INTO stats_snapshots (run_id, video_id, captured_at, "
+                     "view_count, like_count, comment_count) VALUES (2,'v1',?,150,0,0)",
+                     (ts2,))
+        conn.execute("INSERT INTO stats_snapshots (run_id, video_id, captured_at, "
+                     "view_count, like_count, comment_count) VALUES "
+                     "(3,'v1','2026-06-19T10:00:00-04:00',150,0,0)")
+        conn.commit()
+        with db.transaction(conn):
+            db._backfill_view_growth(conn)
+        assert _status(conn, "v1")["last_view_growth_at"] == ts2   # last real growth
+
+        # A live sweep at run 4 with a flat count must NOT move the backfilled clock.
+        youtube = FakeYouTube(video_items={"v1": fake_video("v1", view_count="150")})
+        swipefile._run_catalog_sweep(youtube, conn, 4,
+                                     swipefile.QuotaBudget(0, 9500), SWEEP_NOW,
+                                     SWEEP_NOW[:10])
+        assert _status(conn, "v1")["last_view_growth_at"] == ts2
     finally:
         conn.close()
 
@@ -327,27 +562,70 @@ def test_discover_ledger_equals_run_units_no_double_count(tmp_path, monkeypatch)
     assert run["mode"] == "discover"
     assert run["status"] == "success"
 
-    # Cost: 2 search*100 + 2 videos*1 + 1 channels*1 + 3 comments*1 = 206
-    expected = 2 * 100 + 2 * 1 + 1 * 1 + 3 * 1
+    # Cost: 2 search*100 + 2 videos*1 (discover enrichment) + 1 channels*1 +
+    # 3 comments*1 + 1 videos*1 (the catalog sweep re-fetches the 3-video active
+    # catalog as one batch) = 207. The sweep's re-fetch is the accepted "redundant
+    # fetch": discover persists the catch, then the sweep snapshots+ranks it.
+    expected = 2 * 100 + 2 * 1 + 1 * 1 + 3 * 1 + 1 * 1
     assert run["quota_used"] == expected
 
     today = config.pacific_date()
     conn = db.get_connection(db_path)
     try:
         # The ledger total equals run_units exactly: eager search flushes (200) +
-        # end-of-run remainder (6), NOT 206 + 200.
+        # end-of-run remainder (7), NOT 207 + 200.
         assert db.get_units_used(conn, today) == expected
         assert conn.execute("SELECT COUNT(*) c FROM videos").fetchone()["c"] == 3
+        # The sweep writes exactly one snapshot per caught video for this run — no
+        # double row (discover wrote none; the sweep is the only snapshot pass).
+        snaps = conn.execute(
+            "SELECT video_id, COUNT(*) c FROM stats_snapshots WHERE run_id = ? "
+            "GROUP BY video_id", (run["run_id"],)
+        ).fetchall()
+        assert len(snaps) == 3
+        assert all(row["c"] == 1 for row in snaps)
         ranked = conn.execute("SELECT COUNT(*) c FROM rankings").fetchone()["c"]
         assert ranked > 0
     finally:
         conn.close()
 
-    # eager-flush call counts: 2 searches, 2 video detail fetches, 1 channel batch
+    # eager-flush call counts: 2 searches, 2 discover video fetches + 1 sweep
+    # batch = 3, 1 channel batch
     assert len(youtube._search.calls) == 2
-    assert len(youtube._videos.calls) == 2
+    assert len(youtube._videos.calls) == 3
     assert len(youtube._channels.calls) == 1
     assert not Path(state_path).exists()          # cleared on clean success
+
+
+def test_discover_sweep_failure_keeps_catch_and_marks_partial(tmp_path, monkeypatch):
+    """Failure isolation: the catch is persisted (and committed by persist_videos)
+    BEFORE the catalog sweep runs, so a sweep exception cannot lose it. The caught
+    videos remain and the run is marked partial, never failed."""
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    queries = [{"q": "q1", "bucket": "habit"}, {"q": "q2", "bucket": "health"}]
+    youtube = FakeYouTube(
+        search_map={"q1": ["v1", "v2"], "q2": ["v2", "v3"]},
+        video_items={v: fake_video(v) for v in ("v1", "v2", "v3")},
+        channel_items={"c1": fake_channel("c1", subs="100000")},
+    )
+    _patch_main(monkeypatch, db_path, [], youtube=youtube, queries=queries)
+
+    def boom(*a, **k):
+        raise RuntimeError("sweep blew up")
+    monkeypatch.setattr(swipefile, "_run_catalog_sweep", boom)
+
+    swipefile.main()
+
+    run = latest_run(db_path)
+    assert run["mode"] == "discover"
+    assert run["status"] == "partial"           # non-fatal sweep failure -> partial
+    conn = db.get_connection(db_path)
+    try:
+        # The catch survived the sweep failure: persist_videos committed first.
+        assert conn.execute("SELECT COUNT(*) c FROM videos").fetchone()["c"] == 3
+    finally:
+        conn.close()
 
 
 # --- main(): exit codes (scheduler retry contract) --------------------------
@@ -371,6 +649,37 @@ def test_dry_run_exits_ok_not_no_rows(tmp_path, monkeypatch):
     it is a terminal branch that skips the clean-run classification."""
     db_path = seed(tmp_path, with_video=False)
     assert _drive_main_code(monkeypatch, db_path, ["--dry-run"]) == config.EXIT_OK
+
+
+def test_dry_run_does_not_migrate(tmp_path, monkeypatch, capsys):
+    """--dry-run opens the DB READ-ONLY: a pending migration is REPORTED, never
+    applied. The read-only handle blocks the write init_db would have made."""
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION - 1}")  # simulate behind
+    conn.commit()
+    conn.close()
+
+    _patch_main(monkeypatch, db_path, ["--dry-run"])
+    assert swipefile.main() == config.EXIT_OK
+    assert "migration pending" in capsys.readouterr().err.lower()
+    conn = db.get_connection(db_path)
+    try:
+        # The read-only dry run did NOT migrate: the version is still behind.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION - 1
+    finally:
+        conn.close()
+
+
+def test_dry_run_missing_db_reports_no_database(tmp_path, monkeypatch, capsys):
+    """--dry-run against a not-yet-created DB reports it and creates nothing (a dry
+    run must not write, not even to initialise the schema)."""
+    db_path = str(tmp_path / "absent.db")
+    _patch_main(monkeypatch, db_path, ["--dry-run"])
+    assert swipefile.main() == config.EXIT_OK
+    assert "no database" in capsys.readouterr().err.lower()
+    assert not Path(db_path).exists()
 
 
 def test_explicit_discover_preflight_exits_quota(tmp_path, monkeypatch):

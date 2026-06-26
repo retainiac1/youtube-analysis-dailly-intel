@@ -20,7 +20,7 @@ def test_fresh_db_creates_interpretations_and_stamps_current(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 11
+        assert version == db.SCHEMA_VERSION == 12
     finally:
         conn.close()
 
@@ -44,13 +44,15 @@ def test_seeded_v2_db_migrates_without_harming_seed(tmp_path):
                 title TEXT,
                 view_count INTEGER,
                 user_notes TEXT DEFAULT '',
-                starred INTEGER DEFAULT 0
+                starred INTEGER DEFAULT 0,
+                first_seen_at TEXT
             )
             """
         )
         raw.execute(
-            "INSERT INTO videos (video_id, title, view_count, user_notes, starred) "
-            "VALUES ('seed', 'Seed video', 4242, 'hand-written note', 1)"
+            "INSERT INTO videos (video_id, title, view_count, user_notes, starred, "
+            "first_seen_at) VALUES ('seed', 'Seed video', 4242, 'hand-written note', "
+            "1, '2026-06-08T10:00:00-04:00')"
         )
         raw.execute("PRAGMA user_version = 2")
         raw.commit()
@@ -66,11 +68,17 @@ def test_seeded_v2_db_migrates_without_harming_seed(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 11
+        assert version == db.SCHEMA_VERSION == 12
         after = dict(
             conn.execute("SELECT * FROM videos WHERE video_id = 'seed'").fetchone()
         )
-        assert after == before
+        # The pre-existing columns are byte-for-byte unchanged; v12 adds the three
+        # snapshot-sweep columns on top (status backfilled active, growth clock
+        # falling back to first_seen_at since this seed has no snapshots).
+        assert {k: after[k] for k in before} == before
+        assert after["status"] == "active"
+        assert after["status_changed_at"] is None
+        assert after["last_view_growth_at"] == "2026-06-08T10:00:00-04:00"
     finally:
         conn.close()
 

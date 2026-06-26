@@ -8,7 +8,7 @@ import sqlite3
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httplib2
@@ -877,6 +877,41 @@ def eligible_pool(rows: list[dict], cutoff_dt: datetime) -> list[dict]:
     return kept
 
 
+def videos_to_age_out(candidates: list[dict], cutoff_dt: datetime) -> list[str]:
+    """Pure decision: of the active+unstarred `candidates` (each a dict with
+    video_id + last_view_growth_at, from db.fetch_aging_candidates), return the
+    video_ids to retire — those whose view count has not grown since `cutoff_dt`
+    (= now - REFRESH_MAX_AGE_DAYS). Growth at or before the cutoff retires (`<=`);
+    strictly after keeps. Comparison is instant-vs-instant on aware datetimes, NOT
+    a lexical string compare, so a DST offset shift (-04:00/-05:00) is handled
+    chronologically.
+
+    `cutoff_dt` MUST be offset-aware: the assert turns a naive cutoff into a loud
+    failure here rather than a `TypeError: can't compare offset-naive and
+    offset-aware` on the first candidate (or a silent miscompare). now_local_iso()
+    always carries an Eastern offset, so a correctly-built cutoff is aware.
+
+    A NULL or unparseable last_view_growth_at is KEPT (fail-safe: never retire on a
+    missing clock) and logged. A new catch sets the clock to first_seen_at and the
+    v12 migration backfills every row, so a NULL should never occur — it signals a
+    backfill miss or a bug, not a new video. A persistent NULL is a latent leak (a
+    row that can never age out), so this branch is a guard against bugs, not an
+    expected path."""
+    assert cutoff_dt.tzinfo is not None, "cutoff_dt must be offset-aware"
+    to_retire = []
+    for row in candidates:
+        ts = row.get("last_view_growth_at")
+        try:
+            grew_at = datetime.fromisoformat((ts or "").replace("Z", "+00:00"))
+        except (ValueError, TypeError, AttributeError):
+            print(f"WARNING: unparseable/NULL last_view_growth_at {ts!r} for video "
+                  f"{row.get('video_id')!r}, kept (not aged out)", file=sys.stderr)
+            continue
+        if grew_at <= cutoff_dt:
+            to_retire.append(row["video_id"])
+    return to_retire
+
+
 def _recompute_rankings(conn, captured_at: str, run_date: str) -> None:
     """Recompute and write all three lanes from the persisted pool. Shared by
     discover and refresh so both rank the same way. `run_date` is the Eastern
@@ -889,28 +924,42 @@ def _recompute_rankings(conn, captured_at: str, run_date: str) -> None:
     db.run_with_db_retry(lambda: _rank_phase(conn, rankings, run_date, captured_at))
 
 
-def _run_refresh(youtube, conn, run_id: int, budget: "QuotaBudget",
-                 now: str, run_date: str) -> tuple[int, bool]:
-    """Refresh mode (cheap, no searches): re-pull videos.list stats for tracked
-    videos in batches of 50, preserving each video's matched_queries / buckets /
-    top_comments from the DB, upsert, write one snapshot per video, and recompute
-    rankings from the refreshed numbers. Returns (videos_refreshed, persist_partial).
+def _run_catalog_sweep(youtube, conn, run_id: int, budget: "QuotaBudget",
+                       now: str, run_date: str) -> tuple[int, bool]:
+    """The shared catalog sweep: re-pull videos.list stats for the active tracked
+    catalog in batches of CHANNEL_BATCH_SIZE (50), preserving each video's
+    matched_queries / buckets / top_comments from the DB, upsert, write one
+    snapshot per video, and recompute rankings from the refreshed numbers. Returns
+    (videos_refreshed, persist_partial). Called by --refresh, and (Phase 3) by
+    discover after it persists its catch, so one daily run snapshots the whole
+    catalog.
 
-    Every videos.list call goes through the budget guard, so a near-cap refresh
-    aborts gracefully rather than nicking the ceiling. videos.list is 1 unit and is
-    flushed to the ledger at run end (no eager flush — refresh has no search.list)."""
+    Every videos.list call goes through the budget guard, so a near-cap sweep aborts
+    gracefully (persisting what it has already fetched) rather than nicking the
+    ceiling. videos.list is 1 unit, charged via api_call_with_retry and flushed to
+    the ledger at run end."""
     tracked = db.fetch_videos_for_refresh(conn)
     if not tracked:
-        print("Refresh: no tracked videos yet — run --discover first.", file=sys.stderr)
+        print("Catalog sweep: no active videos to snapshot.", file=sys.stderr)
         return 0, False
 
     by_id = {row["video_id"]: row for row in tracked}
     subs = db.fetch_channel_subs(conn)
     ids = list(by_id)
-    print(f"Refresh: re-pulling stats for {len(ids)} videos...", file=sys.stderr)
+    print(f"Catalog sweep: re-pulling stats for {len(ids)} videos...", file=sys.stderr)
+
+    # The most recent snapshot per video STRICTLY BEFORE this run, read once before
+    # we write any of this run's snapshots — the order-immune growth source. A
+    # video's view_count rose iff this run's fetched count beats its prior snapshot
+    # (db.is_view_growth), the SAME definition the v12 backfill uses.
+    prior = db.latest_snapshot_view_counts(conn, run_id)
 
     video_records: list[dict] = []
     snapshot_args: list[tuple] = []
+    returned_ids: set[str] = set()   # ids the API returned a row for
+    sent_ids: set[str] = set()       # ids in batches the API actually ANSWERED
+    grown_ids: list[str] = []        # returned ids whose view_count beat the prior snapshot
+    swept_fully = True               # cleared if a guard/quota stop truncates the loop
     for i in range(0, len(ids), CHANNEL_BATCH_SIZE):
         batch = ids[i:i + CHANNEL_BATCH_SIZE]
         items = api_call_with_retry(
@@ -918,10 +967,17 @@ def _run_refresh(youtube, conn, run_id: int, budget: "QuotaBudget",
             budget,
             VIDEOS_QUOTA_COST,
         )
-        if items is None:  # guard or quota stop — persist what we have
+        if items is None:  # guard or quota stop — persist what we have, defer aging
+            swept_fully = False
             break
+        # This batch was answered in full (videos.list omits invalid ids but never
+        # truncates a guarded call), so every id we asked about is now confirmed
+        # present-or-gone.
+        sent_ids.update(batch)
         for item in items:
-            preserved = by_id.get(item.get("id"))
+            item_id = item.get("id")
+            returned_ids.add(item_id)
+            preserved = by_id.get(item_id)
             if preserved is None:
                 continue
             matched = (preserved["matched_queries"] or "").split("|")
@@ -936,9 +992,16 @@ def _run_refresh(youtube, conn, run_id: int, budget: "QuotaBudget",
                 (record["video_id"], record["view_count"],
                  record["like_count"], record["comment_count"])
             )
+            if db.is_view_growth(prior.get(item_id), record["view_count"]):
+                grown_ids.append(item_id)
 
-    # Videos are the critical write (fatal); snapshots are non-fatal, mirroring
-    # discover. Channels are NOT re-fetched or written in refresh.
+    # Confirmed asked-but-absent ids are gone (deleted/private/region-blocked).
+    # Truncation-safe: an unanswered batch never enters sent_ids, so a quota/guard
+    # stop can't false-positive its videos as gone.
+    gone_ids = sent_ids - returned_ids
+
+    # Videos are the critical write (fatal); everything below is non-fatal. Channels
+    # are NOT re-fetched or written in the sweep.
     db.run_with_db_retry(lambda: persist_videos(conn, video_records, now))
     persist_partial = False
     try:
@@ -947,56 +1010,102 @@ def _run_refresh(youtube, conn, run_id: int, budget: "QuotaBudget",
         persist_partial = True
         print(f"WARNING: snapshot persist failed, continuing: {e}", file=sys.stderr)
 
+    # Growth clock, gone transitions, and the aging pass in ONE transaction so the
+    # aging read sees the just-bumped clocks and the just-marked-gone exclusions.
+    # Aging runs LAST and ONLY on a complete sweep: a truncated sweep didn't give
+    # every active video its confirming fetch this run, so retiring on stale clocks
+    # (aged_out is sticky) is deferred to the next full sweep.
+    try:
+        with db.transaction(conn):
+            db.bump_view_growth(conn, grown_ids, now)
+            for vid in gone_ids:
+                db.set_video_status(conn, vid, "gone", now)
+            if swept_fully:
+                candidates = db.fetch_aging_candidates(conn)
+                cutoff = datetime.fromisoformat(now) - timedelta(
+                    days=config.REFRESH_MAX_AGE_DAYS)
+                for vid in videos_to_age_out(candidates, cutoff):
+                    db.set_video_status(conn, vid, "aged_out", now)
+    except Exception as e:
+        persist_partial = True
+        print(f"WARNING: status/growth writes failed, continuing: {e}", file=sys.stderr)
+
     try:
         _recompute_rankings(conn, now, run_date)
     except Exception as e:
         persist_partial = True
         print(f"WARNING: ranking phase failed, continuing: {e}", file=sys.stderr)
 
+    counts = db.run_change_counts(conn, run_id, now)
+    print(f"Run summary: added={counts['added']} updated={counts['updated']} "
+          f"aged_out={counts['aged_out']} gone={counts['gone']}", file=sys.stderr)
+
     return len(video_records), persist_partial
 
 
-def estimate_discover_units() -> dict:
+def estimate_discover_units(eligible_count: int) -> dict:
     """Estimate the quota a --discover run will cost, as a breakdown plus total.
 
     This is the SINGLE source of the estimate: both --dry-run and the pre-flight
     guard call it, so they can never disagree. Channel and comment call counts are
     rough heuristics (the true counts are unknown until the pool is fetched); the
-    per-call guard is the real protection against overruns."""
+    per-call guard is the real protection against overruns.
+
+    `eligible_count` is the active catalog size (db.count_eligible_for_refresh) and
+    drives the `sweep` term: the merged discover re-fetches the whole active catalog
+    via videos.list after its catch, costing ceil(eligible_count / CHANNEL_BATCH_SIZE)
+    units. This is the PRE-catch count, so the term undercounts by ~one batch (the
+    just-caught videos the sweep also refreshes) — an accepted approximation."""
     n = len(SEARCH_QUERIES)
     search = n * SEARCH_QUOTA_COST
     videos = n * VIDEOS_QUOTA_COST
     channels = ESTIMATED_CHANNEL_CALLS * CHANNELS_QUOTA_COST
     comments = ESTIMATED_COMMENT_CALLS * COMMENTS_QUOTA_COST
+    sweep = ((eligible_count + CHANNEL_BATCH_SIZE - 1) // CHANNEL_BATCH_SIZE) * VIDEOS_QUOTA_COST
     return {
         "search": search, "videos": videos, "channels": channels,
-        "comments": comments, "total": search + videos + channels + comments,
+        "comments": comments, "sweep": sweep,
+        "total": search + videos + channels + comments + sweep,
     }
 
 
-def _print_dry_run(units_today: int, cap: int) -> None:
+def _print_dry_run(units_today: int, cap: int, eligible_count, pending=None) -> None:
     """Print the planned queries and estimated quota cost without making any API
     calls (the --dry-run path). Output goes to stderr. `units_today`/`cap` are the
     current Pacific-day quota state so the user sees headroom, not just the raw
-    estimate."""
+    estimate. `eligible_count` is the active catalog size driving the sweep term, or
+    None when it cannot be read yet (a pending migration). `pending`, when set, is
+    `(current_version, target_version)`: the schema is behind the code, so the
+    estimate omits the sweep term and the user is told to apply the migration via a
+    real run (which backs up first)."""
     total_queries = len(SEARCH_QUERIES)
-    est = estimate_discover_units()
-    estimated_quota = est["total"]
+    # When the count is unknown (pending migration), estimate with sweep=0 and label
+    # the sweep line n/a, rather than guessing a catalog size.
+    est = estimate_discover_units(eligible_count if eligible_count is not None else 0)
 
     print("DRY RUN — no API calls will be made\n", file=sys.stderr)
+    if pending is not None:
+        print(f"⚠ Schema migration pending v{pending[0]} → v{pending[1]}: apply it "
+              f"via a real (non --dry-run) pipeline run, which backs up the seed "
+              f"first. The sweep term is omitted below until then.\n", file=sys.stderr)
     for i, entry in enumerate(SEARCH_QUERIES, 1):
         print(f'  [{i}/{total_queries}] "{entry["q"]}" ({entry["bucket"]})', file=sys.stderr)
-    print(f"\nEstimated quota cost: ~{estimated_quota} units", file=sys.stderr)
+    print(f"\nEstimated quota cost: ~{est['total']} units", file=sys.stderr)
     print(f"  search.list: {total_queries} × {SEARCH_QUOTA_COST} = {est['search']}", file=sys.stderr)
     print(f"  videos.list: {total_queries} × {VIDEOS_QUOTA_COST} = {est['videos']}", file=sys.stderr)
     print(f"  channels.list: ~{est['channels']}", file=sys.stderr)
     print(f"  commentThreads.list: ~{est['comments']}", file=sys.stderr)
+    if eligible_count is None:
+        print("  videos.list (sweep): n/a (schema migration pending)", file=sys.stderr)
+    else:
+        print(f"  videos.list (sweep): ceil({eligible_count}/{CHANNEL_BATCH_SIZE}) × "
+              f"{VIDEOS_QUOTA_COST} = {est['sweep']}", file=sys.stderr)
     print(f"\nToday (Pacific): {units_today} units used, cap {cap} "
           f"(limit {DAILY_QUOTA_LIMIT} − buffer {SAFETY_BUFFER}), "
           f"{max(cap - units_today, 0)} remaining", file=sys.stderr)
-    fits = "yes" if units_today + estimated_quota <= cap else "NO — would pre-flight stop"
+    fits = "yes" if units_today + est["total"] <= cap else "NO — would pre-flight stop"
     print(f"Discover fits under cap today? {fits}", file=sys.stderr)
-    print(f"Daily limit: {DAILY_QUOTA_LIMIT:,} units → ~{DAILY_QUOTA_LIMIT // estimated_quota} runs/day", file=sys.stderr)
+    print(f"Daily limit: {DAILY_QUOTA_LIMIT:,} units → ~{DAILY_QUOTA_LIMIT // est['total']} runs/day", file=sys.stderr)
 
 
 def _normalize_state(state: dict) -> dict:
@@ -1543,9 +1652,13 @@ def _persist_all(conn, run_id: int, video_records: list[dict],
 
 def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict,
                   today_pac: str, run_date: str) -> tuple[int, bool, bool, bool]:
-    """Discover mode (expensive): run the search/channel/comment phases, persist
-    everything, and recompute rankings. `run_date` is the Eastern rankings key
-    captured once in main() and threaded to the rankings write. Returns
+    """Discover mode (expensive): run the search/channel/comment phases and persist
+    the catch (videos + channels), then hand off to the shared catalog sweep, which
+    snapshots and ranks the WHOLE active catalog (now including the just-caught
+    videos). Discover writes no snapshot or ranking of its own — the sweep is the
+    single authoritative pass, so one daily run keeps the full back-catalog's
+    trajectory current with no double rows. `run_date` is the Eastern rankings key
+    captured once in main() and threaded through. Returns
     (videos_seen, quota_aborted, persist_partial, classify_budget_exhausted)."""
     all_results, quota_aborted = _run_search_phase(youtube, state, budget, conn, today_pac)
 
@@ -1570,20 +1683,33 @@ def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict
         channel_map = {}
 
     now = now_local_iso()
-    video_records, snapshot_args, channel_records = _build_records(
+    # Discover persists NO snapshot of its own (empty snapshot_args): the sweep
+    # below is the authoritative snapshot pass, so a caught video gets exactly one
+    # stats_snapshots row, never a double. persist_videos commits its own
+    # transaction here, so the catch is durable BEFORE the sweep runs.
+    video_records, _snapshot_args, channel_records = _build_records(
         state, seen_videos, query_map, channel_map
     )
     persist_partial = _persist_all(
-        conn, run_id, video_records, channel_records, snapshot_args, now
+        conn, run_id, video_records, channel_records, [], now
     )
 
-    # Recompute all three rankings from the persisted pool. A failure here is
-    # non-fatal: persisted videos are kept and the run is marked partial.
+    # Hand off to the shared catalog sweep: it snapshots and ranks the whole active
+    # catalog (which already includes the just-persisted catch) once. A sweep
+    # failure is NON-FATAL — the catch is already committed, so mark the run partial
+    # and continue rather than failing it (a missed snapshot day is recoverable; a
+    # lost catch is not). Runs unconditionally, including when the classify breaker
+    # tripped: the snapshot value is independent of LLM classification, the YouTube
+    # budget guard still protects every videos.list, and _pick_status keeps the
+    # classify_budget_stop label.
     try:
-        _recompute_rankings(conn, now, run_date)
+        _, sweep_partial = _run_catalog_sweep(
+            youtube, conn, run_id, budget, now, run_date
+        )
+        persist_partial = persist_partial or sweep_partial
     except Exception as e:
         persist_partial = True
-        print(f"WARNING: ranking phase failed, continuing: {e}", file=sys.stderr)
+        print(f"WARNING: catalog sweep failed, continuing: {e}", file=sys.stderr)
 
     return len(seen_videos), quota_aborted, persist_partial, classify_budget_exhausted
 
@@ -1650,17 +1776,33 @@ def main() -> int:
     cap = DAILY_QUOTA_LIMIT - SAFETY_BUFFER
 
     if args.dry_run:
-        # Terminal branch: no API calls, no writes. Read today's quota state for the
-        # estimate, then go STRAIGHT to the finalizer as EXIT_OK. It must NOT fall
-        # through to the clean-run classification below (that would count 0 rankings
-        # rows and false-fire EXIT_NO_ROWS).
-        db.init_db(DB_PATH)
-        conn = db.get_connection(DB_PATH)
-        try:
-            units_today = db.get_units_used(conn, pacific_date())
-        finally:
-            conn.close()
-        _print_dry_run(units_today, cap)
+        # Terminal branch: no API calls and NO DB writes. The DB is opened
+        # READ-ONLY (mode=ro) and init_db is deliberately NOT called, so a pending
+        # schema migration cannot be applied here — SQLite physically refuses the
+        # write rather than us merely promising not to. Go STRAIGHT to the finalizer
+        # as EXIT_OK; it must NOT fall through to the clean-run classification below
+        # (that would count 0 rankings rows and false-fire EXIT_NO_ROWS).
+        units_today = 0
+        eligible = 0          # int -> printed sweep term; None -> "n/a (pending)"
+        pending = None
+        if not os.path.exists(DB_PATH):
+            print("DRY RUN: no database yet (a real run will create it).",
+                  file=sys.stderr)
+        else:
+            conn = db.get_readonly_connection(DB_PATH)
+            try:
+                current = conn.execute("PRAGMA user_version").fetchone()[0]
+                units_today = db.get_units_used(conn, pacific_date())
+                if current < db.SCHEMA_VERSION:
+                    # Schema is behind the code: the status column the eligible
+                    # count needs may not exist yet, so skip it and report.
+                    pending = (current, db.SCHEMA_VERSION)
+                    eligible = None
+                else:
+                    eligible = db.count_eligible_for_refresh(conn)
+            finally:
+                conn.close()
+        _print_dry_run(units_today, cap, eligible, pending)
         return _finalize(EXIT_OK)
 
     load_dotenv()
@@ -1710,8 +1852,11 @@ def main() -> int:
             mode = "refresh" if _discover_done_today(conn, today_pac) else "discover"
 
         # Pre-flight guard (discover only): refuse if the estimate won't fit the cap.
+        # The sweep term uses the PRE-catch active count (read here, before start_run
+        # and the catch persist), so it undercounts by ~one batch — accepted.
         if mode == "discover":
-            estimate = estimate_discover_units()["total"]
+            estimate = estimate_discover_units(
+                db.count_eligible_for_refresh(conn))["total"]
             if units_today + estimate > cap:
                 remaining = max(cap - units_today, 0)
                 if args.discover:  # explicit discover -> hard stop, no work done
@@ -1747,7 +1892,7 @@ def main() -> int:
                     youtube, conn, run_id, budget, state, today_pac, run_date
                 )
             else:
-                videos_seen, persist_partial = _run_refresh(
+                videos_seen, persist_partial = _run_catalog_sweep(
                     youtube, conn, run_id, budget, now_local_iso(), run_date
                 )
 

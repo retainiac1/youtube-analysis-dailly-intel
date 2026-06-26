@@ -1,5 +1,7 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 import db
 import swipefile
@@ -134,6 +136,48 @@ def test_eligible_pool_excludes_old_videos():
     ]
     kept = swipefile.eligible_pool(rows, CUTOFF)
     assert [r["video_id"] for r in kept] == ["recent"]
+
+
+# --- videos_to_age_out: instant-based no-growth retirement -------------------
+
+def age_row(video_id, last_view_growth_at):
+    return {"video_id": video_id, "last_view_growth_at": last_view_growth_at}
+
+
+def test_videos_to_age_out_cutoff_boundary():
+    # Fixtures are built relative to the INJECTED cutoff, never a fresh now, so
+    # "exactly at the cutoff" is a precise, non-flaky instant. At/before retires
+    # (<=); one microsecond after is kept.
+    cutoff = datetime.fromisoformat("2026-06-25T10:00:00-04:00")
+    at = age_row("at", cutoff.isoformat())
+    after = age_row("after", (cutoff + timedelta(microseconds=1)).isoformat())
+    before = age_row("before", (cutoff - timedelta(days=1)).isoformat())
+    assert swipefile.videos_to_age_out([at, after, before], cutoff) == ["at", "before"]
+
+
+def test_videos_to_age_out_keeps_null_and_unparseable():
+    # A missing or garbage clock is kept (fail-safe), not retired.
+    cutoff = datetime.fromisoformat("2026-06-25T10:00:00-04:00")
+    rows = [age_row("nullclock", None), age_row("garbage", "not-a-date")]
+    assert swipefile.videos_to_age_out(rows, cutoff) == []
+
+
+def test_videos_to_age_out_requires_aware_cutoff():
+    # A naive cutoff must fail loud (the assert), not silently miscompare.
+    naive = datetime(2026, 6, 25, 10, 0, 0)
+    with pytest.raises(AssertionError):
+        swipefile.videos_to_age_out([age_row("x", "2026-06-25T09:00:00-04:00")], naive)
+
+
+def test_videos_to_age_out_dst_compares_instants_not_strings():
+    # The clock is a winter -05:00 wall time; the cutoff a -04:00 wall time. As
+    # instants the clock (17:00Z) is AFTER the cutoff (16:30Z), so it is kept. A
+    # lexical string compare would order the clock BEFORE the cutoff and wrongly
+    # retire it — this asserts the chronological (correct) outcome.
+    clock = "2026-01-15T12:00:00-05:00"            # instant 17:00Z
+    cutoff = datetime.fromisoformat("2026-01-15T12:30:00-04:00")  # instant 16:30Z
+    assert clock < cutoff.isoformat()              # a string <= would retire it
+    assert swipefile.videos_to_age_out([age_row("dst", clock)], cutoff) == []
 
 
 # --- DB integration: fetch_ranking_pool / replace_rankings / _rank_phase -----

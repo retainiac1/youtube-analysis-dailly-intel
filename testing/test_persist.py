@@ -107,6 +107,21 @@ def test_first_seen_at_set_once(tmp_path):
         conn.close()
 
 
+def test_last_view_growth_at_set_once_on_insert(tmp_path):
+    """The growth clock is insert-only: set to `now` (= first_seen_at) on the first
+    catch and NEVER touched on a re-catch, even when stats change. Otherwise
+    re-catching an old video would reset its no-growth clock and age it out. Only
+    the sweep's bump_view_growth advances it."""
+    conn = fresh_db(tmp_path)
+    try:
+        upsert(conn, make_video_record(view_count=1000), NOW1)
+        assert fetch(conn)["last_view_growth_at"] == NOW1      # = first_seen_at
+        upsert(conn, make_video_record(view_count=9999), NOW2)  # re-catch, stats up
+        assert fetch(conn)["last_view_growth_at"] == NOW1      # NOT reset by the upsert
+    finally:
+        conn.close()
+
+
 def test_last_api_refresh_at_moves_only_on_real_change(tmp_path):
     conn = fresh_db(tmp_path)
     try:

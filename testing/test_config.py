@@ -9,6 +9,7 @@ def make_good_config() -> SimpleNamespace:
     return SimpleNamespace(
         DB_PATH="swipefile.db",
         WINDOW_DAYS=3,
+        REFRESH_MAX_AGE_DAYS=30,
         TOP_N=20,
         DAILY_QUOTA_LIMIT=10000,
         SAFETY_BUFFER=500,

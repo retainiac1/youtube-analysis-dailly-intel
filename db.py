@@ -52,7 +52,14 @@ import config
 # stored as JSON). An APPEND history (designed for mismatch-trend-over-time), so the
 # /prices panel reads the latest with ORDER BY run_at DESC. Unconditional CREATE IF NOT
 # EXISTS + an index — additive, idempotent, born empty, not version-gated.
-SCHEMA_VERSION = 11
+# v12: added videos.status (NOT NULL DEFAULT 'active'), videos.status_changed_at,
+# and videos.last_view_growth_at to support the daily full-catalog snapshot sweep.
+# The sweep marks videos active/gone/aged_out and tracks a per-video view-growth
+# clock so a video that stops growing for REFRESH_MAX_AGE_DAYS is retired. Guarded
+# ALTERs in the same atomic block; status backfills to 'active' via its DEFAULT,
+# and last_view_growth_at is backfilled once from stats_snapshots (the captured_at
+# of the most recent run where view_count rose, else first_seen_at).
+SCHEMA_VERSION = 12
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -89,7 +96,10 @@ SCHEMA_STATEMENTS: list[str] = [
         starred_at TEXT,
         hook TEXT DEFAULT '',
         first_10_sec TEXT DEFAULT '',
-        saves TEXT DEFAULT ''
+        saves TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active',  -- v12: active | gone | aged_out
+        status_changed_at TEXT,                 -- v12: set on any status transition
+        last_view_growth_at TEXT                -- v12: last run whose view_count rose
     )
     """,
     """
@@ -276,6 +286,37 @@ def get_connection(
     return conn
 
 
+def get_readonly_connection(db_path: str) -> sqlite3.Connection:
+    """Open a strictly READ-ONLY connection (`mode=ro`), for callers that must
+    guarantee no writes — notably --dry-run, which must never migrate the live
+    seed. SQLite physically refuses any write on this handle. Unlike `immutable=1`,
+    `mode=ro` still reads the WAL, so it sees the true current state. Deliberately
+    does NOT run `PRAGMA journal_mode=WAL` (that pragma is itself a write and would
+    fail on a read-only handle), which is exactly why such callers must use this
+    rather than get_connection. Raises sqlite3.OperationalError if the file is
+    absent (the caller checks existence first)."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def migration_pending(db_path: str) -> bool:
+    """True when the DB at `db_path` is BEHIND the code's SCHEMA_VERSION (an
+    init_db would migrate it). Read-only (mode=ro, sees the WAL). A missing file
+    returns False: a fresh DB has no data to lose and is created+migrated by the
+    real run (which already backs up or has nothing to back up). Used by
+    run-pipeline.sh to force a pre-run backup whenever a migration is pending,
+    regardless of --dry-run."""
+    if not Path(db_path).exists():
+        return False
+    conn = get_readonly_connection(db_path)
+    try:
+        return conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
 def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
     """The column names of `table` (via PRAGMA table_info). Used to make the
     column-add migration idempotent: only ALTER when the column is genuinely
@@ -327,6 +368,45 @@ def _seed_models(conn: sqlite3.Connection) -> None:
                 {"model": m["model"], "inp": price["input"],
                  "out": price["output"], "vf": valid_from, "now": now},
             )
+
+
+def is_view_growth(prev_view_count, new_view_count) -> bool:
+    """The single definition of "growth": a strictly higher view_count than the
+    most recent prior snapshot. Used by BOTH the v12 migration backfill and the
+    runtime catalog sweep so the two paths can never drift. An absent prior
+    (None) is NOT growth (a brand-new video with no preceding snapshot keeps its
+    catch-day clock); a None new count is treated as no growth, not a crash."""
+    if prev_view_count is None or new_view_count is None:
+        return False
+    return new_view_count > prev_view_count
+
+
+def _backfill_view_growth(conn: sqlite3.Connection) -> None:
+    """One-time v12 seed of videos.last_view_growth_at from stats_snapshots.
+
+    For each video, walk its snapshots in run order and record the captured_at of
+    the most recent run whose view_count strictly exceeded the immediately prior
+    snapshot (the same is_view_growth definition the sweep uses at runtime). Fall
+    back to first_seen_at when a video has fewer than two snapshots or never
+    increased. Runs inside the migration's atomic block."""
+    for row in conn.execute("SELECT video_id, first_seen_at FROM videos").fetchall():
+        snaps = conn.execute(
+            "SELECT captured_at, view_count FROM stats_snapshots "
+            "WHERE video_id = ? ORDER BY run_id ASC",
+            (row["video_id"],),
+        ).fetchall()
+        growth_at = None
+        prev_vc = None
+        for snap in snaps:
+            if is_view_growth(prev_vc, snap["view_count"]):
+                growth_at = snap["captured_at"]
+            prev_vc = snap["view_count"]
+        if growth_at is None:
+            growth_at = row["first_seen_at"]
+        conn.execute(
+            "UPDATE videos SET last_view_growth_at = ? WHERE video_id = ?",
+            (growth_at, row["video_id"]),
+        )
 
 
 def init_db(db_path: str) -> None:
@@ -430,6 +510,29 @@ def init_db(db_path: str) -> None:
                     "uncapped (NULL max_tokens with a non-local/unknown provider); "
                     "refusing to stamp the schema version"
                 )
+            # v11 -> v12: add videos.status / status_changed_at / last_view_growth_at.
+            # A fresh DB already has all three from the CREATE above, so the guard
+            # skips the ALTERs. status carries a NOT NULL DEFAULT 'active', so the
+            # ALTER backfills every existing row to 'active' in one step;
+            # status_changed_at stays NULL (we do not know when an existing row
+            # became active). last_view_growth_at is added nullable (SQLite cannot
+            # ADD COLUMN NOT NULL without a default) and then seeded once from the
+            # snapshot history, so the no-growth aging clock starts from real data.
+            video_cols = _column_names(conn, "videos")
+            if "status" not in video_cols:
+                conn.execute(
+                    "ALTER TABLE videos ADD COLUMN status TEXT NOT NULL "
+                    "DEFAULT 'active'"
+                )
+            if "status_changed_at" not in video_cols:
+                conn.execute(
+                    "ALTER TABLE videos ADD COLUMN status_changed_at TEXT"
+                )
+            if "last_view_growth_at" not in video_cols:
+                conn.execute(
+                    "ALTER TABLE videos ADD COLUMN last_view_growth_at TEXT"
+                )
+                _backfill_view_growth(conn)
             # Stamp LAST, so the version is never ahead of the schema.
             if current_version != SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -509,9 +612,13 @@ def upsert_video(conn: sqlite3.Connection, record: dict, now: str) -> None:
         f"            WHEN {diff_clause}\n"
         "            THEN :now ELSE videos.last_api_refresh_at END"
     )
+    # last_view_growth_at is insert-only (in now_columns, never in the SET): a new
+    # catch starts its no-growth clock at first_seen_at (both bind :now here), and a
+    # re-catch on the conflict path leaves it untouched. The clock is advanced ONLY
+    # by the sweep's bump_view_growth, so re-catching an old video can't reset it.
     sql = _build_upsert_sql(
         "videos", "video_id", VIDEO_API_COLUMNS,
-        ["first_seen_at", "last_api_refresh_at"], refresh_clause,
+        ["first_seen_at", "last_api_refresh_at", "last_view_growth_at"], refresh_clause,
     )
     conn.execute(sql, {**record, "now": now})
 
@@ -1267,14 +1374,136 @@ def set_preference(conn: sqlite3.Connection, key: str, value: str,
 # --- Refresh support --------------------------------------------------------
 
 def fetch_videos_for_refresh(conn: sqlite3.Connection) -> list[dict]:
-    """Return, for every tracked video, the fields a --refresh must PRESERVE
+    """Return, for every ACTIVE tracked video, the fields a sweep must PRESERVE
     (videos.list will not re-supply them): video_id, channel_id, matched_queries,
-    buckets, top_comments. Stats are re-fetched from the API, not read here."""
+    buckets, top_comments. Stats are re-fetched from the API, not read here.
+
+    Scoped to status = 'active': `gone` videos (removed from YouTube) and
+    `aged_out` videos (retired by the no-growth rule) are excluded so the sweep
+    batch stays bounded. The aging pass runs after this fetch each sweep, so
+    'active' is the complete eligibility test here (no window/starred predicate
+    needed). Every row is 'active' immediately after the v12 backfill, so this is
+    behaviour-preserving for an existing catalog."""
     cur = conn.execute(
         "SELECT video_id, channel_id, matched_queries, buckets, top_comments "
-        "FROM videos"
+        "FROM videos WHERE status = 'active'"
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+def count_eligible_for_refresh(conn: sqlite3.Connection) -> int:
+    """Return the number of videos a sweep would batch: the ACTIVE catalog. Same
+    `status = 'active'` predicate as fetch_videos_for_refresh, so the pre-flight
+    quota estimate and the actual batch can never disagree. Cheap COUNT."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM videos WHERE status = 'active'"
+    ).fetchone()[0]
+
+
+def fetch_aging_candidates(conn: sqlite3.Connection) -> list[dict]:
+    """Return (video_id, last_view_growth_at) for every video eligible to be aged
+    out: status = 'active' AND starred = 0. Starred videos are exempt (never
+    retired) and non-active rows (gone / already aged_out) are excluded, so these
+    rules live here and the pure decision (swipefile.videos_to_age_out) never has
+    to know them. The caller decides which of these to retire by comparing the
+    growth clock to the cutoff."""
+    cur = conn.execute(
+        "SELECT video_id, last_view_growth_at FROM videos "
+        "WHERE status = 'active' AND starred = 0"
+    )
+    return [dict(row) for row in cur.fetchall()]
+
+
+def latest_snapshot_view_counts(
+    conn: sqlite3.Connection, before_run_id: int
+) -> dict[str, int]:
+    """Return {video_id: view_count} from each video's most recent stats_snapshots
+    row STRICTLY BEFORE `before_run_id`. The single prior-snapshot source for the
+    sweep's growth compare: the sweep reads this once before writing its own
+    snapshots, so it can never pick up the row it is about to write. A video with no
+    prior snapshot is simply absent (so is_view_growth sees prev=None -> no growth)."""
+    cur = conn.execute(
+        """
+        SELECT s.video_id, s.view_count
+        FROM stats_snapshots s
+        JOIN (
+            SELECT video_id, MAX(run_id) AS mr
+            FROM stats_snapshots
+            WHERE run_id < :before
+            GROUP BY video_id
+        ) m ON s.video_id = m.video_id AND s.run_id = m.mr
+        """,
+        {"before": before_run_id},
+    )
+    return {row["video_id"]: row["view_count"] for row in cur.fetchall()}
+
+
+def bump_view_growth(
+    conn: sqlite3.Connection, video_ids: list[str], now: str
+) -> None:
+    """Advance last_view_growth_at to `now` for each video that grew this run (the
+    sweep's grown set). The ONLY writer of the growth clock after insert. executemany
+    sidesteps the SQL IN-parameter limit; a no-op on an empty list. Does not commit
+    (the caller wraps it in a transaction, so aging in the same txn sees the bump)."""
+    if not video_ids:
+        return
+    conn.executemany(
+        "UPDATE videos SET last_view_growth_at = ? WHERE video_id = ?",
+        [(now, vid) for vid in video_ids],
+    )
+
+
+def set_video_status(
+    conn: sqlite3.Connection, video_id: str, new_status: str, changed_at: str
+) -> int:
+    """Transition one video to `new_status`, stamping status_changed_at = changed_at.
+    The `AND status != :new` guard makes the write a no-op when the status already
+    matches, so status_changed_at advances ONLY on a real transition (a gone row's
+    disappearance timestamp is never overwritten by a redundant re-mark). Returns
+    rows affected (0 when already in that status or video_id unknown). Does not
+    commit (caller wraps in a transaction)."""
+    cur = conn.execute(
+        "UPDATE videos SET status = :new, status_changed_at = :at "
+        "WHERE video_id = :vid AND status != :new",
+        {"new": new_status, "at": changed_at, "vid": video_id},
+    )
+    return cur.rowcount
+
+
+def run_change_counts(
+    conn: sqlite3.Connection, run_id: int, now: str
+) -> dict[str, int]:
+    """The four catalog-change counts for one run, for the run-summary line.
+    Partitioned by existed-at-run-start via the insert-only first_seen_at, so a
+    just-caught video is `added` only (never also `updated`) despite the sweep's
+    redundant re-fetch. `now` is the run's single write instant (shared by the catch
+    persist and the sweep). Read-only.
+
+    - added:    rows first inserted this run (first_seen_at == now)
+    - updated:  pre-existing rows re-snapshotted this run (a snapshot for run_id,
+                first_seen_at != now)
+    - aged_out / gone: rows transitioned to that status this run (status_changed_at == now)"""
+    def count(sql: str, params: dict) -> int:
+        return conn.execute(sql, params).fetchone()[0]
+
+    added = count(
+        "SELECT COUNT(*) FROM videos WHERE first_seen_at = :now", {"now": now}
+    )
+    updated = count(
+        "SELECT COUNT(DISTINCT s.video_id) FROM stats_snapshots s "
+        "JOIN videos v ON v.video_id = s.video_id "
+        "WHERE s.run_id = :rid AND v.first_seen_at != :now",
+        {"rid": run_id, "now": now},
+    )
+    gone = count(
+        "SELECT COUNT(*) FROM videos WHERE status = 'gone' "
+        "AND status_changed_at = :now", {"now": now}
+    )
+    aged_out = count(
+        "SELECT COUNT(*) FROM videos WHERE status = 'aged_out' "
+        "AND status_changed_at = :now", {"now": now}
+    )
+    return {"added": added, "updated": updated, "aged_out": aged_out, "gone": gone}
 
 
 def fetch_channel_subs(conn: sqlite3.Connection) -> dict[str, int]:

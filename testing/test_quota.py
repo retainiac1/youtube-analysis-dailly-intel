@@ -104,17 +104,29 @@ def test_api_call_charges_on_success():
 # --- estimate parity with dry-run -------------------------------------------
 
 def test_estimate_total_is_sum_of_breakdown():
-    est = swipefile.estimate_discover_units()
-    assert est["total"] == est["search"] + est["videos"] + est["channels"] + est["comments"]
+    est = swipefile.estimate_discover_units(eligible_count=100)
+    assert est["total"] == (est["search"] + est["videos"] + est["channels"]
+                            + est["comments"] + est["sweep"])
+
+
+def test_estimate_sweep_term_ceils_by_batch_size():
+    """The sweep term is ceil(eligible / CHANNEL_BATCH_SIZE) videos.list units."""
+    b = swipefile.CHANNEL_BATCH_SIZE
+    cost = swipefile.VIDEOS_QUOTA_COST
+    assert swipefile.estimate_discover_units(0)["sweep"] == 0
+    assert swipefile.estimate_discover_units(1)["sweep"] == 1 * cost
+    assert swipefile.estimate_discover_units(b)["sweep"] == 1 * cost
+    assert swipefile.estimate_discover_units(b + 1)["sweep"] == 2 * cost
 
 
 def test_dry_run_prints_the_shared_estimate(capsys):
     """--dry-run and the pre-flight must agree: the printed total is exactly
-    estimate_discover_units()['total']."""
-    est = swipefile.estimate_discover_units()
-    swipefile._print_dry_run(units_today=0, cap=9500)
+    estimate_discover_units(eligible)['total'], and the sweep term is shown."""
+    est = swipefile.estimate_discover_units(eligible_count=120)
+    swipefile._print_dry_run(units_today=0, cap=9500, eligible_count=120)
     err = capsys.readouterr().err
     assert f"~{est['total']} units" in err
+    assert f"= {est['sweep']}" in err          # the sweep breakdown line is printed
 
 
 # --- _pick_status precedence ------------------------------------------------

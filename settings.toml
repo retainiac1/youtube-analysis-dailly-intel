@@ -5,6 +5,7 @@
 
 MIN_VIEWS = 10000                  # qualifying-view floor; positive int. ~10k fills the lanes (~15-20 each), 100k leaves them near-empty.
 WINDOW_DAYS = 3                    # discovery lookback in days; positive int (1-7 is the sane range).
+REFRESH_MAX_AGE_DAYS = 30          # days a tracked video may go without view growth before the daily sweep retires it (status -> aged_out); positive int, do not go below 21. Starred videos are exempt.
 TOP_N = 20                         # ranked rows kept per lane; positive int.
 SHORT_MAX_SECONDS = 180            # Shorts duration cutoff in seconds; positive int. Videos <= this are treated as Shorts.
 SEARCH_RELEVANCE_LANGUAGE = "en"   # YouTube relevanceLanguage hint; ISO-639-1 string (e.g. "en", "es").
