@@ -53,22 +53,26 @@
           </nav>
         </div>
         <div class="topbar-controls">
-          <div class="date-filter-control" id="date-filter-control">
-            <div class="date-mode-tabs" role="tablist" aria-label="Date filter mode">
-              <button class="date-mode-tab" type="button" role="tab"
-                      id="dfc-mode-period" data-mode="period"
-                      aria-selected="true" tabindex="0">Period</button>
-              <button class="date-mode-tab" type="button" role="tab"
-                      id="dfc-mode-specific" data-mode="specific"
-                      aria-selected="false" tabindex="-1">Specific date</button>
-            </div>
-            <select id="dfc-period" aria-label="Time period"></select>
-            <select id="dfc-run" aria-label="Run date" hidden></select>
-          </div>
           <button id="theme-toggle" class="btn-secondary icon-btn" type="button"
                   aria-label="Toggle light and dark theme">◐</button>
         </div>
       </header>
+
+      <!-- Date scope (second tier): its own row so the theme toggle stays on the
+           top nav row, far right. Visible on date-sensitive pages; main.js hides it
+           elsewhere, and .date-filter-control[hidden] collapses the row. -->
+      <div class="date-filter-control" id="date-filter-control">
+        <div class="date-mode-tabs" role="tablist" aria-label="Date filter mode">
+          <button class="date-mode-tab" type="button" role="tab"
+                  id="dfc-mode-period" data-mode="period"
+                  aria-selected="true" tabindex="0">Period</button>
+          <button class="date-mode-tab" type="button" role="tab"
+                  id="dfc-mode-specific" data-mode="specific"
+                  aria-selected="false" tabindex="-1">Specific date</button>
+        </div>
+        <select id="dfc-period" aria-label="Time period"></select>
+        <select id="dfc-run" aria-label="Run date" hidden></select>
+      </div>
 
       <!-- Second tier: content scope. The lane tabs stay a tablist (they narrow
            the data within whichever page is shown) and persist across pages. -->
