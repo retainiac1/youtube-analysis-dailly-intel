@@ -53,10 +53,17 @@
           </nav>
         </div>
         <div class="topbar-controls">
-          <label class="run-picker">
-            <span class="control-label">Run</span>
-            <select id="run-select" aria-label="Run date"></select>
-          </label>
+          <div class="date-filter-control" id="date-filter-control">
+            <span class="date-filter-label" id="dfc-label-period">Period</span>
+            <button class="date-filter-toggle" id="dfc-toggle" type="button"
+                    role="switch" aria-checked="false"
+                    aria-label="Switch to specific date mode">
+              <span class="date-filter-thumb" id="dfc-thumb"></span>
+            </button>
+            <span class="date-filter-label" id="dfc-label-specific">Specific date</span>
+            <select id="dfc-period" aria-label="Time period"></select>
+            <select id="dfc-run" aria-label="Run date" hidden></select>
+          </div>
           <button id="theme-toggle" class="btn-secondary icon-btn" type="button"
                   aria-label="Toggle light and dark theme">◐</button>
         </div>
