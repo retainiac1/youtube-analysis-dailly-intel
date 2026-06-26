@@ -16,10 +16,11 @@ import * as models from "./models.js";
 import * as priceRefresh from "./price-refresh.js";
 import * as documentation from "./documentation.js";
 import * as router from "./router.js";
+import { initDateFilter, getCurrentFilter, EVENT_NAME } from "./date-filter.js";
 import "./sticky-header.js"; // side-effect: publishes --header-h for the pinned strip
 
 const app = document.getElementById("app");
-const runSelect = document.getElementById("run-select");
+const dateFilterControl = document.getElementById("date-filter-control");
 const boardEl = document.getElementById("board");
 const trendsEl = document.getElementById("trends");
 const interpretationEl = document.getElementById("interpretation");
@@ -35,6 +36,7 @@ const tabs = [...document.querySelectorAll(".lane-tab")];
 const pageNav = [...document.querySelectorAll(".page-nav-link")];
 
 const MAX_TRACKED = 5;
+const BOARD_ROUTE = "/board";
 const TRENDS_ROUTE = "/trends";
 const INTERPRETATION_ROUTE = "/interpretation";
 const PRICES_ROUTE = "/prices";
@@ -57,7 +59,7 @@ let extractSpend = null;
 // The active page is owned by the router (router.current()); run/lane/tracked are
 // shared state that persists across pages. tracked is EPHEMERAL in-memory view
 // state (which videos are charted), distinct from starred (a Phase 3 DB write).
-const state = { runDate: null, lane: "health", tracked: new Set() };
+const state = { runDate: null, startDate: null, endDate: null, lane: "health", tracked: new Set() };
 
 function trackState() {
   return { tracked: state.tracked, full: state.tracked.size >= MAX_TRACKED };
@@ -94,15 +96,11 @@ async function onRunOrLaneChange() {
   await reloadBoard();
 }
 
-// A run change refreshes the histogram (the one run-scoped chart) and the
-// interpretation rail (the summary is keyed on run + lane); the bump chart and
-// trajectory span all runs and only change with the lane.
-async function onRunChangeTrends() {
-  await trends.refreshHistogram(state);
-  interpRail.refresh(state);
-}
-
-async function onLaneChangeTrends() {
+// A lane change or a date-filter change re-renders all Trends charts: the
+// histogram is keyed on the active run, while the bump chart and trajectory window
+// to the selected date range, so all three move together. The interpretation rail
+// (summary keyed on run + lane) refreshes alongside them.
+async function refreshTrendsCharts() {
   await trends.refreshAll(state);
   interpRail.refresh(state);
 }
@@ -112,14 +110,15 @@ function selectLane(lane) {
   state.lane = lane;
   board.setActiveTab(app, tabs, lane);
   onRunOrLaneChange();
-  if (router.current() === TRENDS_ROUTE) onLaneChangeTrends();
+  if (router.current() === TRENDS_ROUTE) refreshTrendsCharts();
   if (router.current() === INTERPRETATION_ROUTE) interpretation.refresh(state);
 }
 
-// Route handlers: show the page's content region and hide the others. These only
-// toggle visibility (they do not re-render the board), so Board's rows and filter
-// state survive navigating away to another page and back. The board's data is
-// loaded by run/lane changes and the initial load, independent of which page shows.
+// Route handlers: show the page's content region and hide the others, and show or
+// hide the date filter per page. Board, Trends, and Interpretation are date-scoped
+// (filter visible); Extract, Models, Prices, and Documentation are not (hidden).
+// Each date-scoped page re-renders from the current filter on entry (activation
+// path), so a filter change made on another page is reflected when you return.
 function enterBoard() {
   boardEl.hidden = false;
   rail.hidden = false;
@@ -131,6 +130,11 @@ function enterBoard() {
   documentationEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = false;
+  dateFilterControl.hidden = false;
+  // Activation path: re-apply the current filter on entry (options + rows). The
+  // date-filter-change listener guards its Board reload on BOARD_ROUTE, so a filter
+  // change (which never navigates) and this entry render never double-fetch.
+  onRunOrLaneChange();
 }
 
 function enterTrends() {
@@ -144,6 +148,7 @@ function enterTrends() {
   documentationEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = false;
+  dateFilterControl.hidden = false;
   // Render the charts on entry: an ECharts instance on a hidden element cannot
   // size itself, so charts are only rendered while Trends is visible.
   trends.refreshAll(state);
@@ -162,6 +167,7 @@ function enterInterpretation() {
   documentationEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = false;
+  dateFilterControl.hidden = false;
   // Fetch + render the interpretation for the current run + lane on entry.
   interpretation.refresh(state);
   // The spend panel beside it (run section + month-to-date), refreshed on entry.
@@ -183,6 +189,7 @@ function enterExtract() {
   documentationEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = true; // not lane-scoped; hide the lane tabs here
+  dateFilterControl.hidden = true; // not date-scoped; hide the date filter here
   extract.refresh(state);
   // The same spend panel as Interpretation/Prices, in this page's right aside (its own
   // instance), refreshed on entry. Re-entering after a background run completed catches up
@@ -203,6 +210,7 @@ function enterModels() {
   documentationEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = false;
+  dateFilterControl.hidden = true; // not date-scoped; hide the date filter here
   models.refresh();
 }
 
@@ -220,6 +228,7 @@ function enterDocumentation() {
   pricesEl.hidden = true;
   documentationEl.hidden = false;
   laneRow.hidden = true; // the page is not lane-scoped; hide the lane tabs here
+  dateFilterControl.hidden = true; // not date-scoped; hide the date filter here
   documentation.refresh();
 }
 
@@ -236,10 +245,11 @@ function enterPrices() {
   documentationEl.hidden = true;
   pricesEl.hidden = false;
   laneRow.hidden = true; // not lane-scoped; hide the lane tabs here
+  dateFilterControl.hidden = true; // not date-scoped; hide the date filter here
   priceRefresh.refresh();
   // The same spend panel as Interpretation, in this page's right aside (its own
-  // instance), refreshed on entry. One fetch per entry: the run-select change handler
-  // only fires on a real change, never on route entry.
+  // instance), refreshed on entry. One fetch per entry: the date-filter change
+  // handler only fires on a real change, never on route entry.
   pricesSpend.refresh(state);
 }
 
@@ -463,20 +473,27 @@ async function init() {
     fallback: "/board",
   });
 
-  runSelect.addEventListener("change", () => {
-    state.runDate = runSelect.value;
-    onRunOrLaneChange();
-    if (router.current() === TRENDS_ROUTE) onRunChangeTrends();
-    if (router.current() === INTERPRETATION_ROUTE) {
+  // date-filter.js is the single source of truth. On a user change it dispatches
+  // date-filter-change; sync state from the detail, then re-render ONLY the visible
+  // page (guard on the current route) so background pages do no work. The control is
+  // hidden on the non-date-scoped pages, so only board/trends/interpretation can be
+  // the route here. The BOARD_ROUTE guard also prevents a double-fetch with the
+  // enterBoard activation path: a filter change never navigates, so exactly one of
+  // the two fires per action.
+  document.addEventListener(EVENT_NAME, (e) => {
+    const f = e.detail;
+    state.runDate = f.active_run_date;
+    state.startDate = f.start_date;
+    state.endDate = f.end_date;
+    const route = router.current();
+    if (route === BOARD_ROUTE) onRunOrLaneChange();
+    if (route === TRENDS_ROUTE) refreshTrendsCharts();
+    if (route === INTERPRETATION_ROUTE) {
       interpretation.refresh(state);
-      // The "This run" section is run-scoped, so a run change re-aggregates it
-      // (month-to-date is unaffected but recomputes cheaply on the same call).
+      // The "This run" section is run-scoped, so an active-run change re-aggregates
+      // it (month-to-date is unaffected but recomputes cheaply on the same call).
       interpSpend.refresh(state);
     }
-    // The Prices page shows the same panel; keep it in sync on a run change too.
-    if (router.current() === PRICES_ROUTE) pricesSpend.refresh(state);
-    // The Extract page's spend panel is run-scoped too.
-    if (router.current() === EXTRACT_ROUTE) extractSpend.refresh(state);
   });
 
   let runs;
@@ -488,16 +505,19 @@ async function init() {
   }
   if (!runs.length) {
     board.renderNoRuns(boardEl);
-    runSelect.disabled = true;
+    dateFilterControl.hidden = true;
     drawerToggle.disabled = true;
     return;
   }
-  board.populateRunSelect(runSelect, runs);
-  state.runDate = runs[0];
-  // Load the board (rows + filter options) so it is ready regardless of the
-  // landing page, then dispatch the current URL: "/" redirects to /board, and a
-  // deep link to /trends renders the charts via enterTrends.
-  await onRunOrLaneChange();
+  // date-filter.js owns the filter. Initialize the control, then seed state from the
+  // current (default "Latest run") filter. No pre-render here: router.start()
+  // dispatches the landing route and its enterX handler renders from state via the
+  // activation path (enterBoard reloads the board; enterTrends draws the charts).
+  initDateFilter(runs);
+  const f = getCurrentFilter();
+  state.runDate = f.active_run_date;
+  state.startDate = f.start_date;
+  state.endDate = f.end_date;
   router.start();
 }
 

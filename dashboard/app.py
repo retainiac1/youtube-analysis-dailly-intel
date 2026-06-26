@@ -396,15 +396,20 @@ def api_snapshots(
 def api_rank_history(
     lane: str = Query(..., min_length=1),
     video_id: list[str] = Query(default=[]),
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
     conn: sqlite3.Connection = Depends(get_conn),
 ):
-    """One lane's rank movement across ALL run_dates (the bump chart), plus the
-    metric_value-over-time (views_to_subs_ratio) series. The run picker does NOT
-    constrain this — a bump chart spans runs. Optionally restrict to tracked
+    """One lane's rank movement across run_dates (the bump chart), plus the
+    metric_value-over-time (views_to_subs_ratio) series. By default it spans all
+    runs; start_date/end_date (YYYY-MM-DD date keys) window it to a date range so
+    the date filter can scope the bump chart. Optionally restrict to tracked
     video_ids. An empty lane returns empty run_dates and series, not an error."""
     bucket = _lane_to_bucket(lane)
     data = db.run_with_db_retry(
-        lambda: db.fetch_rank_history(conn, bucket, video_id or None)
+        lambda: db.fetch_rank_history(
+            conn, bucket, video_id or None, start_date, end_date
+        )
     )
     return {"lane": lane, **data}
 

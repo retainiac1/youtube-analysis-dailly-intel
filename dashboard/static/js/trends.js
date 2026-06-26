@@ -19,7 +19,11 @@ export function init(elements) {
 
 export async function refreshBump(state) {
   cache.lane = state.lane;
-  cache.rankHistory = await api.getRankHistory(state.lane, []);
+  // Window the bump chart to the date filter (server-side run_date bounds). With
+  // fewer than two runs in the window, charts.renderBump shows its empty state.
+  cache.rankHistory = await api.getRankHistory(
+    state.lane, [], state.startDate, state.endDate
+  );
   charts.renderBump(els.bump, cache.rankHistory, state.lane);
 }
 
@@ -29,10 +33,39 @@ export async function refreshHistogram(state) {
   charts.renderHistogram(els.distribution, cache.distribution, state.lane);
 }
 
+// Trim each snapshot series to the date filter window. captured_at is an Eastern
+// ISO-8601 string, so its leading YYYY-MM-DD is the Eastern calendar date; comparing
+// that prefix makes end_date inclusive through end-of-day Eastern automatically. Both
+// points and velocity carry captured_at and must be trimmed together so the views and
+// views/day lines stay aligned.
+function windowSnapshots(payload, startDate, endDate) {
+  const series = (payload && payload.series) || [];
+  // All-time: keep everything. Guard FIRST: null coerces to 0 in a range compare,
+  // which would silently drop the wrong points.
+  if (startDate == null && endDate == null) return payload;
+  const inWindow = (rec) => {
+    const ts = rec && rec.captured_at;
+    if (typeof ts !== "string") return false; // never slice a non-string
+    const day = ts.slice(0, 10);
+    if (startDate != null && day < startDate) return false;
+    if (endDate != null && day > endDate) return false;
+    return true;
+  };
+  return {
+    ...payload,
+    series: series.map((s) => ({
+      ...s,
+      points: (s.points || []).filter(inWindow),
+      velocity: (s.velocity || []).filter(inWindow),
+    })),
+  };
+}
+
 export async function refreshTrajectory(state) {
   cache.lane = state.lane;
   const ids = [...state.tracked];
-  cache.snapshots = ids.length ? await api.getSnapshots(ids) : { series: [] };
+  const raw = ids.length ? await api.getSnapshots(ids) : { series: [] };
+  cache.snapshots = windowSnapshots(raw, state.startDate, state.endDate);
   charts.renderTrajectory(els.trajectory, cache.snapshots, state.lane);
 }
 

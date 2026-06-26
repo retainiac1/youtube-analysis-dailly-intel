@@ -92,8 +92,13 @@ export function getSnapshots(videoIds) {
   return getJSON(`/api/snapshots?${qs}`);
 }
 
-export function getRankHistory(lane, videoIds) {
-  const qs = buildQuery({ lane }, { video_id: videoIds });
+export function getRankHistory(lane, videoIds, startDate, endDate) {
+  // start_date/end_date go in the filters arg (not base) so buildQuery drops them
+  // when null/undefined; the bump chart windows to the date filter when set.
+  const qs = buildQuery(
+    { lane },
+    { video_id: videoIds, start_date: startDate, end_date: endDate }
+  );
   return getJSON(`/api/rank-history?${qs}`);
 }
 

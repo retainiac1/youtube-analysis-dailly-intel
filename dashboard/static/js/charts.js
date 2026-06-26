@@ -131,6 +131,13 @@ export function renderBump(el, data, lane) {
     showEmpty(el, "No ranking history for this lane yet.");
     return;
   }
+  // A bump chart needs at least two runs to show movement. The date filter can
+  // window down to a single run (e.g. the default "Latest run"), so guide the user
+  // to widen rather than draw a degenerate single-column chart.
+  if (runDates.length < 2) {
+    showEmpty(el, "Select a wider period to see rank movement.");
+    return;
+  }
   const t = THEMES[themeName()];
   const inst = mount(el);
 

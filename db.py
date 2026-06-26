@@ -2019,19 +2019,28 @@ def _velocity_points(series: list[dict]) -> list[dict]:
 
 
 def fetch_rank_history(
-    conn: sqlite3.Connection, bucket: str, video_ids: list[str] | None = None
+    conn: sqlite3.Connection,
+    bucket: str,
+    video_ids: list[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict:
-    """Return one lane's rank movement across ALL run_dates (the bump chart and
-    the views_to_subs_ratio-over-time series share this single source). bucket is
-    a single value (plain equality, like fetch_lane); videos are LEFT JOINed so a
+    """Return one lane's rank movement across run_dates (the bump chart and the
+    views_to_subs_ratio-over-time series share this single source). bucket is a
+    single value (plain equality, like fetch_lane); videos are LEFT JOINed so a
     ranking whose video row is missing still appears. Optionally restrict to
-    video_ids (the tracked-video trajectory). There is intentionally NO run_date
-    bound: a bump chart's whole job is movement across runs.
+    video_ids (the tracked-video trajectory).
+
+    By default there is NO run_date bound (a bump chart's whole job is movement
+    across runs). Passing start_date and/or end_date windows the result to that
+    date range; both are YYYY-MM-DD date keys compared lexically (run_date is a
+    zero-padded date key, NOT a timestamp, so this is the correct comparison, not
+    an offset-aware instant compare).
 
     Returns {bucket, run_dates: [distinct ascending], series: [{video_id, title,
     channel_title, link, thumbnail_url, points: [{run_date, rank, metric_value}]}]}.
     A video absent on a run_date simply has no point for it (the 'fell off' gap).
-    metric_value is the views_to_subs_ratio at that run — lane-scoped and sparse,
+    metric_value is the views_to_subs_ratio at that run, lane-scoped and sparse,
     present only for runs where the video was ranked in this lane (stats_snapshots
     stores no subscriber_count, so the ratio cannot be sourced there)."""
     where = ["r.bucket = :bucket"]
@@ -2043,6 +2052,12 @@ def fetch_rank_history(
             params[key] = vid
             names.append(f":{key}")
         where.append(f"r.video_id IN ({', '.join(names)})")
+    if start_date:
+        where.append("r.run_date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where.append("r.run_date <= :end_date")
+        params["end_date"] = end_date
 
     rows = conn.execute(
         f"""
