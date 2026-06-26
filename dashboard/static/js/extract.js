@@ -141,6 +141,10 @@ function buildScaffold() {
   // A neutral inline note (not an error): used when a select is auto-advanced to keep the
   // two providers distinct, so the adjustment is visible rather than silent.
   const noteEl = node("p", { class: "extract-note" });
+  // Subtitle reflecting the once-a-day cap: set from /api/run-state on load (and after
+  // each run). When a discover already ran today, the button reads "Refresh stats" and
+  // this explains why. Its own node so the pair-change note never clobbers it.
+  const runStateNote = node("p", { class: "extract-note" });
 
   const runGroup = node("div", { class: "interpret-run-group" }, [
     runBtn, dryRunBtn, runtime, statusPill,
@@ -155,6 +159,7 @@ function buildScaffold() {
     ]),
     errorEl,
     noteEl,
+    runStateNote,
   ]);
 
   // The terminal: the streamed-output surface, stacked below the card inside #extract-main
@@ -172,7 +177,7 @@ function buildScaffold() {
   ]);
 
   controls = { primarySelect, fallbackSelect, runBtn, dryRunBtn, stopwatchEl, statusPill,
-               errorEl, noteEl, terminal };
+               errorEl, noteEl, runStateNote, terminal };
 
   // Owns #extract-main ONLY (card + terminal). Never touches the sibling spend aside.
   el.replaceChildren(card, terminal);
@@ -389,6 +394,7 @@ async function onRun(mode) {
     currentRun = null;
     controls.runBtn.disabled = false;
     controls.dryRunBtn.disabled = false;
+    applyRunState();   // a just-completed discover flips the label to "Refresh stats"
   }
 }
 
@@ -419,9 +425,20 @@ async function consumeStream(body, start) {
           formatDuration(performance.now() - start) || "—";
         const { label, severity } = statusForResult(parsed.data.code, parsed.data.reason);
         setPill(label, severity);
+        // A real run carries its run_summary: show which path actually ran (mode) and the
+        // catalog-change counts in the pane. Absent for a dry run (no summary written).
+        const summary = parsed.data.summary;
+        if (summary) {
+          const cost = Number(summary.classify_cost || 0).toFixed(4);
+          appendLine(
+            `Run summary (${summary.mode}): added ${summary.added}, ` +
+            `updated ${summary.updated}, aged_out ${summary.aged_out}, ` +
+            `gone ${summary.gone}, snapshots ${summary.snapshot_count}, ` +
+            `classify cost $${cost}`);
+        }
         // EVERY terminal result (success or failure) may have spent classifier tokens, so
         // notify Phase 5's spend panel. Harmless now: no listener exists until Phase 5.
-        document.dispatchEvent(new CustomEvent("extract:completed"));
+        document.dispatchEvent(new CustomEvent("extract:completed", { detail: { summary } }));
       }
     }
   };
@@ -446,4 +463,21 @@ async function consumeStream(body, start) {
 export function refresh(_state) {
   ensureBuilt();
   ensurePopulated();
+  applyRunState();   // re-read each load, so the label flips at the next Pacific day
+}
+
+// Label the primary button from the once-a-day-cap state. The button ALWAYS triggers a
+// `discover` request; the resolver caps it to a refresh server-side, so this is purely
+// cosmetic. Failure is non-blocking: default to the discover label.
+async function applyRunState() {
+  let ran = false;
+  try {
+    ran = await api.getRunState();
+  } catch {
+    ran = false;
+  }
+  controls.runBtn.textContent = ran ? "Refresh stats" : "Run discovery";
+  controls.runStateNote.textContent = ran
+    ? "Discovery already ran today (Pacific) — this runs a stats refresh only."
+    : "";
 }

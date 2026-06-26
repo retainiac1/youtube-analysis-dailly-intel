@@ -20,6 +20,7 @@ EXPECTED_TABLES = {
     "model_prices",
     "price_proposals",
     "price_cross_check",
+    "run_summary",
 }
 
 EXPECTED_COLUMNS = {
@@ -72,6 +73,10 @@ EXPECTED_COLUMNS = {
     "price_proposals": {
         "id", "model", "field", "old_value", "new_value", "pct_change",
         "direction", "quote", "source_url", "status", "proposed_at", "resolved_at",
+    },
+    "run_summary": {
+        "run_id", "run_date", "mode", "added", "updated", "aged_out", "gone",
+        "classify_cost", "snapshot_count", "created_at",
     },
 }
 
@@ -132,7 +137,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 12
+        assert version == db.SCHEMA_VERSION == 13
     finally:
         conn.close()
 
@@ -2223,6 +2228,98 @@ def test_run_change_counts_partition(tmp_path):
 
         counts = db.run_change_counts(conn, 2, now)
         assert counts == {"added": 1, "updated": 1, "gone": 1, "aged_out": 1}
+    finally:
+        conn.close()
+
+
+def test_discover_ran_today(tmp_path):
+    """The once-a-day-cap signal: a success/partial discover completed today
+    (Pacific) -> True; a refresh-only today or a discover on another day -> False."""
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        today = config.pacific_date()
+        assert db.discover_ran_today(conn, today) is False         # nothing yet
+
+        rid = db.start_run(conn, "refresh", config.now_local_iso())
+        db.finish_run(conn, rid, config.now_local_iso(), 0, 0, "success")
+        assert db.discover_ran_today(conn, today) is False         # refresh doesn't count
+
+        # A discover dated a different Pacific day must not suppress today (midnight flip).
+        old = db.start_run(conn, "discover", "2020-06-01T10:00:00-04:00")
+        db.finish_run(conn, old, "2020-06-01T10:05:00-04:00", 0, 0, "success")
+        assert db.discover_ran_today(conn, today) is False
+
+        rid = db.start_run(conn, "discover", config.now_local_iso())
+        db.finish_run(conn, rid, config.now_local_iso(), 0, 0, "success")
+        assert db.discover_ran_today(conn, today) is True          # today's discover counts
+    finally:
+        conn.close()
+
+
+def test_write_and_fetch_run_summaries(tmp_path):
+    """write_run_summary upserts one row per run_id (ON CONFLICT DO UPDATE updates in
+    place, never a second row); fetch is newest-first and respects the limit."""
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        c1 = {"added": 1, "updated": 2, "aged_out": 3, "gone": 4}
+        with db.transaction(conn):
+            db.write_run_summary(conn, 1, "2026-06-25", "discover", c1, 0.12, 50,
+                                 "2026-06-25T10:00:00-04:00")
+        row = db.fetch_latest_run_summary(conn)
+        assert (row["run_id"], row["mode"], row["added"], row["gone"],
+                row["classify_cost"], row["snapshot_count"]) == (1, "discover", 1, 4, 0.12, 50)
+
+        # A second write for run_id=1 UPDATES in place — still exactly one row.
+        c2 = {"added": 0, "updated": 9, "aged_out": 0, "gone": 0}
+        with db.transaction(conn):
+            db.write_run_summary(conn, 1, "2026-06-25", "refresh", c2, 0.0, 60,
+                                 "2026-06-25T12:00:00-04:00")
+        rows = db.fetch_run_summaries(conn, 10)
+        assert len(rows) == 1
+        assert rows[0]["mode"] == "refresh" and rows[0]["updated"] == 9
+
+        # newest-first + limit.
+        with db.transaction(conn):
+            db.write_run_summary(conn, 2, "2026-06-25", "refresh", c2, 0.0, 0,
+                                 "2026-06-25T13:00:00-04:00")
+        newest = db.fetch_run_summaries(conn, 1)
+        assert len(newest) == 1 and newest[0]["run_id"] == 2
+    finally:
+        conn.close()
+
+
+def test_classify_cost_in_window_bounds_to_the_run(tmp_path):
+    """classify_cost is summed over [run_started, now]: invocations just-before
+    run_started and just-after now are excluded; an empty window and a window with no
+    classify-scope rows (the refresh case) are exactly 0.0."""
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        today = config.now_local_iso()[:10]            # today-relative -> priced by seed
+        before = f"{today}T09:59:59-04:00"
+        run_started = f"{today}T10:00:00-04:00"
+        in_win = f"{today}T10:30:00-04:00"
+        now = f"{today}T11:00:00-04:00"
+        after = f"{today}T11:00:01-04:00"
+        model = "google:gemini-2.5-flash-lite"         # a seeded, priced model
+        scope = "video_classification"
+        with db.transaction(conn):
+            for ts in (before, in_win, after):
+                db.log_invocation(conn, today, scope, model, 0.0, None, None,
+                                  1000, 500, ts)
+
+        windowed = db.classify_cost_in_window(conn, scope, run_started, now)
+        full = db.classify_cost_in_window(conn, scope, before, after)
+        assert windowed > 0                            # the in-window row is priced
+        assert abs(full - 3 * windowed) < 1e-9         # boundary excluded exactly 2 of 3
+        # An empty window and a wrong-scope window are exactly 0.0.
+        assert db.classify_cost_in_window(conn, scope, run_started, run_started) == 0.0
+        assert db.classify_cost_in_window(conn, "overall", run_started, now) == 0.0
     finally:
         conn.close()
 

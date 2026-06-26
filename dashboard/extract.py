@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import config
+import db
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PIPELINE = _REPO_ROOT / "scripts" / "run-pipeline.sh"
@@ -58,9 +59,33 @@ def log_event(text):
     return _sse("log", {"text": text})
 
 
-def result_event(code, reason):
-    """SSE frame for the terminal run result (the exit code + reason slug)."""
-    return _sse("result", {"code": code, "reason": reason})
+def result_event(code, reason, summary=None):
+    """SSE frame for the terminal run result (the exit code + reason slug). When a
+    real run wrote a run_summary, `summary` carries its counts (added/updated/
+    aged_out/gone), classify_cost, snapshot_count, and resolved `mode` so the page
+    can show which path actually ran. Omitted for a dry run (it writes no summary)."""
+    payload = {"code": code, "reason": reason}
+    if summary is not None:
+        payload["summary"] = summary
+    return _sse("result", payload)
+
+
+def _latest_run_summary():
+    """Best-effort read of the most recent run_summary as a plain dict (or None).
+    Read STRICTLY after the child exits (the caller awaits child completion first),
+    against config.DB_PATH — the path run-pipeline.sh actually wrote (it ignores the
+    dashboard's DASHBOARD_DB_PATH override). Read-only (mode=ro), so it cannot write;
+    once the child committed and exited, this fresh connection sees the row. Any
+    error -> None (the counts are a nicety, never worth failing the stream)."""
+    try:
+        conn = db.get_readonly_connection(config.DB_PATH)
+        try:
+            row = db.fetch_latest_run_summary(conn)
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
 
 
 # --- the run/stream machinery ----------------------------------------------
@@ -149,7 +174,7 @@ class ExtractRunner:
                 self._discover_active = False
             raise
         queue = asyncio.Queue()              # unbounded: put_nowait(_DONE) cannot raise
-        task = asyncio.create_task(self._supervise(child, queue, claimed))
+        task = asyncio.create_task(self._supervise(child, queue, claimed, mode))
         self._tasks.add(task)                # root it to the runner, not the request
         task.add_done_callback(self._on_task_done)
         return _Handle(queue, self.keepalive, task)
@@ -162,16 +187,23 @@ class ExtractRunner:
         if exc is not None:                  # surface a crashed supervise (and retrieve it)
             print(f"extract: run task crashed: {exc!r}", file=sys.stderr)
 
-    async def _supervise(self, child, queue, owns_claim):
+    async def _supervise(self, child, queue, owns_claim, mode):
         result = None
+        summary = None
         try:
             try:
                 result = await asyncio.wait_for(
                     self._pump(child, queue), self.run_timeout)
+                # _pump returned only after `await child.wait()` — the child has
+                # exited and committed its run_summary. A real run (not dry-run)
+                # gets its counts read back now, strictly after exit.
+                if mode != "dry-run":
+                    summary = _latest_run_summary()
             except asyncio.TimeoutError:
                 await self._terminate(child)         # wedged run -> SIGTERM/grace/SIGKILL
                 result = (config.EXIT_OTHER, "timeout")
-            await queue.put(result_event(*(result or (config.EXIT_OTHER, "other"))))
+            await queue.put(result_event(
+                *(result or (config.EXIT_OTHER, "other")), summary=summary))
         finally:
             # Release FIRST (a bool assign cannot raise, so it is never shadowed by a
             # later enqueue), THEN signal end-of-stream on the unbounded queue.

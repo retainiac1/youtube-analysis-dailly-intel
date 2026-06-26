@@ -68,6 +68,13 @@ export async function getRuns() {
   return data.run_dates || [];
 }
 
+// Whether a discover has already completed today (Pacific). Drives the Extract
+// button's label; the cap itself is enforced server-side in the pipeline resolver.
+export async function getRunState() {
+  const data = await getJSON("/api/run-state");
+  return !!(data && data.discover_ran_today);
+}
+
 export function getFilterOptions(runDate, lane) {
   const qs = buildQuery({ run_date: runDate, lane }, null);
   return getJSON(`/api/filter-options?${qs}`);

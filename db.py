@@ -59,7 +59,11 @@ import config
 # ALTERs in the same atomic block; status backfills to 'active' via its DEFAULT,
 # and last_view_growth_at is backfilled once from stats_snapshots (the captured_at
 # of the most recent run where view_count rose, else first_seen_at).
-SCHEMA_VERSION = 12
+# v13: added the `run_summary` table (one row per run: mode, the four catalog-change
+# counts, classify_cost, snapshot_count). Unconditional CREATE IF NOT EXISTS —
+# additive, idempotent, born empty, not version-gated; the once-a-day discover cap
+# reads run_log (discover_ran_today), NOT this table.
+SCHEMA_VERSION = 13
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -261,6 +265,25 @@ SCHEMA_STATEMENTS: list[str] = [
     """
     CREATE INDEX IF NOT EXISTS ix_cross_check_run_at
         ON price_cross_check (run_at DESC)
+    """,
+    # v13: one row per run summarising what the catalog sweep changed. run_id is the
+    # run_log run_id (one summary per run; written by the sweep). Plain INTEGER PK,
+    # NOT a declared FK — matching stats_snapshots.run_id (the project does not
+    # formalise run_id FKs); the PK alone gives one-row-per-run, and a leaf table
+    # with no FK cannot cascade. run_date is Eastern.
+    """
+    CREATE TABLE IF NOT EXISTS run_summary (
+        run_id INTEGER PRIMARY KEY,
+        run_date TEXT,                 -- Eastern (run_started[:10])
+        mode TEXT,                     -- 'discover' | 'refresh'
+        added INTEGER,
+        updated INTEGER,
+        aged_out INTEGER,
+        gone INTEGER,
+        classify_cost REAL,            -- USD; 0 on the refresh (classify-free) path
+        snapshot_count INTEGER,        -- stats_snapshots rows this run
+        created_at TEXT                -- Eastern ISO-8601 with offset
+    )
     """,
 ]
 
@@ -1504,6 +1527,99 @@ def run_change_counts(
         "AND status_changed_at = :now", {"now": now}
     )
     return {"added": added, "updated": updated, "aged_out": aged_out, "gone": gone}
+
+
+def discover_ran_today(conn: sqlite3.Connection, today_pacific: str) -> bool:
+    """True when a discover run with status 'success' or 'partial' COMPLETED today
+    (Pacific). The single source for the once-a-day-discover cap, read by BOTH the
+    pipeline resolver and the dashboard's /api/run-state. Pacific-correct: run_log
+    stores Eastern `started_at`, converted here via config.pacific_date and compared
+    to the caller-supplied `today_pacific` — NOT a lexical Eastern==Pacific compare."""
+    for row in conn.execute(
+        "SELECT started_at, status FROM run_log WHERE mode = 'discover'"
+    ):
+        if (row["status"] in ("success", "partial")
+                and config.pacific_date(row["started_at"]) == today_pacific):
+            return True
+    return False
+
+
+def write_run_summary(conn: sqlite3.Connection, run_id: int, run_date: str,
+                      mode: str, counts: dict, classify_cost: float,
+                      snapshot_count: int, created_at: str) -> None:
+    """Upsert one run_summary row for `run_id` (idempotent via ON CONFLICT DO
+    UPDATE, NOT INSERT OR REPLACE — no delete/re-insert, so no cascade risk; the row
+    is a leaf anyway). `counts` is run_change_counts' dict. Does not commit — the
+    caller wraps it in a transaction."""
+    conn.execute(
+        """
+        INSERT INTO run_summary
+            (run_id, run_date, mode, added, updated, aged_out, gone,
+             classify_cost, snapshot_count, created_at)
+        VALUES (:run_id, :run_date, :mode, :added, :updated, :aged_out, :gone,
+                :classify_cost, :snapshot_count, :created_at)
+        ON CONFLICT(run_id) DO UPDATE SET
+            run_date = excluded.run_date, mode = excluded.mode,
+            added = excluded.added, updated = excluded.updated,
+            aged_out = excluded.aged_out, gone = excluded.gone,
+            classify_cost = excluded.classify_cost,
+            snapshot_count = excluded.snapshot_count, created_at = excluded.created_at
+        """,
+        {"run_id": run_id, "run_date": run_date, "mode": mode,
+         "added": counts["added"], "updated": counts["updated"],
+         "aged_out": counts["aged_out"], "gone": counts["gone"],
+         "classify_cost": classify_cost, "snapshot_count": snapshot_count,
+         "created_at": created_at},
+    )
+
+
+def classify_cost_in_window(conn: sqlite3.Connection, scope: str,
+                            start_iso: str, end_iso: str) -> float:
+    """Total USD cost of llm_invocations in `scope` whose generated_at falls in the
+    INCLUSIVE window [start_iso, end_iso]. Priced with the SAME per-invocation
+    model_prices half-open join fetch_spend uses, so the number agrees with the
+    spend view. The window (a run's [run_started, now] wall-clock span) bounds cost
+    to THIS run: a refresh's window contains no classify calls -> 0.0. Read-only.
+
+    Both bounds are Eastern ISO-8601 with offset; the comparison is on the full
+    timestamp string, which is safe here because both ends come from the same run's
+    now_local_iso() (no cross-offset compare)."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM("
+        "  COALESCE(i.input_tokens, 0)  / 1000000.0 * p.input_per_1m "
+        "+ COALESCE(i.output_tokens, 0) / 1000000.0 * p.output_per_1m), 0.0) AS cost "
+        "FROM llm_invocations i "
+        "LEFT JOIN model_prices p "
+        "       ON p.model = i.model "
+        "      AND p.valid_from <= substr(i.generated_at, 1, 10) "
+        "      AND (p.valid_to IS NULL OR substr(i.generated_at, 1, 10) < p.valid_to) "
+        "WHERE i.scope = :scope "
+        "  AND i.generated_at >= :start AND i.generated_at <= :end",
+        {"scope": scope, "start": start_iso, "end": end_iso},
+    ).fetchone()
+    return row["cost"]
+
+
+def count_snapshots_for_run(conn: sqlite3.Connection, run_id: int) -> int:
+    """Number of stats_snapshots rows written for `run_id`. Read-only."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM stats_snapshots WHERE run_id = ?", (run_id,)
+    ).fetchone()[0]
+
+
+def fetch_latest_run_summary(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """The most recent run_summary row (highest run_id), or None when empty. The
+    dashboard reads this after a run's child process exits to render its counts."""
+    return conn.execute(
+        "SELECT * FROM run_summary ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()
+
+
+def fetch_run_summaries(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+    """The `limit` most recent run_summary rows, newest first. Read-only."""
+    return conn.execute(
+        "SELECT * FROM run_summary ORDER BY run_id DESC LIMIT ?", (limit,)
+    ).fetchall()
 
 
 def fetch_channel_subs(conn: sqlite3.Connection) -> dict[str, int]:

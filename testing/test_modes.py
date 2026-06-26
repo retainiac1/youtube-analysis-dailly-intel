@@ -628,6 +628,85 @@ def test_discover_sweep_failure_keeps_catch_and_marks_partial(tmp_path, monkeypa
         conn.close()
 
 
+# --- Phase 7: once-a-day discover cap + run_summary -------------------------
+
+def _seed_completed_discover(db_path, started_at):
+    """Seed a completed (success) discover run_log row at `started_at` (Eastern)."""
+    conn = db.get_connection(db_path)
+    try:
+        rid = db.start_run(conn, "discover", started_at)
+        db.finish_run(conn, rid, started_at, 0, 0, "success")
+    finally:
+        conn.close()
+
+
+def test_second_discover_same_day_caps_to_refresh_no_search_or_classify(
+        tmp_path, monkeypatch):
+    """THE cap proof: with a discover already completed today (Pacific), an explicit
+    --discover resolves to refresh and NEVER enters _run_discover — so the search and
+    classify phases are physically not called (monkeypatched to raise). The run's
+    run_summary records mode='refresh' with classify_cost 0."""
+    db_path = seed(tmp_path)                          # one tracked video v1 (+ channel c1)
+    _seed_completed_discover(db_path, config.now_local_iso())  # discover done today
+
+    def boom(*a, **k):
+        raise AssertionError("a capped discover must not run search/classify")
+    monkeypatch.setattr(swipefile, "_run_search_phase", boom)
+    monkeypatch.setattr(swipefile, "_run_classification_phase", boom)
+
+    youtube = FakeYouTube(                            # refresh sweep re-pulls v1
+        video_items={"v1": fake_video("v1")},
+        channel_items={"c1": fake_channel("c1", subs="100000")},
+    )
+    _patch_main(monkeypatch, db_path, ["--discover"], youtube=youtube)
+    swipefile.main()
+
+    run = latest_run(db_path)
+    assert run["mode"] == "refresh"                  # capped: discover -> refresh
+    conn = db.get_connection(db_path)
+    try:
+        summary = db.fetch_latest_run_summary(conn)
+        assert summary["mode"] == "refresh"
+        assert summary["classify_cost"] == 0         # classify-free invariant
+    finally:
+        conn.close()
+
+
+def test_yesterday_discover_does_not_suppress_today(tmp_path, monkeypatch):
+    """Midnight flip: a discover dated a PRIOR Pacific day must not cap today — an
+    explicit --discover still discovers (it reaches the search phase)."""
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    _seed_completed_discover(db_path, "2020-06-01T10:00:00-04:00")  # long ago
+
+    queries = [{"q": "q1", "bucket": "habit"}]
+    youtube = FakeYouTube(search_map={"q1": []})     # discover that catches nothing
+    _patch_main(monkeypatch, db_path, ["--discover"], youtube=youtube, queries=queries)
+    swipefile.main()
+    assert latest_run(db_path)["mode"] == "discover"  # not capped
+
+
+def test_discover_run_writes_run_summary(tmp_path, monkeypatch):
+    """A real discover run persists a run_summary row tagged mode='discover'."""
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    queries = [{"q": "q1", "bucket": "habit"}]
+    youtube = FakeYouTube(
+        search_map={"q1": ["v1"]},
+        video_items={"v1": fake_video("v1")},
+        channel_items={"c1": fake_channel("c1", subs="100000")},
+    )
+    _drive_main(monkeypatch, db_path, [], youtube=youtube, queries=queries)
+    conn = db.get_connection(db_path)
+    try:
+        summary = db.fetch_latest_run_summary(conn)
+        assert summary is not None
+        assert summary["mode"] == "discover"
+        assert summary["snapshot_count"] >= 1
+    finally:
+        conn.close()
+
+
 # --- main(): exit codes (scheduler retry contract) --------------------------
 
 def test_argparse_usage_error_exits_other(tmp_path, monkeypatch):

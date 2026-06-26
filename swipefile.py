@@ -925,7 +925,8 @@ def _recompute_rankings(conn, captured_at: str, run_date: str) -> None:
 
 
 def _run_catalog_sweep(youtube, conn, run_id: int, budget: "QuotaBudget",
-                       now: str, run_date: str) -> tuple[int, bool]:
+                       now: str, run_date: str, *, mode: str = "refresh",
+                       run_started: str | None = None) -> tuple[int, bool]:
     """The shared catalog sweep: re-pull videos.list stats for the active tracked
     catalog in batches of CHANNEL_BATCH_SIZE (50), preserving each video's
     matched_queries / buckets / top_comments from the DB, upsert, write one
@@ -1039,6 +1040,21 @@ def _run_catalog_sweep(youtube, conn, run_id: int, budget: "QuotaBudget",
     counts = db.run_change_counts(conn, run_id, now)
     print(f"Run summary: added={counts['added']} updated={counts['updated']} "
           f"aged_out={counts['aged_out']} gone={counts['gone']}", file=sys.stderr)
+
+    # Persist the run summary (non-fatal: a missed summary row doesn't fail the run).
+    # classify_cost is summed over THIS run's wall-clock window [run_started, now] —
+    # a refresh window contains no classify calls, so it is 0 (the classify-free
+    # invariant, computed not hardcoded).
+    try:
+        snapshot_count = db.count_snapshots_for_run(conn, run_id)
+        classify_cost = db.classify_cost_in_window(
+            conn, _CLASSIFY_SCOPE, run_started or now, now)
+        with db.transaction(conn):
+            db.write_run_summary(conn, run_id, run_date, mode, counts,
+                                 classify_cost, snapshot_count, now)
+    except Exception as e:
+        persist_partial = True
+        print(f"WARNING: run_summary persist failed, continuing: {e}", file=sys.stderr)
 
     return len(video_records), persist_partial
 
@@ -1651,7 +1667,8 @@ def _persist_all(conn, run_id: int, video_records: list[dict],
 
 
 def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict,
-                  today_pac: str, run_date: str) -> tuple[int, bool, bool, bool]:
+                  today_pac: str, run_date: str,
+                  run_started: str) -> tuple[int, bool, bool, bool]:
     """Discover mode (expensive): run the search/channel/comment phases and persist
     the catch (videos + channels), then hand off to the shared catalog sweep, which
     snapshots and ranks the WHOLE active catalog (now including the just-caught
@@ -1704,7 +1721,8 @@ def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict
     # classify_budget_stop label.
     try:
         _, sweep_partial = _run_catalog_sweep(
-            youtube, conn, run_id, budget, now, run_date
+            youtube, conn, run_id, budget, now, run_date,
+            mode="discover", run_started=run_started,
         )
         persist_partial = persist_partial or sweep_partial
     except Exception as e:
@@ -1715,15 +1733,11 @@ def _run_discover(youtube, conn, run_id: int, budget: "QuotaBudget", state: dict
 
 
 def _discover_done_today(conn, today_pac: str) -> bool:
-    """True when a discover run with status 'success' or 'partial' exists for
-    today's Pacific date — its expensive searches already ran, so the no-flag
-    default should refresh rather than re-discover. The Pacific date is derived
-    from each run's stored Eastern started_at."""
-    for row in db.fetch_runs_by_mode(conn, "discover"):
-        if (row["status"] in ("success", "partial")
-                and pacific_date(row["started_at"]) == today_pac):
-            return True
-    return False
+    """Thin seam over db.discover_ran_today — the SINGLE source of the once-a-day
+    cap, shared with the dashboard's /api/run-state (the dashboard can't import
+    swipefile, so the logic lives in db). True when a discover with status
+    success/partial completed today (Pacific)."""
+    return db.discover_ran_today(conn, today_pac)
 
 
 def _pick_status(budget: "QuotaBudget", quota_aborted: bool,
@@ -1843,13 +1857,20 @@ def main() -> int:
 
         units_today = db.get_units_used(conn, today_pac)
 
-        # Resolve the run mode (auto: discover if none done today, else refresh).
+        # Resolve the run mode. ONE discover per Pacific day is the cap, enforced
+        # HERE (not in the UI) so the CLI, a scheduler, and the dashboard button all
+        # honor it. Once a discover has completed today (Pacific), even an explicit
+        # --discover resolves to a refresh — which routes to _run_catalog_sweep and
+        # never enters _run_discover, so zero search/classify quota is spent. Only a
+        # new Pacific day clears it.
         if args.refresh:
             mode = "refresh"
-        elif args.discover:
-            mode = "discover"
+        elif _discover_done_today(conn, today_pac):
+            mode = "refresh"
+            print("Discover already ran today (Pacific); running stats refresh only "
+                  "— no new catch, no classify spend.", file=sys.stderr)
         else:
-            mode = "refresh" if _discover_done_today(conn, today_pac) else "discover"
+            mode = "discover"
 
         # Pre-flight guard (discover only): refuse if the estimate won't fit the cap.
         # The sweep term uses the PRE-catch active count (read here, before start_run
@@ -1889,11 +1910,13 @@ def main() -> int:
             if mode == "discover":
                 (videos_seen, quota_aborted, persist_partial,
                  classify_budget_exhausted) = _run_discover(
-                    youtube, conn, run_id, budget, state, today_pac, run_date
+                    youtube, conn, run_id, budget, state, today_pac, run_date,
+                    run_started
                 )
             else:
                 videos_seen, persist_partial = _run_catalog_sweep(
-                    youtube, conn, run_id, budget, now_local_iso(), run_date
+                    youtube, conn, run_id, budget, now_local_iso(), run_date,
+                    mode="refresh", run_started=run_started,
                 )
 
             status = _pick_status(budget, quota_aborted, persist_partial, downgraded,

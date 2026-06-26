@@ -192,6 +192,29 @@ def api_runs(conn: sqlite3.Connection = Depends(get_conn)):
     return {"run_dates": [row["run_date"] for row in rows]}
 
 
+@app.get("/api/run-state")
+def api_run_state(conn: sqlite3.Connection = Depends(get_conn)):
+    """Whether a discover has already completed today (Pacific) — the once-a-day-cap
+    signal. The Extract page reads this on load to LABEL its button (Run discovery vs
+    Refresh stats); the cap itself is enforced server-side in the pipeline resolver,
+    so this is presentation only. Pacific via config.pacific_date() (never Eastern)."""
+    ran = db.run_with_db_retry(
+        lambda: db.discover_ran_today(conn, config.pacific_date()))
+    return {"discover_ran_today": ran}
+
+
+@app.get("/api/run-summary")
+def api_run_summary(
+    limit: int = Query(default=10, ge=1, le=100),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """The most recent run summaries, newest first: each run's mode and the
+    catalog-change counts (added/updated/aged_out/gone), classify_cost, and
+    snapshot_count it produced."""
+    rows = db.run_with_db_retry(lambda: db.fetch_run_summaries(conn, limit))
+    return {"summaries": [dict(row) for row in rows]}
+
+
 @app.get("/api/rankings")
 def api_rankings(
     run_date: str = Query(..., min_length=1),
