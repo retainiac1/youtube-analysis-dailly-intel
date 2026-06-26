@@ -54,13 +54,14 @@
         </div>
         <div class="topbar-controls">
           <div class="date-filter-control" id="date-filter-control">
-            <span class="date-filter-label" id="dfc-label-period">Period</span>
-            <button class="date-filter-toggle" id="dfc-toggle" type="button"
-                    role="switch" aria-checked="false"
-                    aria-label="Switch to specific date mode">
-              <span class="date-filter-thumb" id="dfc-thumb"></span>
-            </button>
-            <span class="date-filter-label" id="dfc-label-specific">Specific date</span>
+            <div class="date-mode-tabs" role="tablist" aria-label="Date filter mode">
+              <button class="date-mode-tab" type="button" role="tab"
+                      id="dfc-mode-period" data-mode="period"
+                      aria-selected="true" tabindex="0">Period</button>
+              <button class="date-mode-tab" type="button" role="tab"
+                      id="dfc-mode-specific" data-mode="specific"
+                      aria-selected="false" tabindex="-1">Specific date</button>
+            </div>
             <select id="dfc-period" aria-label="Time period"></select>
             <select id="dfc-run" aria-label="Run date" hidden></select>
           </div>

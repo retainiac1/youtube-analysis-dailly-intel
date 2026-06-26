@@ -25,10 +25,8 @@ export const PERIOD_OPTIONS = [
 
 const IDS = {
   control: "date-filter-control",
-  toggle: "dfc-toggle",
-  thumb: "dfc-thumb",
-  labelPeriod: "dfc-label-period",
-  labelSpecific: "dfc-label-specific",
+  modePeriod: "dfc-mode-period",
+  modeSpecific: "dfc-mode-specific",
   periodSel: "dfc-period",
   runSel: "dfc-run",
 };
@@ -147,7 +145,14 @@ function dispatchFilter() {
 
 function applyModeUI() {
   const specific = state.mode === "specific";
-  $(IDS.toggle).setAttribute("aria-checked", specific ? "true" : "false");
+  const periodTab = $(IDS.modePeriod);
+  const specificTab = $(IDS.modeSpecific);
+  // Active segment: aria-selected drives the filled pill; roving tabindex keeps a
+  // single tab stop in the segmented control (matches the lane tablist).
+  periodTab.setAttribute("aria-selected", specific ? "false" : "true");
+  specificTab.setAttribute("aria-selected", specific ? "true" : "false");
+  periodTab.tabIndex = specific ? -1 : 0;
+  specificTab.tabIndex = specific ? 0 : -1;
   $(IDS.periodSel).hidden = specific;
   $(IDS.runSel).hidden = !specific;
 }
@@ -175,7 +180,8 @@ export function initDateFilter(runDatesDesc) {
 
   const periodSel = $(IDS.periodSel);
   const runSel = $(IDS.runSel);
-  const toggle = $(IDS.toggle);
+  const periodTab = $(IDS.modePeriod);
+  const specificTab = $(IDS.modeSpecific);
 
   fillSelect(periodSel, PERIOD_OPTIONS, (o) => o.key, (o) => o.label);
   periodSel.value = DEFAULT_PERIOD_KEY;
@@ -185,11 +191,26 @@ export function initDateFilter(runDatesDesc) {
 
   applyModeUI();
 
-  toggle.addEventListener("click", () => {
-    state.mode = state.mode === "period" ? "specific" : "period";
+  function setMode(mode) {
+    if (mode === state.mode) return;
+    state.mode = mode;
     applyModeUI();
     recompute();
     dispatchFilter();
+  }
+
+  // Two-segment mode control (tablist): click selects, Arrow keys rove + select.
+  const modeTabs = [periodTab, specificTab];
+  modeTabs.forEach((tab, i) => {
+    tab.addEventListener("click", () => setMode(tab.dataset.mode));
+    tab.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      e.preventDefault();
+      const dir = e.key === "ArrowRight" ? 1 : -1;
+      const next = modeTabs[(i + dir + modeTabs.length) % modeTabs.length];
+      next.focus();
+      setMode(next.dataset.mode);
+    });
   });
 
   periodSel.addEventListener("change", () => {

@@ -77,50 +77,43 @@ html { scroll-padding-top: var(--header-h, 0px); }
   color: var(--text-secondary);
 }
 
-/* Date filter: a Period / Specific-date switch plus the two mode dropdowns.
-   Replaces the old single run picker. Inline-flex, so the hidden attribute needs
-   an explicit display:none assertion (UA rule alone does not outrank it). */
+/* Date filter: a Period / Specific-date segmented control plus the two mode
+   dropdowns. Replaces the old single run picker. Inline-flex, so the hidden
+   attribute needs an explicit display:none assertion (UA rule alone does not
+   outrank it). */
 .date-filter-control { display: inline-flex; align-items: center; gap: 0.5rem; }
 .date-filter-control[hidden] { display: none; }
-.date-filter-label {
+/* Mode switch as a two-segment pill control, mirroring .lane-tabs / .page-nav but
+   compact for the topbar. The active pill uses the NEUTRAL page-nav fill (not a lane
+   colour) so it reads as a scope control and does not rhyme with the Health lane tab. */
+.date-mode-tabs {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.date-mode-tab {
   font-family: var(--font-display);
+  font-weight: 600;
   font-size: 0.85rem;
   color: var(--text-secondary);
-}
-.date-filter-toggle {
-  position: relative;
-  flex: none;
-  width: 2.75rem;
-  height: 1.5rem;
-  padding: 0;
-  border: 1px solid var(--border-glass);
-  border-radius: 999px;
-  background: var(--bg-elevated);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.9rem;
   cursor: pointer;
-  transition: background var(--transition-base), border-color var(--transition-base);
+  transition: color var(--transition-fast), background var(--transition-fast);
 }
-.date-filter-toggle:focus-visible {
+.date-mode-tab:hover { color: var(--text-primary); }
+.date-mode-tab[aria-selected="true"] {
+  color: var(--bg-base);
+  background: var(--text-primary);
+}
+.date-mode-tab:focus-visible {
   outline: 2px solid var(--accent-cyan);
   outline-offset: 2px;
-}
-.date-filter-thumb {
-  position: absolute;
-  top: 50%;
-  left: 0.15rem;
-  width: 1.1rem;
-  height: 1.1rem;
-  transform: translateY(-50%);
-  border-radius: 50%;
-  background: var(--text-secondary);
-  transition: left var(--transition-base), background var(--transition-base);
-}
-.date-filter-toggle[aria-checked="true"] {
-  background: var(--accent-cyan);
-  border-color: var(--accent-cyan);
-}
-.date-filter-toggle[aria-checked="true"] .date-filter-thumb {
-  left: calc(100% - 1.25rem);
-  background: #06121f;
 }
 #dfc-period, #dfc-run {
   font-family: var(--font-body);
