@@ -723,7 +723,7 @@ falls back to its default.
 | `DAILY_QUOTA_LIMIT` | 10000 | YouTube daily quota cap |
 | `SAFETY_BUFFER` | 500 | Units held back (must be `< DAILY_QUOTA_LIMIT`) |
 | `CATEGORY_REGION` | "US" | `regionCode` for category titles |
-| `REFRESH_MAX_AGE_DAYS` | 30 | Catalog-sweep retirement horizon (no view-growth → `aged_out`; transition still being wired) |
+| `REFRESH_MAX_AGE_DAYS` | 30 | Catalog-sweep retirement horizon (no view-growth → `aged_out`; transition wired and verified live in Phase 6) |
 | `SEARCH_QUERIES` | 12 entries | List of `{q, bucket}` (bucket ∈ {health, habit}) |
 | `KID_TITLE_KEYWORDS` | curated list | Title keywords that hard-drop kid/parenting Shorts (gate 3) |
 | `CLASSIFICATION_ENABLED` | true | Master switch for the Phase A.5 LLM classify lane |
@@ -815,11 +815,12 @@ unstarred video with no growth for `REFRESH_MAX_AGE_DAYS` is a candidate to age
 out. The decision is pure (`videos_to_age_out` over `db.fetch_aging_candidates`;
 starred rows are exempt, NULL/unparseable clocks are kept fail-safe).
 
-> **In progress.** As of this writing the sweep snapshots `active` rows and the
-> aging **decision** functions exist, but the runtime `status` transitions
-> (writing `gone` / `aged_out`) are **not yet wired** - the schema, backfill, and
-> decision helpers are in place ahead of the marking step. Update this subsection
-> when the transition lands.
+> **Wired and verified live (Phase 6, runs 20-21, 2026-06-26).** The sweep snapshots
+> `active` rows, and the runtime `status` transitions now fire: a discover run marked
+> 5 `videos.list`-absent ids `gone` (excluded from snapshots, as designed), and the
+> `aged_out` marking runs after each full sweep over `videos_to_age_out`. Schema,
+> backfill, decision helpers, and the marking step are all in place and exercised
+> end to end.
 
 ### Quota lifecycle
 

@@ -186,3 +186,58 @@ produces ordered `log` events then one terminal `result` event. **STOP.**
   changes); this page only consumes their contract.
 - Internals of `swipefile.py`, `config.py`, `run-pipeline.sh`.
 - Internals of the spend panel (`spend.js`, `/api/spend`).
+
+## Phase 6: live verification (merged-discover run via the Extract page)
+
+The single real merged-discover triggered through the Extract page "Run discovery"
+button (not the CLI), proving the v12/v13 catalog sweep, lifecycle transitions, the
+once-per-Pacific-day cap, and `run_summary` all work end to end against the live
+catalog. Also discharges the deferred Phase 7 manual check. Verified 2026-06-26; both
+presses passed.
+
+Inspection rule (load-bearing): a bare `immutable=1` read of the live
+`data/database/swipefile.db` is STALE, it ignores the `-wal` sidecar where the run's
+writes live until checkpoint (it reported `user_version=11` while the real state was
+v13). Every post-run assertion folds a WAL-safe snapshot first
+(`sqlite3 data/database/swipefile.db "VACUUM INTO 'PR.db'"`) and reads that via
+`immutable=1`. Never `wal_checkpoint` (it writes) when only reads are authorized.
+
+Pre-run gate (all confirmed before pressing): the UI runner spawns
+`scripts/run-pipeline.sh` (`dashboard/extract.py:104-107`), which writes a WAL-safe
+pre-run backup via `backup_database.py` (`scripts/run-pipeline.sh:57`) before
+`swipefile.py` runs; a fresh `swipefile.db.bak-20260626T145207Z` appeared ahead of the
+run's writes. Dry-run is read-only and never migrates (`db.get_readonly_connection`,
+`swipefile.py:1792-1820`). Git was clean at the Phase 7 gate (`fe87c21`).
+
+Press 1, `run_id=20`, mode `discover`: added 44, updated 392, aged_out 0, gone 5,
+snapshots 436, classify cost $0.0398. All six assertions passed against the WAL-folded
+snapshot:
+- (a) catalog-wide: `snaps 436 == run_summary.snapshot_count 436`, reconciles
+  `snaps == active_now (436) + aged_out (0)`, and `436 >> added (44)`, so the sweep
+  covered the whole catalog (397 active grew to 441 at sweep time: 44 caught, 5 gone),
+  not just the catch.
+- (b) no duplicate snapshot per video (zero, also held by `UNIQUE(run_id, video_id)`).
+- (c) the 06-08 cohort video `Wwj_6wOTvds` got a fresh row at the run instant, still
+  `active`, its `last_view_growth_at` advanced to today.
+- (d) rankings recomputed once: habit/health/overall each one `captured_at`, a single
+  distinct value across all buckets, equal to the run instant.
+- (e) `gone` fired live for the first time: 5 `videos.list`-absent ids
+  (`LIMup4VPNOY`, `WhYMy_lweEs`, `1Mw9XiwIIKQ`, `aiTEfSjmKIs`, `c4IJZOj-BCU`) flipped to
+  `gone` at the run instant, zero of them present in this run's snapshots.
+- (f) exactly one `run_summary` row, `mode='discover'`, counts matching the pane.
+
+Press 2, `run_id=21`, mode `refresh` (pressed after Press 1 committed and the button
+relabeled to "Refresh stats"): the once-a-day cap forced refresh-only. added 0,
+updated 436, aged_out 0, gone 0, snapshots 436, classify cost $0.0000, 10 quota units
+(the `videos.list` sweep only, no `search.list`). `added == 0` is the structural proof
+the cap prevented a second catch; the sweep stayed catalog-wide (`snaps 436 ==
+active_now 436`).
+
+Open follow-up (not fixed here): the dashboard migrates the live seed on normal
+startup with no backup gate, `dashboard/app.py:64-77` `_lifespan` calls
+`db.init_db(get_db_path())` against `config.DB_PATH` unless `DASHBOARD_DB_PATH` is set,
+with no pre-migration backup (unlike `run-pipeline.sh`). Harmless on the current v13
+seed (`init_db` is additive and idempotent, a no-op), but a future `SCHEMA_VERSION`
+bump would migrate the live seed on a plain launch with no restore point. Gate the
+lifespan migration behind the same backup step, or point the dashboard at a copy, in a
+later phase.
