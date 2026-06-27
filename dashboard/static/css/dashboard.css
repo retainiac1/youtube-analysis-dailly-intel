@@ -51,11 +51,6 @@ html { scroll-padding-top: var(--header-h, 0px); }
 /* The drawer toggle is content-width and left-aligned (it stretches by default as
    a flex child); the topbar/lane-row keep their full-width flex layouts. */
 .sticky-header .filter-drawer-toggle { align-self: flex-start; }
-/* The date filter is its own second-tier row (a direct sticky-header child) so the
-   theme toggle stays on the top nav row. Content-width + left-aligned, like the
-   drawer toggle above; when hidden, .date-filter-control[hidden] removes it and the
-   column gap collapses with it. */
-.sticky-header > #date-filter-control { align-self: flex-start; }
 
 /* --- Top bar -------------------------------------------------------------- */
 .topbar {
@@ -168,6 +163,7 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .lane-row {
   display: flex;
   align-items: center;
+  justify-content: space-between; /* lane tabs left, date filter pushed far right */
   gap: 1rem;
   flex-wrap: wrap;
 }

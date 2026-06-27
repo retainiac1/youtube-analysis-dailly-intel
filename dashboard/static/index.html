@@ -60,24 +60,11 @@
         </div>
       </header>
 
-      <!-- Date scope (second tier): its own row so the theme toggle stays on the
-           top nav row, far right. Visible on date-sensitive pages; main.js hides it
-           elsewhere, and .date-filter-control[hidden] collapses the row. -->
-      <div class="date-filter-control" id="date-filter-control">
-        <div class="date-mode-tabs" role="tablist" aria-label="Date filter mode">
-          <button class="date-mode-tab" type="button" role="tab"
-                  id="dfc-mode-period" data-mode="period"
-                  aria-selected="true" tabindex="0">Period</button>
-          <button class="date-mode-tab" type="button" role="tab"
-                  id="dfc-mode-specific" data-mode="specific"
-                  aria-selected="false" tabindex="-1">Specific date</button>
-        </div>
-        <select id="dfc-period" aria-label="Time period"></select>
-        <select id="dfc-run" aria-label="Run date" hidden></select>
-      </div>
-
-      <!-- Second tier: content scope. The lane tabs stay a tablist (they narrow
-           the data within whichever page is shown) and persist across pages. -->
+      <!-- Second tier: one content-scope row. Lane tabs (left) narrow the data within
+           whichever page is shown and persist across pages; the date filter (right, via
+           justify-content: space-between) scopes by date. main.js toggles each child's
+           visibility per page; .date-filter-control[hidden] / .lane-row[hidden] collapse
+           them. The theme toggle stays independent in .topbar-controls. -->
       <div class="lane-row">
         <nav class="lane-tabs" role="tablist" aria-label="Lane">
           <button class="lane-tab" role="tab" data-lane="health" id="tab-health"
@@ -87,6 +74,18 @@
           <button class="lane-tab" role="tab" data-lane="overall" id="tab-overall"
                   aria-selected="false" tabindex="-1">Overall</button>
         </nav>
+        <div class="date-filter-control" id="date-filter-control">
+          <div class="date-mode-tabs" role="tablist" aria-label="Date filter mode">
+            <button class="date-mode-tab" type="button" role="tab"
+                    id="dfc-mode-period" data-mode="period"
+                    aria-selected="true" tabindex="0">Period</button>
+            <button class="date-mode-tab" type="button" role="tab"
+                    id="dfc-mode-specific" data-mode="specific"
+                    aria-selected="false" tabindex="-1">Specific date</button>
+          </div>
+          <select id="dfc-period" aria-label="Time period"></select>
+          <select id="dfc-run" aria-label="Run date" hidden></select>
+        </div>
       </div>
 
       <button id="filter-drawer-toggle" class="btn-secondary filter-drawer-toggle"
