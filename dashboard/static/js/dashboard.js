@@ -213,7 +213,7 @@ function renderFormat(data) {
   panelEl.replaceChildren(
     el("div", { class: "dashboard-grid" }, [dur.card, stats, scatter.card, heat.card])
   );
-  charts.renderBars(dur.chart, data.duration_dist, laneNow());
+  charts.renderDurationHistogram(dur.chart, data.durations || [], laneNow());
   charts.renderScatter(scatter.chart, data.like_comment_pairs || [], laneNow());
   charts.renderHeatmap(heat.chart, data.publish_heatmap || [], laneNow());
 }

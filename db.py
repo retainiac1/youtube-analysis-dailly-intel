@@ -2276,9 +2276,10 @@ def fetch_dashboard_format(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict:
-    """{duration_dist, title_stats, like_comment_pairs, publish_heatmap} for the
-    deduped lane+window set. duration_dist bins duration_seconds into DURATION_BANDS
-    (band order, human labels). title_stats are 0-100 percentages over non-null
+    """{durations, title_stats, like_comment_pairs, publish_heatmap} for the
+    deduped lane+window set. durations is the raw list of non-null duration_seconds
+    (the catalog is shorts-only, so the frontend bins this into a fixed 0-180s
+    histogram rather than the coarse DURATION_BANDS). title_stats are 0-100 percentages over non-null
     titles (emoji test is the rough ord(c) > 0x1F300, approximate). like_comment_pairs
     excludes comment_count <= 0 / NULL (server-side guard). publish_heatmap converts
     published_at to Eastern via _parse_instant; videos with null/unparseable
@@ -2288,17 +2289,8 @@ def fetch_dashboard_format(
         "v.duration_seconds, v.title, v.like_count, v.comment_count, v.published_at",
     )
 
-    dur_totals = {key: 0 for key in DURATION_BANDS}
-    for row in rows:
-        seconds = row["duration_seconds"]
-        if seconds is None:
-            continue
-        band = _duration_band_for(seconds)
-        if band is not None:
-            dur_totals[band] += 1
-    duration_dist = [
-        {"label": DURATION_BAND_LABELS[key], "count": dur_totals[key]}
-        for key in DURATION_BANDS
+    durations = [
+        row["duration_seconds"] for row in rows if row["duration_seconds"] is not None
     ]
 
     titles = [row["title"] for row in rows if row["title"]]
@@ -2340,7 +2332,7 @@ def fetch_dashboard_format(
     ]
 
     return {
-        "duration_dist": duration_dist,
+        "durations": durations,
         "title_stats": title_stats,
         "like_comment_pairs": like_comment_pairs,
         "publish_heatmap": publish_heatmap,

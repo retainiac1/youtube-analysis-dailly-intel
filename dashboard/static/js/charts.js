@@ -484,3 +484,79 @@ export function renderHeatmap(el, points, lane) {
     ],
   });
 }
+
+// Duration histogram on a FIXED 0-180s axis. The catalog is shorts-only, so the axis
+// is always 0:00-3:00 (ticks every 30s) regardless of the data's range -- the chart
+// reads as "out of 3 minutes" even on a sub-60s-only day. One category per bin (all
+// always emitted) pins the span AND lets ECharts auto-size the bars (no value-axis
+// barWidth fragility).
+const DURATION_BIN_SECONDS = 10; // bin width; 5 reads finer, 10 cleaner
+const DURATION_MAX_SECONDS = 180; // the shorts cap; the axis is always 0..180
+
+function mmss(sec) {
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+export function renderDurationHistogram(el, durations, lane) {
+  if (!durations || !durations.length) {
+    showEmpty(el, "No data for this window.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  const color = LANE_COLORS[lane] || LANE_COLORS.health;
+
+  const nBins = Math.ceil(DURATION_MAX_SECONDS / DURATION_BIN_SECONDS);
+  const counts = new Array(nBins).fill(0);
+  for (const s of durations) {
+    if (s == null) continue;
+    // Inclusive top edge: a 180s video lands in the last bin, never a phantom bin.
+    const idx = Math.min(Math.floor(s / DURATION_BIN_SECONDS), nBins - 1);
+    if (idx >= 0) counts[idx] += 1;
+  }
+  const binStarts = counts.map((_, i) => i * DURATION_BIN_SECONDS);
+
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      formatter: (params) => {
+        const i = params[0].dataIndex;
+        const lo = binStarts[i];
+        const hi = Math.min(lo + DURATION_BIN_SECONDS, DURATION_MAX_SECONDS);
+        const c = params[0].value;
+        return `${mmss(lo)}-${mmss(hi)}<br/>${c} video${c === 1 ? "" : "s"}`;
+      },
+    },
+    grid: { left: 8, right: 16, top: 12, bottom: 28, containLabel: true },
+    xAxis: {
+      type: "category",
+      data: binStarts,
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisTick: { show: false },
+      // Label only the 30s marks in mm:ss; blank elsewhere so the scale reads 0..3min.
+      axisLabel: {
+        color: t.textStyle.color,
+        interval: 0,
+        formatter: (v) => (Number(v) % 30 === 0 ? mmss(Number(v)) : ""),
+      },
+    },
+    yAxis: {
+      type: "value",
+      minInterval: 1,
+      name: "videos",
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    series: [
+      {
+        type: "bar",
+        data: counts,
+        barWidth: "98%", // touch into a continuous histogram (category band percent)
+        itemStyle: { color, borderRadius: [3, 3, 0, 0] },
+      },
+    ],
+  });
+}
