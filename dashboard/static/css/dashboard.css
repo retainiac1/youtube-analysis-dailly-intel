@@ -494,6 +494,16 @@ html { scroll-padding-top: var(--header-h, 0px); }
   min-width: 0;
 }
 .dashboard-subtabs { align-self: flex-start; }
+/* The sub-tabs reuse .lane-tab, whose active rule needs a --tab-color (set only on
+   data-lane tabs). The sub-tabs carry data-section, so --tab-color is undefined and
+   the lane-tab active fill drops out (invisible in dark mode, no selection cue in
+   light). Override with the neutral filled pill (the page-nav idiom); the
+   --bg-base / --text-primary pair inverts per theme, so it reads in both. Scoped to
+   the container for higher specificity so it wins regardless of stylesheet order. */
+.dashboard-subtabs .dashboard-subtab[aria-selected="true"] {
+  color: var(--bg-base);
+  background: var(--text-primary);
+}
 /* Responsive card grid: charts reflow from 1 to N columns by width. */
 .dashboard-grid {
   display: grid;
