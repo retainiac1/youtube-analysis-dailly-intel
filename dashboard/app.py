@@ -414,6 +414,55 @@ def api_rank_history(
     return {"lane": lane, **data}
 
 
+@app.get("/api/dashboard/topic-mix")
+def api_dashboard_topic_mix(
+    lane: str = Query(..., min_length=1),
+    start_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Sub-niche / category / topic counts for one lane over the selected window.
+    start_date/end_date are optional YYYY-MM-DD bounds (neither = all time); the
+    deduped set is the videos that ranked in the lane within the window."""
+    bucket = _lane_to_bucket(lane)
+    data = db.run_with_db_retry(
+        lambda: db.fetch_dashboard_topic_mix(conn, bucket, start_date, end_date)
+    )
+    return {"lane": lane, **data}
+
+
+@app.get("/api/dashboard/breakout")
+def api_dashboard_breakout(
+    lane: str = Query(..., min_length=1),
+    start_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """views_to_subs_ratio leaderboard + ratio-band counts for one lane over the
+    window. Same deduped set and optional bounds as topic-mix."""
+    bucket = _lane_to_bucket(lane)
+    data = db.run_with_db_retry(
+        lambda: db.fetch_dashboard_breakout(conn, bucket, start_date, end_date)
+    )
+    return {"lane": lane, **data}
+
+
+@app.get("/api/dashboard/format")
+def api_dashboard_format(
+    lane: str = Query(..., min_length=1),
+    start_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Duration distribution, title stats, like/comment pairs, and publish heatmap
+    for one lane over the window. Same deduped set and optional bounds as topic-mix."""
+    bucket = _lane_to_bucket(lane)
+    data = db.run_with_db_retry(
+        lambda: db.fetch_dashboard_format(conn, bucket, start_date, end_date)
+    )
+    return {"lane": lane, **data}
+
+
 @app.get("/api/distribution")
 def api_distribution(
     run_date: str = Query(..., min_length=1),
