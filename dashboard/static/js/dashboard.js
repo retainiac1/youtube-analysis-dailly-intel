@@ -163,7 +163,10 @@ function renderTopicMix(data) {
   const sub = chartCard("Sub-niche volume");
   const cat = chartCard("YouTube category");
   const top = chartCard("Topic tags");
-  panelEl.replaceChildren(el("div", { class: "dashboard-grid" }, [sub.card, cat.card, top.card]));
+  panelEl.replaceChildren(
+    el("div", { class: "dash-2col" }, [sub.card, cat.card]),
+    top.card // full width (flex-column panel child stretches)
+  );
   charts.renderBars(sub.chart, data.subniche_counts, laneNow());
   charts.renderBars(cat.chart, data.category_counts, laneNow());
   charts.renderBars(top.chart, data.topic_counts, laneNow());
@@ -178,7 +181,8 @@ function renderBreakout(data) {
   if (data.survivorship_note) {
     lb.appendChild(el("p", { class: "dashboard-caveat", text: SURVIVORSHIP_NOTE }));
   }
-  panelEl.replaceChildren(el("div", { class: "dashboard-grid" }, [bands.card, lb]));
+  bands.card.classList.add("dash-bands"); // short 4-bar chart: cap width, do not full-bleed
+  panelEl.replaceChildren(bands.card, lb); // bands (capped) then full-width leaderboard
   charts.renderBars(bands.chart, data.band_counts, laneNow());
 }
 
@@ -204,21 +208,20 @@ function leaderboardTable(rows) {
 
 function renderFormat(data) {
   const dur = chartCard("Duration distribution");
-  const stats = el("section", { class: "glass-panel chart-card" }, [
-    el("h3", { class: "heading-sm", text: "Title anatomy" }),
-    titleStats(data.title_stats || {}),
-  ]);
   const scatter = chartCard("Likes vs comments");
   const heat = chartCard("Publish times (Eastern)");
   panelEl.replaceChildren(
-    el("div", { class: "dashboard-grid" }, [dur.card, stats, scatter.card, heat.card])
+    titleStatsStrip(data.title_stats || {}), // KPI strip on top (full width)
+    el("div", { class: "dash-2col" }, [dur.card, scatter.card]), // paired, equal height
+    heat.card // wide chart full width
   );
   charts.renderDurationHistogram(dur.chart, data.durations || [], laneNow());
   charts.renderScatter(scatter.chart, data.like_comment_pairs || [], laneNow());
   charts.renderHeatmap(heat.chart, data.publish_heatmap || [], laneNow());
 }
 
-function titleStats(s) {
+// The 4 title-anatomy numbers as a compact, labeled KPI strip (no big bordered card).
+function titleStatsStrip(s) {
   const pct = (v) => `${Number(v ?? 0).toFixed(1)}%`;
   const cards = [
     ["Avg length", `${Number(s.avg_length ?? 0).toFixed(0)}`],
@@ -226,16 +229,19 @@ function titleStats(s) {
     ["Has a question", pct(s.pct_has_question)],
     ["Has an emoji", pct(s.pct_has_emoji)],
   ];
-  return el(
-    "div",
-    { class: "dashboard-statcards" },
-    cards.map(([label, value]) =>
-      el("div", { class: "stat dashboard-statcard" }, [
-        el("span", { class: "stat-value", text: value }),
-        el("span", { class: "stat-label", text: label }),
-      ])
-    )
-  );
+  return el("section", { class: "dash-kpi-section" }, [
+    el("h3", { class: "heading-sm dash-kpi-heading", text: "Title anatomy" }),
+    el(
+      "div",
+      { class: "dash-kpis" },
+      cards.map(([label, value]) =>
+        el("div", { class: "stat dashboard-statcard" }, [
+          el("span", { class: "stat-value", text: value }),
+          el("span", { class: "stat-label", text: label }),
+        ])
+      )
+    ),
+  ]);
 }
 
 function renderLifecycle() {

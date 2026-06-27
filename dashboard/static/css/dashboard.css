@@ -501,17 +501,32 @@ html { scroll-padding-top: var(--header-h, 0px); }
   background: var(--text-primary);
 }
 /* Responsive card grid: charts reflow from 1 to N columns by width. */
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+/* Section panel: a vertical stack of layout rows (content-fit, not a ragged grid).
+   Flex-column children stretch to full width by default; .dash-2col splits a row. */
+#dashboard-section-panel {
+  display: flex;
+  flex-direction: column;
   gap: 1.5rem;
-  align-items: start;
 }
-.dashboard-statcards {
+/* Two charts side-by-side at EQUAL height; auto-collapse to one column when narrow.
+   The collapse is viewport-driven, so it coincides with the window resize that redraws
+   the ECharts instances. Both paired cards share the same .chart-mount height (340px),
+   so stretch is cosmetic, not hiding mismatched mounts. */
+.dash-2col {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1.5rem;
+  align-items: stretch;
+}
+/* The 4 title-anatomy numbers as a labeled KPI strip, wrapping gracefully. */
+.dash-kpi-heading { margin: 0 0 0.85rem; }
+.dash-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 1rem;
 }
+/* A short 4-bar chart (ratio bands) capped so it does not full-bleed into a thin strip. */
+.dash-bands { max-width: 560px; }
 .dashboard-statcard {
   padding: 1rem;
   background: var(--bg-elevated);
