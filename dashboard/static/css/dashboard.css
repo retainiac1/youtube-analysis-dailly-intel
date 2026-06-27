@@ -448,7 +448,8 @@ html { scroll-padding-top: var(--header-h, 0px); }
 .extract[hidden],
 .models[hidden],
 .prices[hidden],
-.documentation[hidden] {
+.documentation[hidden],
+.dashboard[hidden] {
   display: none;
 }
 
@@ -483,6 +484,65 @@ html { scroll-padding-top: var(--header-h, 0px); }
   color: var(--text-secondary);
   font-size: 0.95rem;
 }
+
+/* --- Dashboard page (lane-scoped, period-aggregated sub-tabs) ------------- */
+.dashboard {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+}
+.dashboard-subtabs { align-self: flex-start; }
+/* Responsive card grid: charts reflow from 1 to N columns by width. */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 1.5rem;
+  align-items: start;
+}
+.dashboard-statcards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+.dashboard-statcard {
+  padding: 1rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.dashboard-statcard .stat-value { font-size: 1.6rem; }
+.dashboard-caveat {
+  margin: 0.85rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+.dashboard-status {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  padding: 0.5rem 0;
+}
+.dashboard-status.error { color: var(--accent-red); }
+/* Leaderboard rows reuse the .row look; a fixed grid lays out the metric columns. */
+.dashboard-lb { margin-top: 0.5rem; }
+.dashboard-lb-row {
+  display: grid;
+  grid-template-columns: 2.5rem 1fr 8rem 6rem 4rem 6rem;
+  gap: 0.75rem;
+  align-items: center;
+}
+.dashboard-lb-rank { color: var(--text-muted); font-weight: 600; }
+.dashboard-lb-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard-lb-channel {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dashboard-lb-views,
+.dashboard-lb-subs { text-align: right; color: var(--text-secondary); }
+.dashboard-lb-ratio { text-align: right; color: var(--accent-amber); font-weight: 600; }
 
 /* --- Reusable two-column page shell (content | right aside) -------------- */
 /* A page opts into the shell by giving its <main> .page-aside and wrapping its

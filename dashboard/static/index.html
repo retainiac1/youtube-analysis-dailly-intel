@@ -42,6 +42,8 @@
                tabindex="-1">Trends</a>
             <a class="page-nav-link" data-route href="/interpretation"
                id="nav-interpretation" tabindex="-1">Interpretation</a>
+            <a class="page-nav-link" data-route href="/dashboard"
+               id="nav-dashboard" tabindex="-1">Dashboard</a>
             <a class="page-nav-link" data-route href="/extract"
                id="nav-extract" tabindex="-1">Extract</a>
             <a class="page-nav-link" data-route href="/models"
@@ -135,6 +137,12 @@
         <div id="interpretation-main" class="page-aside-main"></div>
         <aside class="glass-panel spend-panel" id="spend-panel" aria-label="LLM spend"></aside>
       </main>
+
+      <!-- The Dashboard page: lane-scoped, period-aggregated charts across four sub-tabs
+           (Topic mix, Breakout, Format & craft, Lifecycle). dashboard.js owns this region:
+           it renders the sub-tab nav once and swaps only the section panel. Lane + date
+           scoped, like Trends. -->
+      <main class="dashboard" id="dashboard" aria-live="polite" hidden></main>
 
       <!-- The Extract page on the shared .page-aside shell: extract.js owns #extract-main
            (it replaceChildren's it) with the run controls + the streamed terminal; a

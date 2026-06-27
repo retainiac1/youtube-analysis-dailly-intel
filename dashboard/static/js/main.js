@@ -17,6 +17,7 @@ import * as priceRefresh from "./price-refresh.js";
 import * as documentation from "./documentation.js";
 import * as router from "./router.js";
 import { initDateFilter, getCurrentFilter, EVENT_NAME } from "./date-filter.js";
+import * as dashboard from "./dashboard.js";
 import "./sticky-header.js"; // side-effect: publishes --header-h for the pinned strip
 
 const app = document.getElementById("app");
@@ -28,6 +29,7 @@ const extractEl = document.getElementById("extract");
 const modelsEl = document.getElementById("models");
 const pricesEl = document.getElementById("prices");
 const documentationEl = document.getElementById("documentation");
+const dashboardEl = document.getElementById("dashboard");
 const railGroups = document.getElementById("filter-groups");
 const rail = document.getElementById("filter-rail");
 const drawerToggle = document.getElementById("filter-drawer-toggle");
@@ -41,6 +43,7 @@ const TRENDS_ROUTE = "/trends";
 const INTERPRETATION_ROUTE = "/interpretation";
 const PRICES_ROUTE = "/prices";
 const EXTRACT_ROUTE = "/extract";
+const DASHBOARD_ROUTE = "/dashboard";
 
 // Mount container ids for the shared spend panel and the Prices content column.
 // Named here (not sprinkled as literals) so each id has one source; the spend panel
@@ -112,6 +115,7 @@ function selectLane(lane) {
   onRunOrLaneChange();
   if (router.current() === TRENDS_ROUTE) refreshTrendsCharts();
   if (router.current() === INTERPRETATION_ROUTE) interpretation.refresh(state);
+  if (router.current() === DASHBOARD_ROUTE) dashboard.refresh(state);
 }
 
 // Route handlers: show the page's content region and hide the others, and show or
@@ -128,6 +132,7 @@ function enterBoard() {
   extractEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
+  dashboardEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = false;
   dateFilterControl.hidden = false;
@@ -146,6 +151,7 @@ function enterTrends() {
   extractEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
+  dashboardEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = false;
   dateFilterControl.hidden = false;
@@ -165,6 +171,7 @@ function enterInterpretation() {
   extractEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
+  dashboardEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = false;
   dateFilterControl.hidden = false;
@@ -187,6 +194,7 @@ function enterExtract() {
   extractEl.hidden = false;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
+  dashboardEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = true; // not lane-scoped; hide the lane tabs here
   dateFilterControl.hidden = true; // not date-scoped; hide the date filter here
@@ -208,6 +216,7 @@ function enterModels() {
   extractEl.hidden = true;
   modelsEl.hidden = false;
   documentationEl.hidden = true;
+  dashboardEl.hidden = true;
   pricesEl.hidden = true;
   laneRow.hidden = false;
   dateFilterControl.hidden = true; // not date-scoped; hide the date filter here
@@ -227,6 +236,7 @@ function enterDocumentation() {
   modelsEl.hidden = true;
   pricesEl.hidden = true;
   documentationEl.hidden = false;
+  dashboardEl.hidden = true;
   laneRow.hidden = true; // the page is not lane-scoped; hide the lane tabs here
   dateFilterControl.hidden = true; // not date-scoped; hide the date filter here
   documentation.refresh();
@@ -243,6 +253,7 @@ function enterPrices() {
   extractEl.hidden = true;
   modelsEl.hidden = true;
   documentationEl.hidden = true;
+  dashboardEl.hidden = true;
   pricesEl.hidden = false;
   laneRow.hidden = true; // not lane-scoped; hide the lane tabs here
   dateFilterControl.hidden = true; // not date-scoped; hide the date filter here
@@ -251,6 +262,24 @@ function enterPrices() {
   // instance), refreshed on entry. One fetch per entry: the date-filter change
   // handler only fires on a real change, never on route entry.
   pricesSpend.refresh(state);
+}
+
+// The Dashboard page: lane-scoped, period-aggregated charts across four sub-tabs. Like
+// Trends, it shows the lane tabs and the date filter; dashboard.js renders on entry.
+function enterDashboard() {
+  boardEl.hidden = true;
+  rail.hidden = true;
+  drawerToggle.hidden = true;
+  trendsEl.hidden = true;
+  interpretationEl.hidden = true;
+  extractEl.hidden = true;
+  modelsEl.hidden = true;
+  documentationEl.hidden = true;
+  pricesEl.hidden = true;
+  dashboardEl.hidden = false;
+  laneRow.hidden = false;
+  dateFilterControl.hidden = false;
+  dashboard.refresh(state);
 }
 
 // Arrow-key roving focus for a segmented tablist.
@@ -288,6 +317,7 @@ function setupTheme() {
     if (router.current() === INTERPRETATION_ROUTE) interpSpend.rerenderFromCache();
     if (router.current() === PRICES_ROUTE) pricesSpend.rerenderFromCache();
     if (router.current() === EXTRACT_ROUTE) extractSpend.rerenderFromCache();
+    if (router.current() === DASHBOARD_ROUTE) dashboard.rerenderFromCache();
   });
 }
 
@@ -435,6 +465,7 @@ async function init() {
   // shell, so its replaceChildren never wipes the sibling spend-panel aside.
   priceRefresh.init(document.getElementById(PRICES_MAIN_ID));
   documentation.init(documentationEl);
+  dashboard.init(dashboardEl);
   board.setActiveTab(app, tabs, state.lane);
 
   // A successful generation changes the spend totals; refresh the panel. The event
@@ -458,6 +489,7 @@ async function init() {
       "/board": enterBoard,
       "/trends": enterTrends,
       "/interpretation": enterInterpretation,
+      "/dashboard": enterDashboard,
       "/extract": enterExtract,
       "/models": enterModels,
       "/prices": enterPrices,
@@ -494,6 +526,7 @@ async function init() {
       // it (month-to-date is unaffected but recomputes cheaply on the same call).
       interpSpend.refresh(state);
     }
+    if (route === DASHBOARD_ROUTE) dashboard.refresh(state);
   });
 
   let runs;

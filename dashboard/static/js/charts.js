@@ -338,3 +338,149 @@ export function renderTrajectory(el, payload, lane) {
     series: lines,
   });
 }
+
+// --- Dashboard renderers -----------------------------------------------------
+// All three guard empty input with showEmpty so a sparse lane+window shows the empty
+// state, never a blank or broken axis.
+
+const DOW_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+// Horizontal bar from [{label, count}], coloured by the active lane. Used for the
+// sub-niche / category / topic / ratio-band / duration charts (data is pre-ordered).
+export function renderBars(el, items, lane) {
+  if (!items || !items.length) {
+    showEmpty(el, "No data for this window.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  const color = LANE_COLORS[lane] || LANE_COLORS.health;
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    grid: { left: 8, right: 24, top: 12, bottom: 24, containLabel: true },
+    xAxis: {
+      type: "value",
+      minInterval: 1,
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    yAxis: {
+      type: "category",
+      inverse: true, // largest (items[0]) on top
+      data: items.map((d) => d.label),
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color, formatter: (v) => truncate(v, 24) },
+    },
+    series: [
+      {
+        type: "bar",
+        data: items.map((d) => d.count),
+        itemStyle: { color, borderRadius: [0, 4, 4, 0] },
+      },
+    ],
+  });
+}
+
+// Like-vs-comment scatter, one point per [{like_count, comment_count}].
+export function renderScatter(el, pairs, lane) {
+  if (!pairs || !pairs.length) {
+    showEmpty(el, "No data for this window.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  const color = LANE_COLORS[lane] || LANE_COLORS.health;
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: {
+      trigger: "item",
+      formatter: (p) =>
+        `likes ${intFmt.format(p.value[0])}<br/>comments ${intFmt.format(p.value[1])}`,
+    },
+    grid: { left: 8, right: 24, top: 16, bottom: 36, containLabel: true },
+    xAxis: {
+      type: "value",
+      name: "likes",
+      nameLocation: "middle",
+      nameGap: 28,
+      nameTextStyle: { color: t.textStyle.color },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    yAxis: {
+      type: "value",
+      name: "comments",
+      nameTextStyle: { color: t.textStyle.color },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    series: [
+      {
+        type: "scatter",
+        symbolSize: 8,
+        itemStyle: { color, opacity: 0.7 },
+        data: pairs.map((p) => [p.like_count, p.comment_count]),
+      },
+    ],
+  });
+}
+
+// Publish-time heatmap: x = hour 0-23, y = weekday (Mon-Sun), value = count. Eastern.
+export function renderHeatmap(el, points, lane) {
+  if (!points || !points.length) {
+    showEmpty(el, "No data for this window.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  const color = LANE_COLORS[lane] || LANE_COLORS.health;
+  const hours = Array.from({ length: 24 }, (_, h) => String(h));
+  const maxCount = Math.max(...points.map((p) => p.count), 1);
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: {
+      position: "top",
+      formatter: (p) =>
+        `${DOW_LABELS[p.value[1]]} ${p.value[0]}:00 ET<br/>` +
+        `${p.value[2]} video${p.value[2] === 1 ? "" : "s"}`,
+    },
+    grid: { left: 8, right: 16, top: 12, bottom: 48, containLabel: true },
+    xAxis: {
+      type: "category",
+      data: hours,
+      splitArea: { show: true },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+    },
+    yAxis: {
+      type: "category",
+      data: DOW_LABELS,
+      inverse: true, // Monday on top
+      splitArea: { show: true },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+    },
+    visualMap: {
+      min: 0,
+      max: maxCount,
+      calculable: false,
+      orient: "horizontal",
+      left: "center",
+      bottom: 0,
+      inRange: { color: [t.splitLine, color] },
+      textStyle: { color: t.textStyle.color },
+    },
+    series: [
+      {
+        type: "heatmap",
+        data: points.map((p) => [p.hour, p.day_of_week, p.count]),
+        label: { show: false },
+        itemStyle: { borderColor: "rgba(0,0,0,0.12)", borderWidth: 1 },
+      },
+    ],
+  });
+}

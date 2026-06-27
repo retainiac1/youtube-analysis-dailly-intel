@@ -107,6 +107,24 @@ export function getDistribution(runDate, lane) {
   return getJSON(`/api/distribution?${qs}`);
 }
 
+// --- Dashboard tab: lane-scoped, period-aggregated reads ---------------------
+// start_date/end_date go in the filters arg so buildQuery drops them when null
+// (all time), exactly like getRankHistory.
+export function getDashboardTopicMix(lane, startDate, endDate) {
+  const qs = buildQuery({ lane }, { start_date: startDate, end_date: endDate });
+  return getJSON(`/api/dashboard/topic-mix?${qs}`);
+}
+
+export function getDashboardBreakout(lane, startDate, endDate) {
+  const qs = buildQuery({ lane }, { start_date: startDate, end_date: endDate });
+  return getJSON(`/api/dashboard/breakout?${qs}`);
+}
+
+export function getDashboardFormat(lane, startDate, endDate) {
+  const qs = buildQuery({ lane }, { start_date: startDate, end_date: endDate });
+  return getJSON(`/api/dashboard/format?${qs}`);
+}
+
 // --- Phase B: read-only interpretation --------------------------------------
 
 // scope IS the lane bucket (health / habit / overall), an identity mapping. The
