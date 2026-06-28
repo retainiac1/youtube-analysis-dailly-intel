@@ -346,7 +346,8 @@ export function renderTrajectory(el, payload, lane) {
 const DOW_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 // Horizontal bar from [{label, count}], coloured by the active lane. Used for the
-// sub-niche / category / topic / ratio-band / duration charts (data is pre-ordered).
+// sub-niche / category / topic / ratio-band charts (data is pre-ordered). Every call
+// site passes a VIDEO COUNT as the value, so the x-axis is named "videos".
 export function renderBars(el, items, lane) {
   if (!items || !items.length) {
     showEmpty(el, "No data for this window.");
@@ -358,10 +359,14 @@ export function renderBars(el, items, lane) {
   inst.setOption({
     animation: !prefersReducedMotion,
     tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
-    grid: { left: 8, right: 24, top: 12, bottom: 24, containLabel: true },
+    grid: { left: 8, right: 24, top: 12, bottom: 40, containLabel: true },
     xAxis: {
       type: "value",
       minInterval: 1,
+      name: "videos",
+      nameLocation: "middle",
+      nameGap: 28,
+      nameTextStyle: { color: t.textStyle.color },
       axisLine: { lineStyle: { color: t.axisLine } },
       axisLabel: { color: t.textStyle.color },
       splitLine: { lineStyle: { color: t.splitLine } },
@@ -377,6 +382,58 @@ export function renderBars(el, items, lane) {
       {
         type: "bar",
         data: items.map((d) => d.count),
+        itemStyle: { color, borderRadius: [0, 4, 4, 0] },
+      },
+    ],
+  });
+}
+
+// Top breakout videos as bars whose LENGTH is the views-to-subs ratio (the metric),
+// biggest on top. rows are leaderboard rows (already sorted DESC by ratio).
+export function renderTopRatio(el, rows, lane) {
+  const data = (rows || []).filter((r) => r && r.views_to_subs_ratio != null);
+  if (!data.length) {
+    showEmpty(el, "No data for this window.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  const color = LANE_COLORS[lane] || LANE_COLORS.health;
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      formatter: (params) => {
+        const r = data[params[0].dataIndex];
+        return (
+          `<strong>${escapeHtml(truncate(r.title || r.video_id, 50))}</strong><br/>` +
+          `${Number(r.views_to_subs_ratio).toFixed(1)}x views per subscriber`
+        );
+      },
+    },
+    grid: { left: 8, right: 24, top: 12, bottom: 40, containLabel: true },
+    xAxis: {
+      type: "value",
+      name: "views per subscriber",
+      nameLocation: "middle",
+      nameGap: 28,
+      nameTextStyle: { color: t.textStyle.color },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color, formatter: (v) => `${v}x` },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    yAxis: {
+      type: "category",
+      inverse: true, // biggest ratio on top
+      data: data.map((r) => truncate(r.title || r.video_id, 24)),
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+    },
+    series: [
+      {
+        type: "bar",
+        data: data.map((r) => Number(r.views_to_subs_ratio)),
         itemStyle: { color, borderRadius: [0, 4, 4, 0] },
       },
     ],

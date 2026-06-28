@@ -525,8 +525,6 @@ html { scroll-padding-top: var(--header-h, 0px); }
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 1rem;
 }
-/* A short 4-bar chart (ratio bands) capped so it does not full-bleed into a thin strip. */
-.dash-bands { max-width: 560px; }
 .dashboard-statcard {
   padding: 1rem;
   background: var(--bg-elevated);

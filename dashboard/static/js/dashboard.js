@@ -15,6 +15,9 @@ const SECTIONS = [
 const DEFAULT_SECTION = "topic-mix";
 const SURVIVORSHIP_NOTE =
   "Best among caught, not best on YouTube. Conditioned on clearing the capture view bar.";
+// How many top videos the breakouts bar chart shows. Kept small so each title-labeled
+// bar fits the default .chart-mount height legibly; the leaderboard table lists the full set.
+const TOP_BREAKOUTS = 10;
 
 const intFmt = new Intl.NumberFormat();
 
@@ -174,6 +177,7 @@ function renderTopicMix(data) {
 
 function renderBreakout(data) {
   const bands = chartCard("Views-to-subs ratio bands");
+  const ratio = chartCard("Top breakouts (views-to-subs)");
   const lb = el("section", { class: "glass-panel chart-card dashboard-leaderboard" }, [
     el("h3", { class: "heading-sm", text: "Breakout leaderboard" }),
     leaderboardTable(data.leaderboard || []),
@@ -181,9 +185,12 @@ function renderBreakout(data) {
   if (data.survivorship_note) {
     lb.appendChild(el("p", { class: "dashboard-caveat", text: SURVIVORSHIP_NOTE }));
   }
-  bands.card.classList.add("dash-bands"); // short 4-bar chart: cap width, do not full-bleed
-  panelEl.replaceChildren(bands.card, lb); // bands (capped) then full-width leaderboard
+  panelEl.replaceChildren(
+    el("div", { class: "dash-2col" }, [bands.card, ratio.card]), // counts | the ratio
+    lb // full-width leaderboard below
+  );
   charts.renderBars(bands.chart, data.band_counts, laneNow());
+  charts.renderTopRatio(ratio.chart, (data.leaderboard || []).slice(0, TOP_BREAKOUTS), laneNow());
 }
 
 function leaderboardTable(rows) {
