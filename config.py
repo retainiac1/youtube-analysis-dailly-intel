@@ -24,6 +24,12 @@ DEFAULT_WINDOW_DAYS = 3
 # videos are exempt. Positive int; do not go below 21.
 DEFAULT_REFRESH_MAX_AGE_DAYS = 30
 DEFAULT_TOP_N = 20
+# Cap on how many videos each Lifecycle dashboard line cohort draws. Two DISJOINT
+# cohorts share this single size: the growth / ratio charts take the top N by view
+# velocity (fastest views/day), the rank-drift bump takes the top N by best rank in
+# the window. Kept small so the legend-less bump and the scroll-legend line charts
+# stay legible. Positive int.
+DEFAULT_LIFECYCLE_COHORT_SIZE = 6
 DEFAULT_SHORT_MAX_SECONDS = 180
 DEFAULT_SEARCH_RELEVANCE_LANGUAGE = "en"
 DEFAULT_DAILY_QUOTA_LIMIT = 10000
@@ -258,6 +264,7 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "WINDOW_DAYS": DEFAULT_WINDOW_DAYS,
     "REFRESH_MAX_AGE_DAYS": DEFAULT_REFRESH_MAX_AGE_DAYS,
     "TOP_N": DEFAULT_TOP_N,
+    "LIFECYCLE_COHORT_SIZE": DEFAULT_LIFECYCLE_COHORT_SIZE,
     "SHORT_MAX_SECONDS": DEFAULT_SHORT_MAX_SECONDS,
     "SEARCH_RELEVANCE_LANGUAGE": DEFAULT_SEARCH_RELEVANCE_LANGUAGE,
     "DAILY_QUOTA_LIMIT": DEFAULT_DAILY_QUOTA_LIMIT,
@@ -356,6 +363,7 @@ MIN_VIEWS = _settings["MIN_VIEWS"]
 WINDOW_DAYS = _settings["WINDOW_DAYS"]
 REFRESH_MAX_AGE_DAYS = _settings["REFRESH_MAX_AGE_DAYS"]
 TOP_N = _settings["TOP_N"]
+LIFECYCLE_COHORT_SIZE = _settings["LIFECYCLE_COHORT_SIZE"]
 SHORT_MAX_SECONDS = _settings["SHORT_MAX_SECONDS"]
 SEARCH_RELEVANCE_LANGUAGE = _settings["SEARCH_RELEVANCE_LANGUAGE"]
 DAILY_QUOTA_LIMIT = _settings["DAILY_QUOTA_LIMIT"]
@@ -587,6 +595,7 @@ REQUIRED_KEYS: dict[str, type] = {
     "WINDOW_DAYS": int,
     "REFRESH_MAX_AGE_DAYS": int,
     "TOP_N": int,
+    "LIFECYCLE_COHORT_SIZE": int,
     "DAILY_QUOTA_LIMIT": int,
     "SAFETY_BUFFER": int,
     "QUOTA_RESET_TZ": str,
@@ -612,7 +621,8 @@ REQUIRED_KEYS: dict[str, type] = {
 
 # Keys that must be strictly positive ints (type is checked via REQUIRED_KEYS).
 POSITIVE_INT_KEYS: frozenset[str] = frozenset(
-    {"MIN_VIEWS", "WINDOW_DAYS", "REFRESH_MAX_AGE_DAYS", "TOP_N", "SHORT_MAX_SECONDS",
+    {"MIN_VIEWS", "WINDOW_DAYS", "REFRESH_MAX_AGE_DAYS", "TOP_N",
+     "LIFECYCLE_COHORT_SIZE", "SHORT_MAX_SECONDS",
      "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER", "OLLAMA_TIMEOUT_SECONDS",
      "DEFAULT_MAX_TOKENS", "DEFAULT_MAX_TOKENS_REASONING", "MAX_TOKENS_UPPER_BOUND",
      "EXTRACT_RUN_TIMEOUT_SECONDS", "EXTRACT_TERMINATE_GRACE_SECONDS",

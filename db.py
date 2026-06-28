@@ -2337,3 +2337,285 @@ def fetch_dashboard_format(
         "like_comment_pairs": like_comment_pairs,
         "publish_heatmap": publish_heatmap,
     }
+
+
+# --- Dashboard Lifecycle tab: time-series read helpers ------------------------
+# Lifecycle reads the existing rankings + stats_snapshots history (no schema
+# change). Every captured_at / published_at is ordered or differenced via
+# _parse_instant, NEVER by lexical string math (offset-bearing Eastern timestamps
+# misorder lexically across offset/DST shifts); run_date stays a lexical date key.
+
+
+def _median(values: list):
+    """Median of a numeric list, or None when empty (statistics.median raises on
+    empty; the Lifecycle KPI strip needs a clean None for an empty lane+window)."""
+    nums = sorted(v for v in values if v is not None)
+    n = len(nums)
+    if n == 0:
+        return None
+    mid = n // 2
+    if n % 2:
+        return nums[mid]
+    return (nums[mid - 1] + nums[mid]) / 2
+
+
+def _latest_velocity(points: list):
+    """The most-recent views/day for a snapshot list (the velocity of the LAST
+    consecutive pair), or None when fewer than two usable snapshots. Orders by
+    _parse_instant (never a lexical captured_at sort) and reuses _velocity_points,
+    so the selector value equals the growth chart's last dashed-line point."""
+    ordered = sorted(
+        (p for p in points if _parse_instant(p["captured_at"]) is not None),
+        key=lambda p: _parse_instant(p["captured_at"]),
+    )
+    vp = _velocity_points(ordered)
+    return vp[-1]["views_per_day"] if vp else None
+
+
+def _lifecycle_velocity_cohort(
+    conn: sqlite3.Connection,
+    bucket: str,
+    start_date: str | None,
+    end_date: str | None,
+    cap: int,
+) -> list[str]:
+    """The top `cap` video_ids by latest views/day for the lane+window set, ranked
+    DESC by velocity and tie-broken by video_id. Bounded: the candidate set is
+    filtered via the rankings subquery (NO per-id IN), so it never grows the SQL
+    variable count. Instant-correct: there is deliberately NO `ORDER BY captured_at`
+    (a string sort would misorder offset/DST-varying timestamps); ordering and the
+    views/day delta happen in Python via _parse_instant / _velocity_points. A video
+    with fewer than two usable snapshots has no velocity and is excluded."""
+    where = ["r.bucket = :bucket"]
+    params: dict = {"bucket": bucket}
+    if start_date:
+        where.append("r.run_date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where.append("r.run_date <= :end_date")
+        params["end_date"] = end_date
+    rows = conn.execute(
+        f"""
+        SELECT s.video_id, s.captured_at, s.view_count
+        FROM stats_snapshots s
+        WHERE s.video_id IN (
+            SELECT DISTINCT r.video_id
+            FROM rankings r
+            WHERE {" AND ".join(where)}
+        )
+        """,
+        params,
+    ).fetchall()
+    by_video: dict[str, list] = {}
+    for row in rows:
+        by_video.setdefault(row["video_id"], []).append(
+            {"captured_at": row["captured_at"], "view_count": row["view_count"]}
+        )
+    scored = []
+    for vid, pts in by_video.items():
+        v = _latest_velocity(pts)
+        if v is not None:
+            scored.append((v, vid))
+    scored.sort(key=lambda t: (-t[0], t[1]))  # velocity DESC, video_id ASC
+    return [vid for _, vid in scored[:cap]]
+
+
+def _lifecycle_maturation(
+    conn: sqlite3.Connection,
+    bucket: str,
+    start_date: str | None,
+    end_date: str | None,
+) -> list:
+    """Current-state engagement-vs-age cross-section over the FULL lane+window set:
+    one point per in-window video, its ABSOLUTE-LATEST snapshot (NOT bounded to
+    end_date, so this is current state, not as-of-window) versus its published_at.
+    Bounded via the rankings subquery (no per-id IN). The latest snapshot is picked
+    in Python by _parse_instant, NOT by SQL MAX(captured_at): a SQL string max
+    misorders offset/DST-varying captured_at, the same lexical trap the velocity
+    selector avoids. days_since_publish is Eastern-correct via _parse_instant; an
+    unparseable published_at or a negative age is skipped. ratio is None when
+    comment_count <= 0 (the zero-comment guard), but the point still carries
+    like/comment/view for the other axes."""
+    where = ["r.bucket = :bucket"]
+    params: dict = {"bucket": bucket}
+    if start_date:
+        where.append("r.run_date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where.append("r.run_date <= :end_date")
+        params["end_date"] = end_date
+    rows = conn.execute(
+        f"""
+        SELECT s.video_id, s.captured_at, s.view_count, s.like_count,
+               s.comment_count, v.published_at
+        FROM stats_snapshots s
+        JOIN videos v ON v.video_id = s.video_id
+        WHERE s.video_id IN (
+            SELECT DISTINCT r.video_id
+            FROM rankings r
+            WHERE {" AND ".join(where)}
+        )
+        """,
+        params,
+    ).fetchall()
+    # Pick each video's latest snapshot by instant (NOT lexical captured_at).
+    latest: dict[str, dict] = {}
+    for row in rows:
+        ts = _parse_instant(row["captured_at"])
+        if ts is None:
+            continue
+        cur = latest.get(row["video_id"])
+        if cur is None or ts > cur["ts"]:
+            latest[row["video_id"]] = {"ts": ts, "row": row}
+    out = []
+    for rec in latest.values():
+        row = rec["row"]
+        pub = _parse_instant(row["published_at"])
+        if pub is None:
+            continue
+        days = (rec["ts"] - pub).total_seconds() / 86400
+        if days < 0:
+            continue
+        cc = row["comment_count"]
+        lc = row["like_count"]
+        ratio = lc / cc if cc and cc > 0 and lc is not None else None
+        out.append(
+            {
+                "days_since_publish": days,
+                "ratio": ratio,
+                "like_count": lc,
+                "comment_count": cc,
+                "view_count": row["view_count"],
+            }
+        )
+    return out
+
+
+def fetch_dashboard_lifecycle(
+    conn: sqlite3.Connection,
+    bucket: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """Lifecycle tab payload for one lane over [start_date, end_date], read-only.
+
+    Returns {run_count, summary, growth, survivorship, engagement}, all from the
+    existing rankings + stats_snapshots history (no schema change):
+
+    - growth.series and engagement.ratio_series cover the VELOCITY cohort: the top
+      config.LIFECYCLE_COHORT_SIZE videos by latest views/day (fastest growing).
+    - survivorship.rank_history covers a DISJOINT cohort: the top
+      config.LIFECYCLE_COHORT_SIZE by best (min) rank in the window. The two
+      cohorts differ by design; the UI labels them distinctly.
+    - survivorship.runs_ranked counts the runs each video APPEARED in the lane (a
+      gap run still counts), so it is appearances, NOT an unbroken survival streak.
+    - engagement.maturation is a CURRENT-STATE cross-section: each in-window
+      video's absolute-latest snapshot (not bounded to end_date) versus its
+      published_at.
+
+    run_date bounds are lexical date-key compares; every snapshot timestamp is
+    ordered/differenced via _parse_instant, never by string math. An empty
+    lane+window returns run_count 0, empty lists, and None medians; never raises."""
+    cap = config.LIFECYCLE_COHORT_SIZE
+
+    # Spine: rank history drives run_count, survivorship, and the bump cohort.
+    rh = fetch_rank_history(conn, bucket, None, start_date, end_date)
+    rank_series = rh["series"]
+    run_dates = rh["run_dates"]
+    run_count = len(run_dates)
+
+    # runs_ranked: how many runs each video appeared in (one point per run ranked).
+    counts: dict[int, int] = {}
+    for s in rank_series:
+        k = len(s["points"])
+        counts[k] = counts.get(k, 0) + 1
+    runs_ranked = [{"label": f"{k} run(s)", "count": counts[k]} for k in sorted(counts)]
+
+    # churn: entered / exited / retained between consecutive runs.
+    present_by_run: dict[str, set] = {rd: set() for rd in run_dates}
+    for s in rank_series:
+        for p in s["points"]:
+            present_by_run[p["run_date"]].add(s["video_id"])
+    churn = []
+    prev = None
+    for rd in run_dates:
+        cur = present_by_run[rd]
+        if prev is None:
+            churn.append({"run_date": rd, "entered": len(cur), "exited": 0, "retained": 0})
+        else:
+            churn.append(
+                {
+                    "run_date": rd,
+                    "entered": len(cur - prev),
+                    "exited": len(prev - cur),
+                    "retained": len(cur & prev),
+                }
+            )
+        prev = cur
+
+    # Bump cohort: top `cap` by best (min) rank in window, tie-broken by video_id.
+    def _best_rank(s):
+        ranks = [p["rank"] for p in s["points"] if p["rank"] is not None]
+        return min(ranks) if ranks else float("inf")
+
+    bump_cohort = sorted(rank_series, key=lambda s: (_best_rank(s), s["video_id"]))[:cap]
+    rank_history = {"run_dates": run_dates, "series": bump_cohort}
+
+    # Velocity cohort: top `cap` by latest views/day; fetch their full series.
+    velocity_cohort_ids = _lifecycle_velocity_cohort(conn, bucket, start_date, end_date, cap)
+    series_by_id = fetch_snapshot_series(conn, velocity_cohort_ids)
+    growth_series = []
+    ratio_series = []
+    for vid in velocity_cohort_ids:  # preserve velocity ranking order
+        entry = series_by_id.get(vid)
+        if entry is None:
+            continue
+        pts = entry["points"]
+        growth_series.append(
+            {
+                "video_id": vid,
+                "title": entry["title"],
+                "points": [
+                    {"captured_at": p["captured_at"], "view_count": p["view_count"]}
+                    for p in pts
+                ],
+                "velocity": _velocity_points(pts),
+            }
+        )
+        ratio_pts = [
+            {
+                "captured_at": p["captured_at"],
+                "like_count": p["like_count"],
+                "comment_count": p["comment_count"],
+                "ratio": p["like_count"] / p["comment_count"],
+            }
+            for p in pts
+            if p["comment_count"] and p["comment_count"] > 0 and p["like_count"] is not None
+        ]
+        if ratio_pts:
+            ratio_series.append({"video_id": vid, "title": entry["title"], "points": ratio_pts})
+
+    maturation = _lifecycle_maturation(conn, bucket, start_date, end_date)
+
+    # KPI strip: two honest full-set medians (no velocity KPI: it would be over the
+    # cohort only and misread as lane-wide). runs_ranked median is from the raw
+    # per-series point counts, not by parsing the "{k} run(s)" labels.
+    summary = {
+        "median_runs_ranked": _median([len(s["points"]) for s in rank_series]),
+        "median_days_since_publish": _median([m["days_since_publish"] for m in maturation]),
+    }
+
+    return {
+        "run_count": run_count,
+        "summary": summary,
+        "growth": {"series": growth_series},
+        "survivorship": {
+            "runs_ranked": runs_ranked,
+            "churn": churn,
+            "rank_history": rank_history,
+        },
+        "engagement": {
+            "ratio_series": ratio_series,
+            "maturation": maturation,
+        },
+    }
