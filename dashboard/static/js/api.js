@@ -125,6 +125,11 @@ export function getDashboardFormat(lane, startDate, endDate) {
   return getJSON(`/api/dashboard/format?${qs}`);
 }
 
+export function getDashboardLifecycle(lane, startDate, endDate) {
+  const qs = buildQuery({ lane }, { start_date: startDate, end_date: endDate });
+  return getJSON(`/api/dashboard/lifecycle?${qs}`);
+}
+
 // --- Phase B: read-only interpretation --------------------------------------
 
 // scope IS the lane bucket (health / habit / overall), an identity mapping. The

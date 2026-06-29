@@ -518,6 +518,16 @@ html { scroll-padding-top: var(--header-h, 0px); }
   gap: 1.5rem;
   align-items: stretch;
 }
+/* A labeled Lifecycle group: heading-md title stacked above its chart cards/rows,
+   each spaced like the panel's own children. The group itself is one panel child,
+   so the panel's 1.5rem gap separates groups. */
+.dashboard-lifecycle-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+.dashboard-lifecycle-group > .heading-md { margin: 0; }
+
 /* The 4 title-anatomy numbers as a labeled KPI strip, wrapping gracefully. */
 .dash-kpi-heading { margin: 0 0 0.85rem; }
 .dash-kpis {

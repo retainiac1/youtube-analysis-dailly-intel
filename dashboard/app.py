@@ -463,6 +463,23 @@ def api_dashboard_format(
     return {"lane": lane, **data}
 
 
+@app.get("/api/dashboard/lifecycle")
+def api_dashboard_lifecycle(
+    lane: str = Query(..., min_length=1),
+    start_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Growth/velocity, survivorship, and engagement time-series for one lane over
+    the window, from the rankings + stats_snapshots history. Same lane/bounds as
+    topic-mix; empty lane+window returns run_count 0 with empty series."""
+    bucket = _lane_to_bucket(lane)
+    data = db.run_with_db_retry(
+        lambda: db.fetch_dashboard_lifecycle(conn, bucket, start_date, end_date)
+    )
+    return {"lane": lane, **data}
+
+
 @app.get("/api/distribution")
 def api_distribution(
     run_date: str = Query(..., min_length=1),

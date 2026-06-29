@@ -111,16 +111,13 @@ function fetchSection(section, s) {
   if (section === "topic-mix") return api.getDashboardTopicMix(s.lane, s.startDate, s.endDate);
   if (section === "breakout") return api.getDashboardBreakout(s.lane, s.startDate, s.endDate);
   if (section === "format") return api.getDashboardFormat(s.lane, s.startDate, s.endDate);
+  if (section === "lifecycle") return api.getDashboardLifecycle(s.lane, s.startDate, s.endDate);
   return Promise.resolve(null);
 }
 
 async function renderActive() {
   if (!built || !lastState) return;
   const section = activeSection;
-  if (section === "lifecycle") {
-    renderLifecycle();
-    return;
-  }
   const s = lastState;
   if (!cache[section]) {
     panelEl.replaceChildren(el("p", { class: "dashboard-status", text: "Loading..." }));
@@ -160,6 +157,7 @@ function renderSection(section, data) {
   if (section === "topic-mix") renderTopicMix(data);
   else if (section === "breakout") renderBreakout(data);
   else if (section === "format") renderFormat(data);
+  else if (section === "lifecycle") renderLifecycle(data);
 }
 
 function renderTopicMix(data) {
@@ -251,24 +249,101 @@ function titleStatsStrip(s) {
   ]);
 }
 
-function renderLifecycle() {
+// The 3 lifecycle summary numbers as a compact KPI strip (mirrors titleStatsStrip).
+// Null medians (empty lane+window) render as a dash, never "NaN" or "0".
+function lifecycleKpiStrip(data) {
+  const s = data.summary || {};
+  const num = (v, digits) => (v == null ? "—" : Number(v).toFixed(digits));
+  const cards = [
+    ["Runs in window", String(data.run_count ?? 0)],
+    ["Median runs ranked", num(s.median_runs_ranked, 0)],
+    ["Median age (days)", num(s.median_days_since_publish, 1)],
+  ];
+  return el("section", { class: "dash-kpi-section" }, [
+    el("h3", { class: "heading-sm dash-kpi-heading", text: "Lifecycle summary" }),
+    el(
+      "div",
+      { class: "dash-kpis" },
+      cards.map(([label, value]) =>
+        el("div", { class: "stat dashboard-statcard" }, [
+          el("span", { class: "stat-value", text: value }),
+          el("span", { class: "stat-label", text: label }),
+        ])
+      )
+    ),
+  ]);
+}
+
+// A labeled lifecycle group: a heading-md title above its chart cards.
+function lifecycleGroup(title, children) {
+  return el("section", { class: "dashboard-lifecycle-group" }, [
+    el("h2", { class: "heading-md", text: title }),
+    ...children,
+  ]);
+}
+
+function renderLifecycle(data) {
+  if (!data) return;
+  // Single-run guard: lifecycle charts need movement across runs. The default
+  // "Latest run" window is one run, which would draw six degenerate/empty charts.
+  if ((data.run_count || 0) < 2) {
+    panelEl.replaceChildren(
+      el("section", { class: "glass-panel chart-card dashboard-lifecycle" }, [
+        el("h3", { class: "heading-sm", text: "Lifecycle" }),
+        el("p", {
+          class: "dashboard-status",
+          text: "Select a wider period to see lifecycle trends across runs.",
+        }),
+      ])
+    );
+    return;
+  }
+
+  const lane = laneNow();
+  const surv = data.survivorship || {};
+  const eng = data.engagement || {};
+
+  const growth = chartCard("Growth & velocity (fastest-growing)");
+  const bump = chartCard("Rank movement (best-ranked)");
+  const churn = chartCard("Roster churn");
+  const appearances = chartCard("Appearances distribution");
+  const ratio = chartCard("Like:comment ratio over time (fastest-growing)");
+  const maturation = chartCard("Engagement vs age");
+
   panelEl.replaceChildren(
-    el("section", { class: "glass-panel chart-card dashboard-lifecycle" }, [
-      el("h3", { class: "heading-sm", text: "Lifecycle" }),
-      el("p", {
-        class: "dashboard-status",
-        text:
-          "These charts require daily snapshot history from the pipeline. They will " +
-          "populate as runs accumulate.",
-      }),
+    lifecycleKpiStrip(data),
+    lifecycleGroup("Growth", [growth.card]),
+    lifecycleGroup("Survivorship", [
+      el("div", { class: "dash-2col" }, [bump.card, churn.card]),
+      appearances.card,
+      el("p", { class: "dashboard-caveat", text: SURVIVORSHIP_NOTE }),
+    ]),
+    lifecycleGroup("Engagement", [
+      el("div", { class: "dash-2col" }, [ratio.card, maturation.card]),
     ])
   );
+
+  // Charts render after the mounts are in the DOM (ECharts needs real geometry).
+  const hasGrowth = data.growth && data.growth.series && data.growth.series.length;
+  if (hasGrowth) {
+    charts.renderTrajectory(growth.chart, data.growth, lane);
+  } else {
+    // renderTrajectory's empty copy is Board-specific ("Track from the Board..."),
+    // wrong here, so use a lifecycle-appropriate empty state instead.
+    growth.chart.classList.add("chart-empty");
+    growth.chart.textContent =
+      "Growth curves appear once cohort videos have views across multiple runs.";
+  }
+  charts.renderBump(bump.chart, surv.rank_history || {}, lane);
+  charts.renderChurn(churn.chart, surv.churn || [], lane);
+  charts.renderBars(appearances.chart, surv.runs_ranked || [], lane);
+  charts.renderRatioLines(ratio.chart, eng.ratio_series || [], lane);
+  charts.renderMaturation(maturation.chart, eng.maturation || [], lane);
 }
 
 // Theme toggle: redraw only the active sub-tab's charts from cache (no refetch). Safe
-// no-op for Lifecycle (no chart) and for any sub-tab not yet fetched.
+// no-op for any sub-tab not yet fetched.
 export function rerenderFromCache() {
   if (!built || !lastState) return;
-  if (activeSection === "lifecycle") return;
   if (cache[activeSection]) renderSection(activeSection, cache[activeSection]);
 }

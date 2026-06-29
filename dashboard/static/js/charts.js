@@ -34,6 +34,11 @@ function paletteColor(slot) {
 }
 
 const intFmt = new Intl.NumberFormat();
+// Compact axis labels (1.2M, 600K) so a wide value range never clips the grid edge.
+const compactFmt = new Intl.NumberFormat(undefined, {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
 
 function truncate(s, n) {
   const str = s == null ? "" : String(s);
@@ -313,7 +318,10 @@ export function renderTrajectory(el, payload, lane) {
       // truncate only the legend label.
       formatter: (name) => truncate(name, 40),
     },
-    grid: { ...baseGrid, right: 56, top: 36 },
+    // top:48 clears the scroll legend; containLabel + compact labels keep the
+    // (possibly 6-digit) value labels inside the grid. Axis names sit vertically
+    // mid-axis (nameLocation:"middle") so they never collide with the top legend.
+    grid: { left: 64, right: 64, top: 48, bottom: 40 },
     xAxis: {
       type: "time",
       axisLine: { lineStyle: { color: t.axisLine } },
@@ -323,15 +331,22 @@ export function renderTrajectory(el, payload, lane) {
       {
         type: "value",
         name: "views",
+        nameLocation: "middle",
+        nameGap: 48,
+        nameTextStyle: { color: t.textStyle.color },
         axisLine: { lineStyle: { color: t.axisLine } },
-        axisLabel: { color: t.textStyle.color },
+        axisLabel: { color: t.textStyle.color, formatter: (v) => compactFmt.format(v) },
         splitLine: { lineStyle: { color: t.splitLine } },
       },
       {
         type: "value",
         name: "views/day",
+        nameLocation: "middle",
+        nameGap: 48,
+        nameRotate: -90,
+        nameTextStyle: { color: t.textStyle.color },
         axisLine: { lineStyle: { color: t.axisLine } },
-        axisLabel: { color: t.textStyle.color },
+        axisLabel: { color: t.textStyle.color, formatter: (v) => compactFmt.format(v) },
         splitLine: { show: false },
       },
     ],
@@ -613,6 +628,182 @@ export function renderDurationHistogram(el, durations, lane) {
         data: counts,
         barWidth: "98%", // touch into a continuous histogram (category band percent)
         itemStyle: { color, borderRadius: [3, 3, 0, 0] },
+      },
+    ],
+  });
+}
+
+// --- Lifecycle: roster churn (diverging) -------------------------------------
+// entered rises ABOVE the axis in the lane colour; exited drops BELOW it in the
+// reserved RED (the negative-signal convention). The two share one x position via
+// a stack, so each run reads as a single up/down column, not a grouped pair.
+// `retained` is deliberately NOT a bar (a third positive segment would drown out
+// the entered-vs-exited direction that is the whole point): it lives in the
+// tooltip only. The y-axis labels show absolute counts so the downward side reads
+// as a real video count, with direction carried by colour + legend.
+export function renderChurn(el, rows, lane) {
+  if (!rows || !rows.length) {
+    showEmpty(el, "No data for this window.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  const color = LANE_COLORS[lane] || LANE_COLORS.health;
+
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      formatter: (params) => {
+        const r = rows[params[0].dataIndex];
+        return (
+          `<strong>${escapeHtml(r.run_date)}</strong><br/>` +
+          `entered ${intFmt.format(r.entered)}<br/>` +
+          `exited ${intFmt.format(r.exited)}<br/>` +
+          `retained ${intFmt.format(r.retained)}`
+        );
+      },
+    },
+    legend: { data: ["entered", "exited"], textStyle: { color: t.textStyle.color }, top: 0 },
+    grid: { ...baseGrid, top: 36 },
+    ...axes(t, {
+      xAxis: { type: "category", data: rows.map((r) => r.run_date) },
+      yAxis: {
+        type: "value",
+        name: "videos",
+        axisLabel: { color: t.textStyle.color, formatter: (v) => Math.abs(v) },
+      },
+    }),
+    series: [
+      {
+        name: "entered",
+        type: "bar",
+        stack: "churn",
+        data: rows.map((r) => r.entered),
+        itemStyle: { color, borderRadius: [3, 3, 0, 0] },
+      },
+      {
+        name: "exited",
+        type: "bar",
+        stack: "churn",
+        data: rows.map((r) => -r.exited), // negative: draws below the axis in RED
+        itemStyle: { color: RED, borderRadius: [0, 0, 3, 3] },
+      },
+    ],
+  });
+}
+
+// --- Lifecycle: like:comment ratio over time ---------------------------------
+// Multi-line, modelled on the trajectory's line/legend structure but with a
+// SINGLE "ratio" y-axis (trajectory's second views/day axis is wrong here). Stable
+// per-video colour so a line keeps its colour as the cohort shifts run to run.
+let ratioSlots = {};
+
+export function renderRatioLines(el, series, lane) {
+  const withData = (series || []).filter((s) => s.points && s.points.length);
+  if (!withData.length) {
+    showEmpty(el, "No like-to-comment history for this window yet.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  ratioSlots = allocateSlots(withData.map((s) => s.video_id), ratioSlots);
+
+  const lines = withData.map((s) => {
+    const color = paletteColor(ratioSlots[s.video_id]);
+    return {
+      name: s.title || s.video_id,
+      type: "line",
+      showSymbol: true,
+      symbolSize: 6,
+      itemStyle: { color },
+      lineStyle: { color },
+      data: s.points.map((p) => [p.captured_at, p.ratio]),
+    };
+  });
+
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: { trigger: "axis" },
+    legend: {
+      textStyle: { color: t.textStyle.color },
+      top: 0,
+      type: "scroll",
+      formatter: (name) => truncate(name, 40),
+    },
+    grid: { ...baseGrid, top: 36 },
+    xAxis: {
+      type: "time",
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+    },
+    yAxis: {
+      type: "value",
+      name: "like:comment ratio",
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    series: lines,
+  });
+}
+
+// --- Lifecycle: engagement maturation (ratio vs age, sized by views) ----------
+// Current-state cross-section: one dot per in-window video, x = age in days,
+// y = like:comment ratio, dot size scaled from view_count. Null-ratio points (the
+// zero-comment guard upstream) are dropped. Size uses a sqrt scale clamped to a
+// visible floor so a missing/zero view_count still draws a small dot, never a
+// zero-size point and never NaN.
+export function renderMaturation(el, points, lane) {
+  const pts = (points || []).filter((p) => p.ratio != null);
+  if (!pts.length) {
+    showEmpty(el, "No data for this window.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  const color = LANE_COLORS[lane] || LANE_COLORS.health;
+
+  const size = (v) => {
+    const n = typeof v === "number" && v > 0 ? v : 0;
+    return Math.max(6, Math.min(40, Math.sqrt(n) / 30));
+  };
+
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: {
+      trigger: "item",
+      formatter: (p) =>
+        `${p.value[0].toFixed(1)} days old<br/>` +
+        `ratio ${p.value[1].toFixed(1)}<br/>` +
+        `views ${intFmt.format(p.value[2])}`,
+    },
+    grid: { left: 8, right: 24, top: 16, bottom: 36, containLabel: true },
+    xAxis: {
+      type: "value",
+      name: "days since publish",
+      nameLocation: "middle",
+      nameGap: 28,
+      nameTextStyle: { color: t.textStyle.color },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    yAxis: {
+      type: "value",
+      name: "like:comment ratio",
+      nameTextStyle: { color: t.textStyle.color },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    series: [
+      {
+        type: "scatter",
+        symbolSize: (val) => size(val[2]),
+        itemStyle: { color, opacity: 0.7 },
+        data: pts.map((p) => [p.days_since_publish, p.ratio, p.view_count]),
       },
     ],
   });
