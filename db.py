@@ -1946,11 +1946,12 @@ def fetch_snapshot_series(
     conn: sqlite3.Connection, video_ids: list[str]
 ) -> dict[str, dict]:
     """Return per-video stats_snapshots time-series, keyed by video_id, each a dict
-    {"title": <videos.title or None>, "points": [{captured_at, view_count,
-    like_count, comment_count}, ...]} with points ascending by captured_at. The
-    title comes from a LEFT JOIN on videos (charts label series by title); a video
-    row always exists upstream when snapshots exist. The snapshot grain is one row
-    per (run_id, video_id), so a video seen once yields a single-point series and a
+    {"title": <videos.title or None>, "link": <videos.link or None>, "points":
+    [{captured_at, view_count, like_count, comment_count}, ...]} with points
+    ascending by captured_at. The title and link come from a LEFT JOIN on videos
+    (charts label series by title and link them to YouTube via link); a video row
+    always exists upstream when snapshots exist. The snapshot grain is one row per
+    (run_id, video_id), so a video seen once yields a single-point series and a
     never-snapshotted video is simply absent from the result (the caller
     normalizes). Snapshots are NOT lane-scoped. Empty video_ids returns {}."""
     if not video_ids:
@@ -1965,6 +1966,7 @@ def fetch_snapshot_series(
         f"""
         SELECT s.video_id,
                v.title,
+               v.link,
                s.captured_at,
                s.view_count,
                s.like_count,
@@ -1980,7 +1982,8 @@ def fetch_snapshot_series(
     series: dict[str, dict] = {}
     for row in rows:
         entry = series.setdefault(
-            row["video_id"], {"title": row["title"], "points": []}
+            row["video_id"],
+            {"title": row["title"], "link": row["link"], "points": []},
         )
         entry["points"].append(
             {
@@ -2372,20 +2375,40 @@ def _latest_velocity(points: list):
     return vp[-1]["views_per_day"] if vp else None
 
 
-def _lifecycle_velocity_cohort(
+# Tracked-lifespan distribution band edges, in DAYS (first-to-last snapshot span).
+# Coupled set: each label is the plain-words form of its [lo, hi) interval, so the
+# edges and labels move together and live in one place (no inline magic numbers).
+# Chosen against REFRESH_MAX_AGE_DAYS (30) with the ~daily snapshot grain; the last
+# band is open-ended (hi=None).
+LIFESPAN_BANDS = [
+    ("under 1", 0, 1),
+    ("1 to 3", 1, 3),
+    ("3 to 7", 3, 7),
+    ("7 to 14", 7, 14),
+    ("14 to 30", 14, 30),
+    ("30+", 30, None),
+]
+
+
+def _lifecycle_population_series(
     conn: sqlite3.Connection,
     bucket: str,
     start_date: str | None,
     end_date: str | None,
-    cap: int,
-) -> list[str]:
-    """The top `cap` video_ids by latest views/day for the lane+window set, ranked
-    DESC by velocity and tie-broken by video_id. Bounded: the candidate set is
-    filtered via the rankings subquery (NO per-id IN), so it never grows the SQL
-    variable count. Instant-correct: there is deliberately NO `ORDER BY captured_at`
-    (a string sort would misorder offset/DST-varying timestamps); ordering and the
-    views/day delta happen in Python via _parse_instant / _velocity_points. A video
-    with fewer than two usable snapshots has no velocity and is excluded."""
+) -> dict[str, list]:
+    """The FULL snapshot history of every lane+window population video, grouped by
+    video_id and instant-ordered ascending. This is the one bounded query that
+    feeds velocity-cohort selection, the summary medians, and the lifespan
+    distribution (no extra scan).
+
+    Population (WHICH videos) comes ONLY from the rankings membership subquery
+    (bounded; NO per-id IN, so the SQL variable count never grows). Depth (the
+    points) is each video's full stats_snapshots history, NOT gated to the runs it
+    was on the board: that is what gives real curves. Snapshots are not lane-scoped,
+    so membership must gate them. Ordering is by _parse_instant (never a lexical
+    captured_at sort, which misorders offset/DST-varying timestamps); a point with
+    an unparseable captured_at is dropped. A video ranked but never snapshotted is
+    simply absent (no depth to chart)."""
     where = ["r.bucket = :bucket"]
     params: dict = {"bucket": bucket}
     if start_date:
@@ -2408,9 +2431,21 @@ def _lifecycle_velocity_cohort(
     ).fetchall()
     by_video: dict[str, list] = {}
     for row in rows:
+        if _parse_instant(row["captured_at"]) is None:
+            continue
         by_video.setdefault(row["video_id"], []).append(
             {"captured_at": row["captured_at"], "view_count": row["view_count"]}
         )
+    for pts in by_video.values():
+        pts.sort(key=lambda p: _parse_instant(p["captured_at"]))
+    return by_video
+
+
+def _velocity_cohort_ids(by_video: dict[str, list], cap: int) -> list[str]:
+    """The top `cap` population video_ids by latest views/day, ranked DESC by
+    velocity and tie-broken by video_id. Reuses _latest_velocity / _velocity_points
+    so the selector value equals the growth chart's last velocity point. A video
+    with fewer than two usable snapshots has no velocity and is excluded."""
     scored = []
     for vid, pts in by_video.items():
         v = _latest_velocity(pts)
@@ -2418,6 +2453,71 @@ def _lifecycle_velocity_cohort(
             scored.append((v, vid))
     scored.sort(key=lambda t: (-t[0], t[1]))  # velocity DESC, video_id ASC
     return [vid for _, vid in scored[:cap]]
+
+
+def _lifecycle_summary(by_video: dict[str, list]) -> dict:
+    """Three medians describing how lane videos behave over their tracked life,
+    computed over the FULL population (not the chart cohort) from the one population
+    query. All deltas are instant-correct via _parse_instant / _velocity_points (no
+    second velocity definition).
+
+    - median_tracked_lifespan_days: last-minus-first snapshot, in days. Defined for
+      any video with >= 1 snapshot (a single-snapshot video is a real 0-day span).
+    - median_peak_velocity: each video's fastest day-over-day views/day. Needs >= 2
+      snapshots (a velocity pair); single-snapshot videos contribute none.
+    - median_total_view_growth: last-minus-first view_count. Needs >= 2 snapshots
+      (a baseline plus a later observation).
+
+    Empty population yields None for every median (the KPI strip renders 'n/a')."""
+    lifespans: list = []
+    peaks: list = []
+    growths: list = []
+    for pts in by_video.values():
+        if not pts:
+            continue
+        t0 = _parse_instant(pts[0]["captured_at"])
+        t1 = _parse_instant(pts[-1]["captured_at"])
+        if t0 is not None and t1 is not None:
+            lifespans.append((t1 - t0).total_seconds() / 86400)
+        if len(pts) >= 2:
+            vp = _velocity_points(pts)
+            if vp:
+                peaks.append(max(p["views_per_day"] for p in vp))
+            first_v = pts[0]["view_count"]
+            last_v = pts[-1]["view_count"]
+            if first_v is not None and last_v is not None:
+                growths.append(last_v - first_v)
+    return {
+        "median_tracked_lifespan_days": _median(lifespans),
+        "median_peak_velocity": _median(peaks),
+        "median_total_view_growth": _median(growths),
+    }
+
+
+def _lifecycle_lifespan_distribution(by_video: dict[str, list]) -> list:
+    """Histogram of tracked lifespan (first-to-last snapshot span, in DAYS) over the
+    full population, bucketed by LIFESPAN_BANDS. One bar per band, including empty
+    bands so the chart shape is stable. A real lifecycle distribution (how long a
+    video stays trackable), NOT the cut board-appearances metric. Lifespan is a span
+    so a single-snapshot video (0 days) lands in the lowest band; instant-correct
+    via _parse_instant."""
+    counts = [0] * len(LIFESPAN_BANDS)
+    for pts in by_video.values():
+        if not pts:
+            continue
+        t0 = _parse_instant(pts[0]["captured_at"])
+        t1 = _parse_instant(pts[-1]["captured_at"])
+        if t0 is None or t1 is None:
+            continue
+        days = (t1 - t0).total_seconds() / 86400
+        for i, (_label, lo, hi) in enumerate(LIFESPAN_BANDS):
+            if days >= lo and (hi is None or days < hi):
+                counts[i] += 1
+                break
+    return [
+        {"label": LIFESPAN_BANDS[i][0], "count": counts[i]}
+        for i in range(len(LIFESPAN_BANDS))
+    ]
 
 
 def _lifecycle_maturation(
@@ -2447,7 +2547,7 @@ def _lifecycle_maturation(
     rows = conn.execute(
         f"""
         SELECT s.video_id, s.captured_at, s.view_count, s.like_count,
-               s.comment_count, v.published_at
+               s.comment_count, v.published_at, v.title, v.link
         FROM stats_snapshots s
         JOIN videos v ON v.video_id = s.video_id
         WHERE s.video_id IN (
@@ -2481,6 +2581,9 @@ def _lifecycle_maturation(
         ratio = lc / cc if cc and cc > 0 and lc is not None else None
         out.append(
             {
+                "video_id": row["video_id"],
+                "title": row["title"],
+                "link": row["link"],
                 "days_since_publish": days,
                 "ratio": ratio,
                 "like_count": lc,
@@ -2499,70 +2602,62 @@ def fetch_dashboard_lifecycle(
 ) -> dict:
     """Lifecycle tab payload for one lane over [start_date, end_date], read-only.
 
-    Returns {run_count, summary, growth, survivorship, engagement}, all from the
-    existing rankings + stats_snapshots history (no schema change):
+    Driven by stats_snapshots (the real lifecycle substrate), with lane membership
+    from rankings. No schema change. The load-bearing rule is lane scoping:
 
-    - growth.series and engagement.ratio_series cover the VELOCITY cohort: the top
-      config.LIFECYCLE_COHORT_SIZE videos by latest views/day (fastest growing).
-    - survivorship.rank_history covers a DISJOINT cohort: the top
-      config.LIFECYCLE_COHORT_SIZE by best (min) rank in the window. The two
-      cohorts differ by design; the UI labels them distinctly.
-    - survivorship.runs_ranked counts the runs each video APPEARED in the lane (a
-      gap run still counts), so it is appearances, NOT an unbroken survival streak.
-    - engagement.maturation is a CURRENT-STATE cross-section: each in-window
-      video's absolute-latest snapshot (not bounded to end_date) versus its
-      published_at.
+    - Population (WHICH videos belong to the lane+window) comes ONLY from rankings
+      (the membership subquery in _lifecycle_population_series). stats_snapshots is
+      NOT lane-scoped, so membership gates it.
+    - Depth (the curves) comes from each population video's FULL stats_snapshots
+      history, NOT gated to the runs it was on the board. A video tracked 25 days
+      shows 25 days of curve even if it was ranked once.
+
+    Returns a flat payload (no survivorship/engagement wrappers):
+    - summary: three snapshot-behavior medians over the full population
+      (median_tracked_lifespan_days, median_peak_velocity, median_total_view_growth).
+    - growth.series and ratio_series cover the VELOCITY cohort (top
+      config.LIFECYCLE_COHORT_SIZE by latest views/day), charted over full history;
+      each item carries link for a clickable tooltip.
+    - lifespan_distribution: tracked-lifespan histogram over the full population.
+    - rank_history covers a DISJOINT bump cohort (top by most runs ranked, then best
+      rank). Rank is inherently a board metric, so this one stays on rankings; its
+      series already carry link.
+    - maturation is a CURRENT-STATE cross-section: each in-window video's
+      absolute-latest snapshot versus its published_at, with video_id/title/link.
 
     run_date bounds are lexical date-key compares; every snapshot timestamp is
     ordered/differenced via _parse_instant, never by string math. An empty
     lane+window returns run_count 0, empty lists, and None medians; never raises."""
     cap = config.LIFECYCLE_COHORT_SIZE
 
-    # Spine: rank history drives run_count, survivorship, and the bump cohort.
+    # Rankings spine: drives the lane+window run_count (a board fact that now gates
+    # only the Rank-movement chart) and the bump cohort.
     rh = fetch_rank_history(conn, bucket, None, start_date, end_date)
     rank_series = rh["series"]
-    run_dates = rh["run_dates"]
-    run_count = len(run_dates)
+    run_count = len(rh["run_dates"])
 
-    # runs_ranked: how many runs each video appeared in (one point per run ranked).
-    counts: dict[int, int] = {}
-    for s in rank_series:
-        k = len(s["points"])
-        counts[k] = counts.get(k, 0) + 1
-    runs_ranked = [{"label": f"{k} run(s)", "count": counts[k]} for k in sorted(counts)]
+    # One bounded query: full snapshot history for the rankings-defined population.
+    # Feeds cohort selection, the summary medians, and the lifespan distribution.
+    population = _lifecycle_population_series(conn, bucket, start_date, end_date)
+    summary = _lifecycle_summary(population)
+    lifespan_distribution = _lifecycle_lifespan_distribution(population)
 
-    # churn: entered / exited / retained between consecutive runs.
-    present_by_run: dict[str, set] = {rd: set() for rd in run_dates}
-    for s in rank_series:
-        for p in s["points"]:
-            present_by_run[p["run_date"]].add(s["video_id"])
-    churn = []
-    prev = None
-    for rd in run_dates:
-        cur = present_by_run[rd]
-        if prev is None:
-            churn.append({"run_date": rd, "entered": len(cur), "exited": 0, "retained": 0})
-        else:
-            churn.append(
-                {
-                    "run_date": rd,
-                    "entered": len(cur - prev),
-                    "exited": len(prev - cur),
-                    "retained": len(cur & prev),
-                }
-            )
-        prev = cur
-
-    # Bump cohort: top `cap` by best (min) rank in window, tie-broken by video_id.
+    # Bump cohort (rank movement): videos appearing in the MOST runs (>=2),
+    # tie-broken by best (min) rank then video_id, charted from the rankings spine.
     def _best_rank(s):
         ranks = [p["rank"] for p in s["points"] if p["rank"] is not None]
         return min(ranks) if ranks else float("inf")
 
-    bump_cohort = sorted(rank_series, key=lambda s: (_best_rank(s), s["video_id"]))[:cap]
-    rank_history = {"run_dates": run_dates, "series": bump_cohort}
+    repeat_series = [s for s in rank_series if len(s["points"]) >= 2]
+    bump_cohort = sorted(
+        repeat_series, key=lambda s: (-len(s["points"]), _best_rank(s), s["video_id"])
+    )[:cap]
+    rank_history = {"run_dates": rh["run_dates"], "series": bump_cohort}
 
-    # Velocity cohort: top `cap` by latest views/day; fetch their full series.
-    velocity_cohort_ids = _lifecycle_velocity_cohort(conn, bucket, start_date, end_date, cap)
+    # Velocity cohort: top `cap` by latest views/day, charted over full history.
+    # fetch_snapshot_series carries title + link (clickable tooltip) and the
+    # like/comment counts the ratio chart needs.
+    velocity_cohort_ids = _velocity_cohort_ids(population, cap)
     series_by_id = fetch_snapshot_series(conn, velocity_cohort_ids)
     growth_series = []
     ratio_series = []
@@ -2575,6 +2670,7 @@ def fetch_dashboard_lifecycle(
             {
                 "video_id": vid,
                 "title": entry["title"],
+                "link": entry["link"],
                 "points": [
                     {"captured_at": p["captured_at"], "view_count": p["view_count"]}
                     for p in pts
@@ -2593,29 +2689,23 @@ def fetch_dashboard_lifecycle(
             if p["comment_count"] and p["comment_count"] > 0 and p["like_count"] is not None
         ]
         if ratio_pts:
-            ratio_series.append({"video_id": vid, "title": entry["title"], "points": ratio_pts})
+            ratio_series.append(
+                {
+                    "video_id": vid,
+                    "title": entry["title"],
+                    "link": entry["link"],
+                    "points": ratio_pts,
+                }
+            )
 
     maturation = _lifecycle_maturation(conn, bucket, start_date, end_date)
-
-    # KPI strip: two honest full-set medians (no velocity KPI: it would be over the
-    # cohort only and misread as lane-wide). runs_ranked median is from the raw
-    # per-series point counts, not by parsing the "{k} run(s)" labels.
-    summary = {
-        "median_runs_ranked": _median([len(s["points"]) for s in rank_series]),
-        "median_days_since_publish": _median([m["days_since_publish"] for m in maturation]),
-    }
 
     return {
         "run_count": run_count,
         "summary": summary,
         "growth": {"series": growth_series},
-        "survivorship": {
-            "runs_ranked": runs_ranked,
-            "churn": churn,
-            "rank_history": rank_history,
-        },
-        "engagement": {
-            "ratio_series": ratio_series,
-            "maturation": maturation,
-        },
+        "ratio_series": ratio_series,
+        "maturation": maturation,
+        "rank_history": rank_history,
+        "lifespan_distribution": lifespan_distribution,
     }

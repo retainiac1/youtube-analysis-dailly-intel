@@ -140,3 +140,33 @@ Lifecycle charts: finish the 3-gate Lifecycle sub-tab                           
 │ - dashboard/static/js/charts.js renderTrajectory:251, renderBump:127, renderBars:351 (reuse) + 3 new renderers                                                                                                                 │
 │ - config.py:32 LIFECYCLE_COHORT_SIZE (done - read only)                                                                                                                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+Architecture change (locked): drive the Lifecycle tab from stats_snapshots, not the rankings board.
+This is decided, do not re-open it. Write an implementation plan for review first (gate discipline holds), then code under STOP gates. The redesign we just iterated was fixing charts when the input was the problem.
+Why. The rankings board is a 3-day discovery surface (top 20 by ratio among videos published in the last 3 days). It structurally forgets every video after 3 days, so it cannot carry a trend. stats_snapshots tracks each video's views/likes/comments over its full tracked life (up to the 30-day REFRESH_MAX_AGE_DAYS sweep), independent of the board. That is the lifecycle substrate. Every "most videos appear once" / forced cohort / gappy-line problem traced back to using the 3-day board as the baseline.
+The one rule CC must not get wrong: lane scoping. stats_snapshots is NOT lane-scoped. Lane membership comes only from rankings. So:
+
+Population (per lane + window) = SELECT DISTINCT video_id FROM rankings WHERE bucket = ? AND run_date in window, the existing lane+window dedupe. This defines WHICH videos belong to the lane. Keep using rankings for this and nothing else.
+Depth = for those videos, read their FULL stats_snapshots history (all snapshots for the video, NOT gated to the runs they were on the board). This is what gives real curves.
+Do NOT read all snapshots globally. That makes the lane tabs meaningless (every lane would show the same set). Membership gates the population; snapshots provide depth for that population only.
+
+Per-chart consequences:
+
+View growth, Velocity, Like:comment ratio over time, Engagement vs age (maturation): switch their data source to full stats_snapshots history for the cohort, not on-board runs. A video tracked 25 days shows 25 days of curve.
+Rank movement: stays on rankings (rank is inherently a board metric). Lane-scoped already. Keep it, it is the one chart legitimately about the board.
+Roster churn: CUT. The board is rebuilt to exactly 20 each run, so entered == exited is arithmetic, not a finding (Mary confirmed every bar matches). It measures "the board holds 20," not lifecycle.
+Appearances distribution: CUT as a board metric ("runs on the board" is the 3-day window's shadow). Replace with a snapshot-based "tracked lifespan" view if useful: distribution of how many days (or snapshots) each video has been tracked. That is a real lifecycle metric; the board-runs histogram is not.
+
+Summary cards: rebuild around snapshot behavior, not board trivia. The current three (runs in window, median runs ranked, median age) are dataset trivia and "median runs ranked = 1" just restates the appearances chart. Replace with metrics that answer "how do videos in this niche behave over time," computed from snapshots, for example: median tracked lifespan (days first-to-last snapshot), median peak velocity (max views/day), median days-to-peak. Pick three that are genuinely informative; run them by Mary in the plan.
+Clickable video links. Every video reference (chart legends, tooltips, rank/growth line labels) links to the YouTube URL. The data already carries link. This is a straightforward gap, add it everywhere a video is named.
+Single-run guard: remove or narrow it. Today the tab blanks when board run_count < 2. With snapshot-driven charts, a video with several snapshots has a real curve even when the window is a single board run, so the tab-level blank would now hide working charts. Keep a < 2 runs guard ONLY on Rank movement (which genuinely needs multiple board runs); growth/velocity/ratio/maturation just need videos with >= 2 snapshots and should render whenever they have data.
+Constraints carried (all still apply):
+
+No schema change. All reads. Declare it; re-grep anchors (db.py shifted).
+Bounded SQL only. For the line/scatter cohorts, fetch snapshots for the bounded cohort id list (the existing LIFECYCLE_COHORT_SIZE). For aggregate metrics over the full population (the summary medians, any lifespan distribution), use a bounded SQL aggregate via the rankings subquery, never a per-id IN over hundreds of videos.
+Eastern, instant-correct: all captured_at / published_at ordering and deltas through _parse_instant, never raw-string compares.
+Cohort selection rules stay as decided (velocity cohort for growth/velocity/ratio; most-appearances for rank movement), now selected from the rankings-defined population but charted over full snapshot history.
+Captions must state plainly that the period selects which videos belong to the lane and the curves show each video's full tracked life, so the date filter's meaning is unambiguous.
+Smoke against a VACUUM INTO copy via DASHBOARD_DB_PATH bound to 127.0.0.1, never the live WAL. No em dashes, no co-author trailer, re-check branch and stage explicit paths.
+
+Scope of work: this is a substantial rewrite of fetch_dashboard_lifecycle (population from rankings, depth from snapshots, new summary aggregates, churn/appearances removed) plus the chart wiring and clickable links. Write the implementation plan, including which three summary metrics you propose and exactly what stats_snapshots supports over a full tracked lifespan, and STOP for review before coding.

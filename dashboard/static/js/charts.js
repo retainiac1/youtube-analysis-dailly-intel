@@ -42,13 +42,47 @@ const compactFmt = new Intl.NumberFormat(undefined, {
 
 function truncate(s, n) {
   const str = s == null ? "" : String(s);
-  return str.length > n ? str.slice(0, n - 1) + "…" : str;
+  // Code-point aware: slicing a JS string by .length can cut a multi-byte emoji
+  // in half and render a broken char. Array.from splits on code points, so an
+  // emoji survives or is dropped whole.
+  const cps = Array.from(str);
+  return cps.length > n ? cps.slice(0, n - 1).join("") + "…" : str;
+}
+
+// Short date tick for time axes ("Jun 19"). ECharts passes a ms timestamp; format
+// in the browser's local zone (the dashboard is an Eastern-local tool).
+const TICK_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
+  "Sep", "Oct", "Nov", "Dec"];
+function fmtDateTick(ms) {
+  const d = new Date(ms);
+  return `${TICK_MONTHS[d.getMonth()]} ${d.getDate()}`;
+}
+
+// Short label for a "YYYY-MM-DD" run-date key -> "Jun 8". Parsed by field (NOT
+// new Date(str), which would shift the day across a timezone boundary).
+function fmtRunDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || "");
+  return m ? `${TICK_MONTHS[+m[2] - 1]} ${+m[3]}` : String(s == null ? "" : s);
 }
 
 function escapeHtml(s) {
   return String(s == null ? "" : s).replace(
     /[&<>"]/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
+  );
+}
+
+// A video title rendered as a clickable YouTube link for use inside ECharts HTML
+// tooltips. Canvas legends and on-line labels cannot hold real anchors, so the
+// tooltip is where a named video becomes clickable. href is the pre-built
+// videos.link; with no link it falls back to plain escaped text. Both title and
+// href are escaped (the title can carry arbitrary user-facing text).
+function videoTitleLink(title, link) {
+  const label = escapeHtml(truncate(title || "(untitled)", 60));
+  if (!link) return label;
+  return (
+    `<a href="${escapeHtml(link)}" target="_blank" rel="noopener" ` +
+    `style="color:inherit;text-decoration:underline">${label}</a>`
   );
 }
 
@@ -633,17 +667,99 @@ export function renderDurationHistogram(el, durations, lane) {
   });
 }
 
-// --- Lifecycle: roster churn (diverging) -------------------------------------
-// entered rises ABOVE the axis in the lane colour; exited drops BELOW it in the
-// reserved RED (the negative-signal convention). The two share one x position via
-// a stack, so each run reads as a single up/down column, not a grouped pair.
-// `retained` is deliberately NOT a bar (a third positive segment would drown out
-// the entered-vs-exited direction that is the whole point): it lives in the
-// tooltip only. The y-axis labels show absolute counts so the downward side reads
-// as a real video count, with direction carried by colour + legend.
-export function renderChurn(el, rows, lane) {
-  if (!rows || !rows.length) {
-    showEmpty(el, "No data for this window.");
+// --- Lifecycle: view growth over time ----------------------------------------
+// One line per cohort video on a SINGLE views axis (no second velocity axis: that
+// is its own Velocity bar chart now). Real "Jun 19" date ticks, compact view
+// labels, emoji-safe scrolling legend, stable per-video colour.
+let growthSlots = {};
+
+export function renderGrowthLines(el, payload, lane) {
+  const series = ((payload && payload.series) || []).filter(
+    (s) => s.points && s.points.length
+  );
+  if (!series.length) {
+    showEmpty(el, "Not enough snapshot history yet for growth curves.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  growthSlots = allocateSlots(series.map((s) => s.video_id), growthSlots);
+
+  const linkByName = {};
+  const lines = series.map((s) => {
+    const color = paletteColor(growthSlots[s.video_id]);
+    const name = s.title || s.video_id;
+    linkByName[name] = s.link || null;
+    return {
+      name,
+      type: "line",
+      showSymbol: true,
+      symbolSize: 6,
+      itemStyle: { color },
+      lineStyle: { color },
+      data: s.points.map((p) => [p.captured_at, p.view_count]),
+    };
+  });
+
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: {
+      trigger: "axis",
+      formatter: (params) =>
+        `<strong>${escapeHtml(fmtDateTick(params[0].axisValue))}</strong><br/>` +
+        params
+          .map(
+            (p) =>
+              `${p.marker}${videoTitleLink(p.seriesName, linkByName[p.seriesName])}: ` +
+              `${compactFmt.format(p.value[1])}`
+          )
+          .join("<br/>"),
+    },
+    legend: {
+      textStyle: { color: t.textStyle.color },
+      top: 0,
+      type: "scroll",
+      formatter: (name) => truncate(name, 40),
+    },
+    grid: { left: 16, right: 16, top: 36, bottom: 40, containLabel: true },
+    xAxis: {
+      type: "time",
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color, formatter: (v) => fmtDateTick(v) },
+    },
+    yAxis: {
+      type: "value",
+      name: "views",
+      nameLocation: "middle",
+      nameGap: 48,
+      nameTextStyle: { color: t.textStyle.color },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color, formatter: (v) => compactFmt.format(v) },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    series: lines,
+  });
+}
+
+// --- Lifecycle: current velocity (views/day) ---------------------------------
+// Horizontal bars, one per cohort video, sorted desc. Reads the LAST velocity
+// point the helper already computed (does NOT recompute views/day). Replaces the
+// dashed velocity lines that made the old growth chart unreadable.
+export function renderVelocityBars(el, payload, lane) {
+  const rows = ((payload && payload.series) || [])
+    .map((s) => {
+      const v =
+        s.velocity && s.velocity.length
+          ? s.velocity[s.velocity.length - 1].views_per_day
+          : null;
+      return v == null
+        ? null
+        : { label: s.title || s.video_id, value: v, link: s.link || null };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.value - a.value);
+  if (!rows.length) {
+    showEmpty(el, "Not enough snapshot history yet for velocity.");
     return;
   }
   const t = THEMES[themeName()];
@@ -655,42 +771,107 @@ export function renderChurn(el, rows, lane) {
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "shadow" },
-      formatter: (params) => {
-        const r = rows[params[0].dataIndex];
+      formatter: (ps) => {
+        const r = rows[ps[0].dataIndex] || {};
         return (
-          `<strong>${escapeHtml(r.run_date)}</strong><br/>` +
-          `entered ${intFmt.format(r.entered)}<br/>` +
-          `exited ${intFmt.format(r.exited)}<br/>` +
-          `retained ${intFmt.format(r.retained)}`
+          `${videoTitleLink(r.label, r.link)}<br/>` +
+          `${intFmt.format(Math.round(ps[0].value))} views/day`
         );
       },
     },
-    legend: { data: ["entered", "exited"], textStyle: { color: t.textStyle.color }, top: 0 },
-    grid: { ...baseGrid, top: 36 },
-    ...axes(t, {
-      xAxis: { type: "category", data: rows.map((r) => r.run_date) },
-      yAxis: {
-        type: "value",
-        name: "videos",
-        axisLabel: { color: t.textStyle.color, formatter: (v) => Math.abs(v) },
-      },
-    }),
+    grid: { left: 8, right: 24, top: 12, bottom: 36, containLabel: true },
+    xAxis: {
+      type: "value",
+      name: "views/day",
+      nameLocation: "middle",
+      nameGap: 28,
+      nameTextStyle: { color: t.textStyle.color },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color, formatter: (v) => compactFmt.format(v) },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    yAxis: {
+      type: "category",
+      inverse: true,
+      data: rows.map((r) => r.label),
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color, formatter: (v) => truncate(v, 28) },
+    },
     series: [
       {
-        name: "entered",
         type: "bar",
-        stack: "churn",
-        data: rows.map((r) => r.entered),
-        itemStyle: { color, borderRadius: [3, 3, 0, 0] },
-      },
-      {
-        name: "exited",
-        type: "bar",
-        stack: "churn",
-        data: rows.map((r) => -r.exited), // negative: draws below the axis in RED
-        itemStyle: { color: RED, borderRadius: [0, 0, 3, 3] },
+        data: rows.map((r) => Math.round(r.value)),
+        itemStyle: { color, borderRadius: [0, 4, 4, 0] },
       },
     ],
+  });
+}
+
+// --- Lifecycle: rank movement (survivors' rank across runs) ------------------
+// Lifecycle-specific (NOT renderBump, which is Trends' and paints a fell-off line
+// RED; in an all-time lifecycle view every cohort video has fallen off, so that
+// would make every line red and indistinguishable). Here each video gets a
+// distinct palette colour, a labelled scrolling legend, short "Jun 8" date ticks,
+// and a rank axis with 1 at the top. Empty-state when no video has >=2 runs.
+let rankSlots = {};
+
+export function renderRankMovement(el, data, lane) {
+  const runDates = (data && data.run_dates) || [];
+  const series = ((data && data.series) || []).filter(
+    (s) => s.points && s.points.length >= 2
+  );
+  if (!runDates.length || !series.length) {
+    showEmpty(el, "Not enough repeat appearances to show rank movement.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  rankSlots = allocateSlots(series.map((s) => s.video_id), rankSlots);
+
+  const linkByName = {};
+  const lines = series.map((s) => {
+    const byDate = {};
+    for (const p of s.points) byDate[p.run_date] = p.rank;
+    const color = paletteColor(rankSlots[s.video_id]);
+    const name = s.title || s.video_id;
+    linkByName[name] = s.link || null;
+    return {
+      name,
+      type: "line",
+      connectNulls: false,
+      showSymbol: true,
+      symbolSize: 7,
+      itemStyle: { color },
+      lineStyle: { color },
+      data: runDates.map((d) => (d in byDate ? byDate[d] : null)),
+    };
+  });
+
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: {
+      trigger: "item",
+      formatter: (p) =>
+        `<strong>${videoTitleLink(p.seriesName, linkByName[p.seriesName])}</strong><br/>` +
+        `rank ${p.value} on ${escapeHtml(fmtRunDate(p.name))}`,
+    },
+    legend: {
+      textStyle: { color: t.textStyle.color },
+      top: 0,
+      type: "scroll",
+      formatter: (name) => truncate(name, 36),
+    },
+    grid: { ...baseGrid, top: 36 },
+    ...axes(t, {
+      xAxis: {
+        type: "category",
+        data: runDates,
+        boundaryGap: false,
+        axisLabel: { color: t.textStyle.color, formatter: (v) => fmtRunDate(v) },
+      },
+      yAxis: { type: "value", inverse: true, minInterval: 1, name: "rank (1 = best)" },
+    }),
+    series: lines,
   });
 }
 
@@ -710,10 +891,13 @@ export function renderRatioLines(el, series, lane) {
   const inst = mount(el);
   ratioSlots = allocateSlots(withData.map((s) => s.video_id), ratioSlots);
 
+  const linkByName = {};
   const lines = withData.map((s) => {
     const color = paletteColor(ratioSlots[s.video_id]);
+    const name = s.title || s.video_id;
+    linkByName[name] = s.link || null;
     return {
-      name: s.title || s.video_id,
+      name,
       type: "line",
       showSymbol: true,
       symbolSize: 6,
@@ -725,7 +909,18 @@ export function renderRatioLines(el, series, lane) {
 
   inst.setOption({
     animation: !prefersReducedMotion,
-    tooltip: { trigger: "axis" },
+    tooltip: {
+      trigger: "axis",
+      formatter: (params) =>
+        `<strong>${escapeHtml(fmtDateTick(params[0].axisValue))}</strong><br/>` +
+        params
+          .map(
+            (p) =>
+              `${p.marker}${videoTitleLink(p.seriesName, linkByName[p.seriesName])}: ` +
+              `${p.value[1].toFixed(1)}`
+          )
+          .join("<br/>"),
+    },
     legend: {
       textStyle: { color: t.textStyle.color },
       top: 0,
@@ -736,11 +931,11 @@ export function renderRatioLines(el, series, lane) {
     xAxis: {
       type: "time",
       axisLine: { lineStyle: { color: t.axisLine } },
-      axisLabel: { color: t.textStyle.color },
+      axisLabel: { color: t.textStyle.color, formatter: (v) => fmtDateTick(v) },
     },
     yAxis: {
       type: "value",
-      name: "like:comment ratio",
+      name: "likes per comment",
       axisLine: { lineStyle: { color: t.axisLine } },
       axisLabel: { color: t.textStyle.color },
       splitLine: { lineStyle: { color: t.splitLine } },
@@ -749,37 +944,50 @@ export function renderRatioLines(el, series, lane) {
   });
 }
 
-// --- Lifecycle: engagement maturation (ratio vs age, sized by views) ----------
-// Current-state cross-section: one dot per in-window video, x = age in days,
-// y = like:comment ratio, dot size scaled from view_count. Null-ratio points (the
-// zero-comment guard upstream) are dropped. Size uses a sqrt scale clamped to a
-// visible floor so a missing/zero view_count still draws a small dot, never a
-// zero-size point and never NaN.
+// --- Lifecycle: engagement maturation (ratio vs age, coloured by views) -------
+// Current-state cross-section: one small dot per in-window video, x = age in days,
+// y = likes-per-comment on a LOG axis (a 1340 outlier over a ~74 median would flatten
+// a linear axis; log keeps every point on-chart, no axis cap so nothing is dropped).
+// View count is encoded by COLOUR via visualMap, not by giant bubble sizes (those
+// overlapped into blobs). Null/zero ratios are dropped (log needs positive y).
 export function renderMaturation(el, points, lane) {
-  const pts = (points || []).filter((p) => p.ratio != null);
+  const pts = (points || []).filter((p) => p.ratio != null && p.ratio > 0);
   if (!pts.length) {
     showEmpty(el, "No data for this window.");
     return;
   }
   const t = THEMES[themeName()];
   const inst = mount(el);
-  const color = LANE_COLORS[lane] || LANE_COLORS.health;
-
-  const size = (v) => {
-    const n = typeof v === "number" && v > 0 ? v : 0;
-    return Math.max(6, Math.min(40, Math.sqrt(n) / 30));
-  };
+  const views = pts.map((p) => p.view_count || 0);
+  const vmin = Math.min(...views);
+  const vmax = Math.max(...views);
 
   inst.setOption({
     animation: !prefersReducedMotion,
     tooltip: {
       trigger: "item",
       formatter: (p) =>
+        `<strong>${videoTitleLink(p.value[3], p.value[4])}</strong><br/>` +
         `${p.value[0].toFixed(1)} days old<br/>` +
-        `ratio ${p.value[1].toFixed(1)}<br/>` +
-        `views ${intFmt.format(p.value[2])}`,
+        `${p.value[1].toFixed(1)} likes per comment<br/>` +
+        `${intFmt.format(p.value[2])} views`,
     },
-    grid: { left: 8, right: 24, top: 16, bottom: 36, containLabel: true },
+    visualMap: {
+      type: "continuous",
+      min: vmin,
+      max: vmax > vmin ? vmax : vmin + 1,
+      dimension: 2,
+      calculable: true,
+      orient: "horizontal",
+      left: "center",
+      bottom: 0,
+      itemWidth: 12,
+      text: ["more views", "fewer"],
+      textStyle: { color: t.textStyle.color },
+      formatter: (v) => compactFmt.format(v),
+      inRange: { color: ["#2D7CFF", "#00F2A9"] },
+    },
+    grid: { left: 8, right: 24, top: 16, bottom: 58, containLabel: true },
     xAxis: {
       type: "value",
       name: "days since publish",
@@ -791,8 +999,10 @@ export function renderMaturation(el, points, lane) {
       splitLine: { lineStyle: { color: t.splitLine } },
     },
     yAxis: {
-      type: "value",
-      name: "like:comment ratio",
+      type: "log",
+      name: "likes per comment (log)",
+      nameLocation: "middle",
+      nameGap: 40,
       nameTextStyle: { color: t.textStyle.color },
       axisLine: { lineStyle: { color: t.axisLine } },
       axisLabel: { color: t.textStyle.color },
@@ -801,9 +1011,17 @@ export function renderMaturation(el, points, lane) {
     series: [
       {
         type: "scatter",
-        symbolSize: (val) => size(val[2]),
-        itemStyle: { color, opacity: 0.7 },
-        data: pts.map((p) => [p.days_since_publish, p.ratio, p.view_count]),
+        symbolSize: 9,
+        itemStyle: { opacity: 0.78, borderColor: t.splitLine, borderWidth: 0.5 },
+        // value carries title + link in dims 3/4 so the tooltip can link the video
+        // (visualMap reads dim 2; the extra dims are tooltip-only).
+        data: pts.map((p) => [
+          p.days_since_publish,
+          p.ratio,
+          p.view_count,
+          p.title || p.video_id,
+          p.link || null,
+        ]),
       },
     ],
   });

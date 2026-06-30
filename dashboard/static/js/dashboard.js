@@ -250,14 +250,17 @@ function titleStatsStrip(s) {
 }
 
 // The 3 lifecycle summary numbers as a compact KPI strip (mirrors titleStatsStrip).
-// Null medians (empty lane+window) render as a dash, never "NaN" or "0".
+// These describe how lane videos behave over time (from stats_snapshots), not board
+// trivia. Null medians (empty lane+window) render as "n/a", never "NaN", "0", or an
+// em dash.
 function lifecycleKpiStrip(data) {
   const s = data.summary || {};
-  const num = (v, digits) => (v == null ? "—" : Number(v).toFixed(digits));
+  const naFixed = (v, digits) => (v == null ? "n/a" : Number(v).toFixed(digits));
+  const naInt = (v) => (v == null ? "n/a" : Math.round(Number(v)).toLocaleString());
   const cards = [
-    ["Runs in window", String(data.run_count ?? 0)],
-    ["Median runs ranked", num(s.median_runs_ranked, 0)],
-    ["Median age (days)", num(s.median_days_since_publish, 1)],
+    ["Median tracked lifespan (days)", naFixed(s.median_tracked_lifespan_days, 1)],
+    ["Median peak velocity (views/day)", naInt(s.median_peak_velocity)],
+    ["Median total view growth (views)", naInt(s.median_total_view_growth)],
   ];
   return el("section", { class: "dash-kpi-section" }, [
     el("h3", { class: "heading-sm dash-kpi-heading", text: "Lifecycle summary" }),
@@ -282,41 +285,53 @@ function lifecycleGroup(title, children) {
   ]);
 }
 
+// A chart card whose title is WHAT the chart shows, with the cohort/scope as a
+// caption underneath (the reader can't see the selection rule, so it never goes
+// in the title).
+function lcCard(title, caption) {
+  const chart = el("div", { class: "chart-mount" });
+  const kids = [el("h3", { class: "heading-sm", text: title })];
+  if (caption) kids.push(el("p", { class: "dashboard-caption", text: caption }));
+  kids.push(chart);
+  return { card: el("section", { class: "glass-panel chart-card" }, kids), chart };
+}
+
 function renderLifecycle(data) {
   if (!data) return;
-  // Single-run guard: lifecycle charts need movement across runs. The default
-  // "Latest run" window is one run, which would draw six degenerate/empty charts.
-  if ((data.run_count || 0) < 2) {
-    panelEl.replaceChildren(
-      el("section", { class: "glass-panel chart-card dashboard-lifecycle" }, [
-        el("h3", { class: "heading-sm", text: "Lifecycle" }),
-        el("p", {
-          class: "dashboard-status",
-          text: "Select a wider period to see lifecycle trends across runs.",
-        }),
-      ])
-    );
-    return;
-  }
-
+  // No tab-level single-run blank: the per-video curves are snapshot-driven, so a
+  // video with several snapshots has a real curve even in a single board run. Only
+  // Rank movement (a board metric) needs more than one run; it guards itself below.
   const lane = laneNow();
-  const surv = data.survivorship || {};
-  const eng = data.engagement || {};
 
-  const growth = chartCard("Growth & velocity (fastest-growing)");
-  const bump = chartCard("Rank movement (best-ranked)");
-  const churn = chartCard("Roster churn");
-  const appearances = chartCard("Appearances distribution");
-  const ratio = chartCard("Like:comment ratio over time (fastest-growing)");
-  const maturation = chartCard("Engagement vs age");
+  const periodNote =
+    "The period selects which videos belong to the lane; each curve shows that " +
+    "video's full tracked life (every snapshot, not just on-board runs).";
+
+  const viewGrowth = lcCard("View growth", `View count over each video's tracked life. ${periodNote}`);
+  const velocity = lcCard("Velocity", "Current views per day for the same fastest-growing videos.");
+  const bump = lcCard(
+    "Rank movement",
+    "A different set: the videos that appeared in the most runs (not the " +
+      "fastest-growing set above). Rank 1 is best. Needs more than one run."
+  );
+  const lifespan = lcCard(
+    "Tracked-lifespan distribution",
+    "How many days each lane video has been tracked, first snapshot to last. " +
+      "Videos retire about 30 days after their last view growth."
+  );
+  const ratio = lcCard("Likes per comment over time", `Engagement mix over each video's tracked life. ${periodNote}`);
+  const maturation = lcCard(
+    "Engagement vs age",
+    "Every in-window video: likes per comment (log) vs days since published, colored by view count."
+  );
 
   panelEl.replaceChildren(
     lifecycleKpiStrip(data),
-    lifecycleGroup("Growth", [growth.card]),
+    lifecycleGroup("Growth", [
+      el("div", { class: "dash-2col" }, [viewGrowth.card, velocity.card]),
+    ]),
     lifecycleGroup("Survivorship", [
-      el("div", { class: "dash-2col" }, [bump.card, churn.card]),
-      appearances.card,
-      el("p", { class: "dashboard-caveat", text: SURVIVORSHIP_NOTE }),
+      el("div", { class: "dash-2col" }, [bump.card, lifespan.card]),
     ]),
     lifecycleGroup("Engagement", [
       el("div", { class: "dash-2col" }, [ratio.card, maturation.card]),
@@ -324,21 +339,22 @@ function renderLifecycle(data) {
   );
 
   // Charts render after the mounts are in the DOM (ECharts needs real geometry).
-  const hasGrowth = data.growth && data.growth.series && data.growth.series.length;
-  if (hasGrowth) {
-    charts.renderTrajectory(growth.chart, data.growth, lane);
+  charts.renderGrowthLines(viewGrowth.chart, data.growth || {}, lane);
+  charts.renderVelocityBars(velocity.chart, data.growth || {}, lane);
+  // Rank movement is the one board metric: it needs movement across runs.
+  if ((data.run_count || 0) < 2) {
+    bump.chart.appendChild(
+      el("p", {
+        class: "dashboard-status",
+        text: "Select a wider period to see rank movement across runs.",
+      })
+    );
   } else {
-    // renderTrajectory's empty copy is Board-specific ("Track from the Board..."),
-    // wrong here, so use a lifecycle-appropriate empty state instead.
-    growth.chart.classList.add("chart-empty");
-    growth.chart.textContent =
-      "Growth curves appear once cohort videos have views across multiple runs.";
+    charts.renderRankMovement(bump.chart, data.rank_history || {}, lane);
   }
-  charts.renderBump(bump.chart, surv.rank_history || {}, lane);
-  charts.renderChurn(churn.chart, surv.churn || [], lane);
-  charts.renderBars(appearances.chart, surv.runs_ranked || [], lane);
-  charts.renderRatioLines(ratio.chart, eng.ratio_series || [], lane);
-  charts.renderMaturation(maturation.chart, eng.maturation || [], lane);
+  charts.renderBars(lifespan.chart, data.lifespan_distribution || [], lane);
+  charts.renderRatioLines(ratio.chart, data.ratio_series || [], lane);
+  charts.renderMaturation(maturation.chart, data.maturation || [], lane);
 }
 
 // Theme toggle: redraw only the active sub-tab's charts from cache (no refetch). Safe

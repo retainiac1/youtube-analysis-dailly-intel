@@ -124,6 +124,102 @@ def test_fetch_run_dates_descending(tmp_path):
         conn.close()
 
 
+def _seed_lifecycle(conn):
+    """A lane whose depth lives in stats_snapshots, not the board. vidA is tracked
+    four days (06-05 to 06-08) but on the board only twice (06-07, 06-08): the proof
+    that curves come from the full snapshot history, not on-board runs. vidB has a
+    single snapshot (no measurable velocity/growth, zero lifespan)."""
+    conn.execute(
+        "INSERT INTO videos (video_id, title, channel_title, link, published_at, "
+        "view_count) VALUES "
+        "('vidA', 'Alpha', 'Chan A', 'http://yt/vidA', "
+        "'2026-06-01T09:00:00-04:00', 10000)"
+    )
+    conn.execute(
+        "INSERT INTO videos (video_id, title, channel_title, link, published_at, "
+        "view_count) VALUES "
+        "('vidB', 'Beta', 'Chan B', 'http://yt/vidB', "
+        "'2026-06-02T09:00:00-04:00', 8000)"
+    )
+    # rankings = lane membership only (vidA on two runs, vidB on one).
+    for rd in ("2026-06-07", "2026-06-08"):
+        conn.execute(
+            "INSERT INTO rankings (run_date, bucket, rank, video_id, metric_value, "
+            f"captured_at) VALUES ('{rd}', 'health', 1, 'vidA', 9.0, "
+            f"'{rd}T10:00:00-04:00')"
+        )
+    conn.execute(
+        "INSERT INTO rankings (run_date, bucket, rank, video_id, metric_value, "
+        "captured_at) VALUES ('2026-06-08', 'health', 2, 'vidB', 7.0, "
+        "'2026-06-08T10:00:00-04:00')"
+    )
+    # stats_snapshots = full tracked history (vidA's four days exceed its two board
+    # runs); UNIQUE(run_id, video_id).
+    snaps = [
+        (1, "vidA", "2026-06-05T10:00:00-04:00", 1000, 100, 10),
+        (2, "vidA", "2026-06-06T10:00:00-04:00", 3000, 200, 20),
+        (3, "vidA", "2026-06-07T10:00:00-04:00", 6000, 300, 30),
+        (4, "vidA", "2026-06-08T10:00:00-04:00", 10000, 400, 40),
+        (4, "vidB", "2026-06-08T10:00:00-04:00", 8000, 800, 40),
+    ]
+    for rid, vid, cap, vc, lc, cc in snaps:
+        conn.execute(
+            "INSERT INTO stats_snapshots (run_id, video_id, captured_at, "
+            f"view_count, like_count, comment_count) VALUES ({rid}, '{vid}', "
+            f"'{cap}', {vc}, {lc}, {cc})"
+        )
+    conn.commit()
+
+
+def test_fetch_dashboard_lifecycle_is_snapshot_driven(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        _seed_lifecycle(conn)
+        data = db.fetch_dashboard_lifecycle(conn, "health")
+
+        # Pinned top-level shape: no survivorship/engagement wrappers, no cut keys.
+        assert set(data) == {
+            "run_count", "summary", "growth", "ratio_series", "maturation",
+            "rank_history", "lifespan_distribution",
+        }
+        assert "survivorship" not in data and "engagement" not in data
+        assert "churn" not in data and "runs_ranked" not in data
+
+        # run_count survives, and is the rankings runs in window.
+        assert data["run_count"] == 2
+
+        # Depth from snapshots, NOT the board: vidA's curve is its full four-day
+        # history though it was ranked only twice, and carries a clickable link.
+        ga = next(s for s in data["growth"]["series"] if s["video_id"] == "vidA")
+        assert len(ga["points"]) == 4
+        assert ga["link"] == "http://yt/vidA"
+
+        # Summary is snapshot behavior, not board trivia.
+        s = data["summary"]
+        assert set(s) == {
+            "median_tracked_lifespan_days", "median_peak_velocity",
+            "median_total_view_growth",
+        }
+        # lifespan: vidA spans 3 days (06-05 to 06-08), vidB one snapshot = 0 days.
+        assert s["median_tracked_lifespan_days"] == 1.5
+        # peak velocity: vidA's fastest day-over-day is 06-07 to 06-08 = 4000/day;
+        # vidB (one snapshot) contributes none.
+        assert s["median_peak_velocity"] == 4000
+        # total growth: vidA 10000 - 1000 = 9000; vidB excluded (needs >= 2 snaps).
+        assert s["median_total_view_growth"] == 9000
+
+        # Lifespan distribution covers every population video with snapshots.
+        assert sum(b["count"] for b in data["lifespan_distribution"]) == 2
+
+        # Maturation tooltips can name + link the video.
+        assert data["maturation"]
+        assert all("video_id" in m and "link" in m for m in data["maturation"])
+    finally:
+        conn.close()
+
+
 def test_fetch_lane_joins_and_tolerates_missing_parent(tmp_path):
     db_path = str(tmp_path / "t.db")
     db.init_db(db_path)

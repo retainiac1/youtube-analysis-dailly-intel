@@ -527,6 +527,24 @@ html { scroll-padding-top: var(--header-h, 0px); }
   gap: 1.25rem;
 }
 .dashboard-lifecycle-group > .heading-md { margin: 0; }
+/* Per-card caption: names the cohort/scope under the chart title (muted, small). */
+.dashboard-caption {
+  margin: 0.15rem 0 0.6rem;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+/* The exit-reason takeaway: a sentence, not a chart (the split is ~95/5/0). */
+.dashboard-lead {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
 
 /* The 4 title-anatomy numbers as a labeled KPI strip, wrapping gracefully. */
 .dash-kpi-heading { margin: 0 0 0.85rem; }
