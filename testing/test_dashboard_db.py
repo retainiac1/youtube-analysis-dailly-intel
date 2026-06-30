@@ -195,6 +195,11 @@ def test_fetch_dashboard_lifecycle_is_snapshot_driven(tmp_path):
         ga = next(s for s in data["growth"]["series"] if s["video_id"] == "vidA")
         assert len(ga["points"]) == 4
         assert ga["link"] == "http://yt/vidA"
+        # The growth cohort is selected by PEAK views/day and carries a velocity
+        # series (the Views-per-day fall-off curve replots it). vidA's peak is its
+        # fastest day-over-day segment (06-07 to 06-08 = 4000/day).
+        assert ga["velocity"]
+        assert max(p["views_per_day"] for p in ga["velocity"]) == 4000
 
         # Summary is snapshot behavior, not board trivia.
         s = data["summary"]

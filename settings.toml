@@ -7,7 +7,8 @@ MIN_VIEWS = 10000                  # qualifying-view floor; positive int. ~10k f
 WINDOW_DAYS = 3                    # discovery lookback in days; positive int (1-7 is the sane range).
 REFRESH_MAX_AGE_DAYS = 30          # days a tracked video may go without view growth before the daily sweep retires it (status -> aged_out); positive int, do not go below 21. Starred videos are exempt.
 TOP_N = 20                         # ranked rows kept per lane; positive int.
-LIFECYCLE_COHORT_SIZE = 6          # videos per Lifecycle line cohort; positive int. Two disjoint cohorts share it: growth/ratio (top N by views/day) and the rank bump (top N by best rank). Small keeps the legend-less bump legible.
+LIFECYCLE_COHORT_SIZE = 6          # videos in the Lifecycle rank-bump cohort (top N by best rank); positive int. Small keeps the legend-less bump legible.
+LIFECYCLE_GROWTH_COHORT_SIZE = 20  # videos in the Lifecycle growth cohort (View growth, Views-per-day, Velocity bars; top N by PEAK views/day); positive int. Larger so the curves span the window.
 SHORT_MAX_SECONDS = 180            # Shorts duration cutoff in seconds; positive int. Videos <= this are treated as Shorts.
 SEARCH_RELEVANCE_LANGUAGE = "en"   # YouTube relevanceLanguage hint; ISO-639-1 string (e.g. "en", "es").
 DAILY_QUOTA_LIMIT = 10000          # YouTube Data API daily quota units; positive int (Google grants 10000 by default).

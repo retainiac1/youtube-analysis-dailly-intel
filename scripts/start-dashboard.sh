@@ -62,8 +62,21 @@ fi
 
 reload_args=()
 if [[ "$MODE" == "dev" ]]; then
-  # reload_args+=(--reload)
-  reload_args+=(--reload --reload-dir dashboard)
+  # Watch the WHOLE repo root, not just dashboard/: the backend modules (db.py,
+  # config.py, llm.py, classify.py, ...) live at the root, so scoping reload to
+  # dashboard/ silently served stale Python after a db.py edit. uvicorn only
+  # reloads on *.py by default, so DB/WAL and log writes never trigger a reload.
+  # The excludes keep the watcher off .venv/.git/data/logs; they MUST be absolute
+  # paths because uvicorn's FileFilter checks `exclude_dir in path.parents` against
+  # the ABSOLUTE paths watchfiles reports (a relative exclude never matches and the
+  # dir reloads anyway). Needs watchfiles (in requirements.txt); without it uvicorn
+  # falls back to polling and these excludes no-op.
+  reload_args+=(--reload
+    --reload-dir "$REPO_ROOT"
+    --reload-exclude "$REPO_ROOT/.venv"
+    --reload-exclude "$REPO_ROOT/.git"
+    --reload-exclude "$REPO_ROOT/data"
+    --reload-exclude "$REPO_ROOT/logs")
 fi
 
 echo "Dashboard → http://$HOST:$PORT ($MODE)"

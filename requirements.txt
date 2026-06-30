@@ -3,6 +3,7 @@ python-dotenv
 openpyxl
 fastapi
 uvicorn
+watchfiles  # dev auto-reload backend; lets --reload watch the repo root (db.py, config.py) with --reload-exclude (a no-op under the polling fallback)
 anthropic
 openai
 google-genai

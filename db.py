@@ -2441,17 +2441,21 @@ def _lifecycle_population_series(
     return by_video
 
 
-def _velocity_cohort_ids(by_video: dict[str, list], cap: int) -> list[str]:
-    """The top `cap` population video_ids by latest views/day, ranked DESC by
-    velocity and tie-broken by video_id. Reuses _latest_velocity / _velocity_points
-    so the selector value equals the growth chart's last velocity point. A video
-    with fewer than two usable snapshots has no velocity and is excluded."""
+def _growth_cohort_ids(by_video: dict[str, list], cap: int) -> list[str]:
+    """The top `cap` population video_ids by PEAK views/day at any point in their
+    tracked life (highest growth at any time), ranked DESC and tie-broken by
+    video_id. Peak is `max(_velocity_points(pts))`, the SAME series the velocity
+    curve plots and the median_peak_velocity card and bars read, so the selector
+    value equals the curve's high point (one definition, four consumers). Selecting
+    by peak (not latest) pulls in long-tracked videos that surged earlier, so the
+    growth curves span the window instead of only the last few days. A video with
+    fewer than two usable snapshots has no velocity and is excluded."""
     scored = []
     for vid, pts in by_video.items():
-        v = _latest_velocity(pts)
-        if v is not None:
-            scored.append((v, vid))
-    scored.sort(key=lambda t: (-t[0], t[1]))  # velocity DESC, video_id ASC
+        vp = _velocity_points(pts)
+        if vp:
+            scored.append((max(p["views_per_day"] for p in vp), vid))
+    scored.sort(key=lambda t: (-t[0], t[1]))  # peak velocity DESC, video_id ASC
     return [vid for _, vid in scored[:cap]]
 
 
@@ -2615,9 +2619,10 @@ def fetch_dashboard_lifecycle(
     Returns a flat payload (no survivorship/engagement wrappers):
     - summary: three snapshot-behavior medians over the full population
       (median_tracked_lifespan_days, median_peak_velocity, median_total_view_growth).
-    - growth.series and ratio_series cover the VELOCITY cohort (top
-      config.LIFECYCLE_COHORT_SIZE by latest views/day), charted over full history;
-      each item carries link for a clickable tooltip.
+    - growth.series and ratio_series cover the GROWTH cohort (top
+      config.LIFECYCLE_GROWTH_COHORT_SIZE by PEAK views/day at any time), charted over
+      full history; each item carries link for a clickable tooltip and a `velocity`
+      series (the views/day-over-time / fall-off curve).
     - lifespan_distribution: tracked-lifespan histogram over the full population.
     - rank_history covers a DISJOINT bump cohort (top by most runs ranked, then best
       rank). Rank is inherently a board metric, so this one stays on rankings; its
@@ -2654,14 +2659,16 @@ def fetch_dashboard_lifecycle(
     )[:cap]
     rank_history = {"run_dates": rh["run_dates"], "series": bump_cohort}
 
-    # Velocity cohort: top `cap` by latest views/day, charted over full history.
+    # Growth cohort: top LIFECYCLE_GROWTH_COHORT_SIZE by PEAK views/day, charted over
+    # full history (View growth + Views-per-day + Velocity bars share it). Wider than
+    # the bump cohort so the curves reach back across the window.
     # fetch_snapshot_series carries title + link (clickable tooltip) and the
     # like/comment counts the ratio chart needs.
-    velocity_cohort_ids = _velocity_cohort_ids(population, cap)
-    series_by_id = fetch_snapshot_series(conn, velocity_cohort_ids)
+    growth_cohort_ids = _growth_cohort_ids(population, config.LIFECYCLE_GROWTH_COHORT_SIZE)
+    series_by_id = fetch_snapshot_series(conn, growth_cohort_ids)
     growth_series = []
     ratio_series = []
-    for vid in velocity_cohort_ids:  # preserve velocity ranking order
+    for vid in growth_cohort_ids:  # preserve peak-velocity ranking order
         entry = series_by_id.get(vid)
         if entry is None:
             continue

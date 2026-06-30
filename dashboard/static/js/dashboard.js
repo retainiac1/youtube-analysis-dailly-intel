@@ -19,6 +19,13 @@ const SURVIVORSHIP_NOTE =
 // bar fits the default .chart-mount height legibly; the leaderboard table lists the full set.
 const TOP_BREAKOUTS = 10;
 
+// Selectable line counts for the Lifecycle "Views per day over time" curve (it
+// overplots at the full growth cohort). Coupled set, defined once; options are
+// filtered to those that fit the actually-available series. velocityLimit is
+// ephemeral view state (survives refetch/theme re-render), not persisted.
+const VELOCITY_LINE_STEPS = [5, 8, 12, 20];
+let velocityLimit = 8;
+
 const intFmt = new Intl.NumberFormat();
 
 let mountEl = null;
@@ -288,9 +295,15 @@ function lifecycleGroup(title, children) {
 // A chart card whose title is WHAT the chart shows, with the cohort/scope as a
 // caption underneath (the reader can't see the selection rule, so it never goes
 // in the title).
-function lcCard(title, caption) {
+function lcCard(title, caption, control) {
   const chart = el("div", { class: "chart-mount" });
-  const kids = [el("h3", { class: "heading-sm", text: title })];
+  const heading = control
+    ? el("div", { class: "lc-card-head" }, [
+        el("h3", { class: "heading-sm", text: title }),
+        control,
+      ])
+    : el("h3", { class: "heading-sm", text: title });
+  const kids = [heading];
   if (caption) kids.push(el("p", { class: "dashboard-caption", text: caption }));
   kids.push(chart);
   return { card: el("section", { class: "glass-panel chart-card" }, kids), chart };
@@ -307,8 +320,69 @@ function renderLifecycle(data) {
     "The period selects which videos belong to the lane; each curve shows that " +
     "video's full tracked life (every snapshot, not just on-board runs).";
 
-  const viewGrowth = lcCard("View growth", `View count over each video's tracked life. ${periodNote}`);
-  const velocity = lcCard("Velocity", "Current views per day for the same fastest-growing videos.");
+  const cohortNote =
+    "The top 20 videos by peak growth (highest views per day reached at any point), " +
+    "over each video's full tracked life from its first capture.";
+  const viewGrowth = lcCard(
+    "View growth",
+    `Cumulative view count. ${cohortNote} ${periodNote}`
+  );
+  // The Views-per-day curve overplots at the full cohort, so the line count is a
+  // user control (ephemeral view state). Options adapt to how many series exist;
+  // velocityLimit is the preference, velEffective the clamped value actually shown.
+  const velAvail = (data.growth?.series || []).filter(
+    (s) => s.velocity && s.velocity.length
+  ).length;
+  const velOpts = (() => {
+    const steps = VELOCITY_LINE_STEPS.filter((n) => n < velAvail);
+    if (velAvail > 0 && !steps.includes(velAvail)) steps.push(velAvail);
+    return [...new Set(steps)].sort((a, b) => a - b);
+  })();
+  const velEffective =
+    velOpts.filter((n) => n <= velocityLimit).pop() ??
+    velOpts[velOpts.length - 1] ??
+    0;
+  const velSelect =
+    velOpts.length > 1
+      ? el("select", {
+          class: "lc-line-select",
+          "aria-label": "Number of velocity lines to show",
+        })
+      : null;
+  if (velSelect) {
+    velOpts.forEach((n) =>
+      velSelect.appendChild(
+        el("option", {
+          value: String(n),
+          text: n === velAvail ? `all (${n})` : String(n),
+        })
+      )
+    );
+    velSelect.value = String(velEffective);
+  }
+  const velControl = velSelect
+    ? el("label", { class: "lc-line-control" }, [
+        el("span", { class: "lc-line-label", text: "Show top" }),
+        velSelect,
+      ])
+    : null;
+  const velocityLines = lcCard(
+    "Views per day over time",
+    "Views per day over each video's full tracked life, same cohort as View growth. " +
+      "The rise to peak and the decline after are both visible (cumulative view " +
+      "growth can only flatten, never fall).",
+    velControl
+  );
+  if (velSelect) {
+    velSelect.addEventListener("change", () => {
+      velocityLimit = Number(velSelect.value);
+      charts.renderVelocityLines(velocityLines.chart, data.growth || {}, lane, velocityLimit);
+    });
+  }
+  const velocity = lcCard(
+    "Peak velocity",
+    "Each cohort video's peak views per day, the high point of its curve to the left, ranked."
+  );
   const bump = lcCard(
     "Rank movement",
     "A different set: the videos that appeared in the most runs (not the " +
@@ -328,7 +402,8 @@ function renderLifecycle(data) {
   panelEl.replaceChildren(
     lifecycleKpiStrip(data),
     lifecycleGroup("Growth", [
-      el("div", { class: "dash-2col" }, [viewGrowth.card, velocity.card]),
+      el("div", { class: "dash-2col" }, [viewGrowth.card, velocityLines.card]),
+      velocity.card,
     ]),
     lifecycleGroup("Survivorship", [
       el("div", { class: "dash-2col" }, [bump.card, lifespan.card]),
@@ -340,6 +415,7 @@ function renderLifecycle(data) {
 
   // Charts render after the mounts are in the DOM (ECharts needs real geometry).
   charts.renderGrowthLines(viewGrowth.chart, data.growth || {}, lane);
+  charts.renderVelocityLines(velocityLines.chart, data.growth || {}, lane, velEffective);
   charts.renderVelocityBars(velocity.chart, data.growth || {}, lane);
   // Rank movement is the one board metric: it needs movement across runs.
   if ((data.run_count || 0) < 2) {

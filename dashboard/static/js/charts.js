@@ -741,16 +741,17 @@ export function renderGrowthLines(el, payload, lane) {
   });
 }
 
-// --- Lifecycle: current velocity (views/day) ---------------------------------
-// Horizontal bars, one per cohort video, sorted desc. Reads the LAST velocity
-// point the helper already computed (does NOT recompute views/day). Replaces the
-// dashed velocity lines that made the old growth chart unreadable.
+// --- Lifecycle: peak velocity (views/day) ------------------------------------
+// Horizontal bars, one per cohort video, sorted desc by PEAK views/day (the high
+// point of the views-per-day curve, the SAME value the cohort selector and the
+// median_peak_velocity card use). A "who peaked highest" summary beside the
+// fall-off curve; reads the helper's velocity series, never recomputes.
 export function renderVelocityBars(el, payload, lane) {
   const rows = ((payload && payload.series) || [])
     .map((s) => {
       const v =
         s.velocity && s.velocity.length
-          ? s.velocity[s.velocity.length - 1].views_per_day
+          ? Math.max(...s.velocity.map((p) => p.views_per_day))
           : null;
       return v == null
         ? null
@@ -775,14 +776,14 @@ export function renderVelocityBars(el, payload, lane) {
         const r = rows[ps[0].dataIndex] || {};
         return (
           `${videoTitleLink(r.label, r.link)}<br/>` +
-          `${intFmt.format(Math.round(ps[0].value))} views/day`
+          `${intFmt.format(Math.round(ps[0].value))} peak views/day`
         );
       },
     },
     grid: { left: 8, right: 24, top: 12, bottom: 36, containLabel: true },
     xAxis: {
       type: "value",
-      name: "views/day",
+      name: "peak views/day",
       nameLocation: "middle",
       nameGap: 28,
       nameTextStyle: { color: t.textStyle.color },
@@ -804,6 +805,89 @@ export function renderVelocityBars(el, payload, lane) {
         itemStyle: { color, borderRadius: [0, 4, 4, 0] },
       },
     ],
+  });
+}
+
+// --- Lifecycle: views per day over time (the fall-off curve) -----------------
+// One line per growth-cohort video, x = date, y = views/day on a single axis,
+// over the full tracked span. This is the rise-AND-fall view that cumulative
+// View growth cannot show (cumulative views only flatten, never descend). Plots
+// the helper's existing `velocity` series (a pure replot of the same
+// _velocity_points the cohort selector and the peak bars/card read), so a line's
+// visible high point equals that video's bar height and its peak-velocity card
+// contribution. Same scroll-legend, stable slot colour, and tooltip-link
+// structure as renderGrowthLines.
+let velocityLineSlots = {};
+
+export function renderVelocityLines(el, payload, lane, limit) {
+  // payload.series is peak-sorted, so the first `limit` are the highest-peak
+  // videos. limit is a user-set view control (the curve overplots at the full
+  // cohort size); null/0 means show every series with a velocity.
+  const all = ((payload && payload.series) || []).filter(
+    (s) => s.velocity && s.velocity.length
+  );
+  const series = limit ? all.slice(0, limit) : all;
+  if (!series.length) {
+    showEmpty(el, "Not enough snapshot history yet for velocity curves.");
+    return;
+  }
+  const t = THEMES[themeName()];
+  const inst = mount(el);
+  velocityLineSlots = allocateSlots(series.map((s) => s.video_id), velocityLineSlots);
+
+  const linkByName = {};
+  const lines = series.map((s) => {
+    const color = paletteColor(velocityLineSlots[s.video_id]);
+    const name = s.title || s.video_id;
+    linkByName[name] = s.link || null;
+    return {
+      name,
+      type: "line",
+      showSymbol: true,
+      symbolSize: 5,
+      itemStyle: { color },
+      lineStyle: { color },
+      data: s.velocity.map((p) => [p.captured_at, p.views_per_day]),
+    };
+  });
+
+  inst.setOption({
+    animation: !prefersReducedMotion,
+    tooltip: {
+      trigger: "axis",
+      formatter: (params) =>
+        `<strong>${escapeHtml(fmtDateTick(params[0].axisValue))}</strong><br/>` +
+        params
+          .map(
+            (p) =>
+              `${p.marker}${videoTitleLink(p.seriesName, linkByName[p.seriesName])}: ` +
+              `${compactFmt.format(Math.round(p.value[1]))}/day`
+          )
+          .join("<br/>"),
+    },
+    legend: {
+      textStyle: { color: t.textStyle.color },
+      top: 0,
+      type: "scroll",
+      formatter: (name) => truncate(name, 40),
+    },
+    grid: { left: 16, right: 16, top: 36, bottom: 40, containLabel: true },
+    xAxis: {
+      type: "time",
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color, formatter: (v) => fmtDateTick(v) },
+    },
+    yAxis: {
+      type: "value",
+      name: "views/day",
+      nameLocation: "middle",
+      nameGap: 48,
+      nameTextStyle: { color: t.textStyle.color },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      axisLabel: { color: t.textStyle.color, formatter: (v) => compactFmt.format(v) },
+      splitLine: { lineStyle: { color: t.splitLine } },
+    },
+    series: lines,
   });
 }
 

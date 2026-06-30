@@ -534,6 +534,30 @@ html { scroll-padding-top: var(--header-h, 0px); }
   font-size: 0.8rem;
   line-height: 1.35;
 }
+/* Lifecycle chart-card header with an inline view control (the velocity-curve
+   line-count picker): title on the left, control on the right. */
+.lc-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.lc-line-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.lc-line-select {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.15rem 0.4rem;
+  font-size: 0.8rem;
+}
 /* The exit-reason takeaway: a sentence, not a chart (the split is ~95/5/0). */
 .dashboard-lead {
   margin: 0;
