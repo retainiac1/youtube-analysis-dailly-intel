@@ -63,7 +63,7 @@ import config
 # counts, classify_cost, snapshot_count). Unconditional CREATE IF NOT EXISTS —
 # additive, idempotent, born empty, not version-gated; the once-a-day discover cap
 # reads run_log (discover_ran_today), NOT this table.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -127,6 +127,7 @@ SCHEMA_STATEMENTS: list[str] = [
         view_count INTEGER,
         like_count INTEGER,
         comment_count INTEGER,
+        subscriber_count INTEGER,  -- v14: channel subs at snapshot time (NULL for pre-v14 rows)
         UNIQUE(run_id, video_id)
     )
     """,
@@ -556,6 +557,15 @@ def init_db(db_path: str) -> None:
                     "ALTER TABLE videos ADD COLUMN last_view_growth_at TEXT"
                 )
                 _backfill_view_growth(conn)
+            # v13 -> v14: add stats_snapshots.subscriber_count (nullable). A fresh DB
+            # already has it from the CREATE above, so the guard skips the ALTER. NOT
+            # back-populated: past subs were overwritten on channels and are
+            # unrecoverable, so existing rows stay NULL (the read side falls back to the
+            # current channels sub count for those days).
+            if "subscriber_count" not in _column_names(conn, "stats_snapshots"):
+                conn.execute(
+                    "ALTER TABLE stats_snapshots ADD COLUMN subscriber_count INTEGER"
+                )
             # Stamp LAST, so the version is never ahead of the schema.
             if current_version != SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -763,22 +773,26 @@ def log_invocation(conn: sqlite3.Connection, run_date: str, scope: str,
 
 
 def insert_snapshot(conn: sqlite3.Connection, run_id: int, video_id: str,
-                    captured_at: str, view_count, like_count, comment_count) -> None:
+                    captured_at: str, view_count, like_count, comment_count,
+                    subscriber_count=None) -> None:
     """Append one stats snapshot for a video within a run. Keyed to
     (run_id, video_id) with DO NOTHING, so an interrupted-then-resumed run with
     the same run_id writes at most one snapshot per video; a new run_id adds a
-    fresh row (one snapshot per refresh)."""
+    fresh row (one snapshot per refresh). subscriber_count is the channel's sub
+    count at write time (v14), NULL when unknown."""
     conn.execute(
         """
         INSERT INTO stats_snapshots
-            (run_id, video_id, captured_at, view_count, like_count, comment_count)
-        VALUES (:run_id, :video_id, :captured_at, :view_count, :like_count, :comment_count)
+            (run_id, video_id, captured_at, view_count, like_count, comment_count,
+             subscriber_count)
+        VALUES (:run_id, :video_id, :captured_at, :view_count, :like_count,
+                :comment_count, :subscriber_count)
         ON CONFLICT(run_id, video_id) DO NOTHING
         """,
         {
             "run_id": run_id, "video_id": video_id, "captured_at": captured_at,
             "view_count": view_count, "like_count": like_count,
-            "comment_count": comment_count,
+            "comment_count": comment_count, "subscriber_count": subscriber_count,
         },
     )
 
@@ -1996,41 +2010,55 @@ def fetch_snapshot_series(
     return series
 
 
+def _latest_snapshot_by_eastern_day(series: list[dict]) -> dict:
+    """Collapse a snapshot series to one row per Eastern calendar day: the day's
+    LATEST snapshot (cumulative counts only climb within a day, so the last snapshot
+    is the true end-of-day state). The day boundary is Eastern via _parse_instant ->
+    config.LOCAL_TZ (an 11pm and a 1am snapshot fall on different days); a row with an
+    unparseable captured_at is dropped. Returns {eastern_date: row}, the original row
+    dict per day, so callers read whatever fields they need (view_count,
+    subscriber_count). Shared by _velocity_points and the per-day rank computation so
+    both use ONE daily-collapse definition."""
+    by_day: dict = {}  # eastern date -> (instant, row) of the day's latest snapshot
+    for p in series:
+        ts = _parse_instant(p["captured_at"])
+        if ts is None:
+            continue
+        day = ts.astimezone(ZoneInfo(config.LOCAL_TZ)).date()
+        cur = by_day.get(day)
+        if cur is None or ts > cur[0]:
+            by_day[day] = (ts, p)
+    return {day: row for day, (_ts, row) in by_day.items()}
+
+
 def _velocity_points(series: list[dict]) -> list[dict]:
     """Views-per-day as a clean one-point-per-DAY rate: collapse to one cumulative
-    total per Eastern calendar day FIRST, then difference across populated days
-    dividing by the real day gap (Δviews / Δdays).
+    total per Eastern calendar day FIRST (via _latest_snapshot_by_eastern_day), then
+    difference across populated days dividing by the real day gap (Δviews / Δdays).
 
     Differencing raw consecutive snapshots is wrong: when two capture runs land
     minutes apart, annualizing that sub-hour interval amplifies tiny view jitter into
-    huge spikes. Instead, for each Eastern day take that day's LATEST snapshot's
-    cumulative view_count as the day total (cumulative views only climb within a day,
-    so the last snapshot is the true end-of-day count). The day boundary is Eastern
-    via _parse_instant -> config.LOCAL_TZ (an 11pm and a 1am snapshot are different
-    days). The rate between two POPULATED days is (later total - earlier total) /
+    huge spikes. The rate between two POPULATED days is (later total - earlier total) /
     (calendar days between them), so a 2-day gap divides by 2; a missing day is never
     fabricated as a zero point, it just widens the gap. The value is SIGNED (no abs):
     cumulative counts are monotonic for a normal video so day-over-day differences
     are positive, but a genuine view correction is plotted as-is, never abs'd into a
     fake positive spike. A series with fewer than two populated days yields []."""
-    by_day: dict = {}  # eastern date -> (instant, view_count, captured_at) of the day's latest snapshot
-    for p in series:
-        ts = _parse_instant(p["captured_at"])
-        if ts is None or p["view_count"] is None:
-            continue
-        day = ts.astimezone(ZoneInfo(config.LOCAL_TZ)).date()
-        cur = by_day.get(day)
-        if cur is None or ts > cur[0]:
-            by_day[day] = (ts, p["view_count"], p["captured_at"])
+    by_day = _latest_snapshot_by_eastern_day(
+        [p for p in series if p["view_count"] is not None]
+    )
     days = sorted(by_day)
     out: list[dict] = []
     for prev_day, cur_day in zip(days, days[1:]):
         gap = (cur_day - prev_day).days
         if gap <= 0:
             continue
-        views_per_day = (by_day[cur_day][1] - by_day[prev_day][1]) / gap
+        views_per_day = (
+            by_day[cur_day]["view_count"] - by_day[prev_day]["view_count"]
+        ) / gap
         out.append(
-            {"captured_at": by_day[cur_day][2], "views_per_day": views_per_day}
+            {"captured_at": by_day[cur_day]["captured_at"],
+             "views_per_day": views_per_day}
         )
     return out
 
@@ -2599,6 +2627,113 @@ def _lifecycle_maturation(
     return out
 
 
+def _lifecycle_rank_history(
+    conn: sqlite3.Connection,
+    bucket: str,
+    start_date: str | None,
+    end_date: str | None,
+    cap: int,
+) -> dict:
+    """Per-day rank recomputed from snapshots (NOT the board's stored rank, which
+    caps a line at 2-3 points because a video is on the 3-day board only briefly).
+    Rank each lane-population video against the OTHER population videos that Eastern
+    day by views-to-subscribers ratio, so a video tracked far beyond its board
+    appearances gets a full rank-over-time line.
+
+    Population (which videos) is the rankings membership subquery that scopes every
+    Lifecycle chart; depth + ranking come from snapshots. Daily collapse via
+    _latest_snapshot_by_eastern_day (the day's latest snapshot). Ratio is the board's
+    formula `round(view_count / max(subs, 1), 2)` (canonical at swipefile.py:717),
+    where subs is the snapshot's historical subscriber_count when present (v14+) and
+    the current channels sub count only when that is NULL (pre-v14 rows); a (video,
+    day) with no usable subs or view_count is skipped. Per day, rank by the board's
+    key (ratio DESC, view_count DESC, video_id ASC), rank 1 = best. Cohort = top `cap`
+    by most ranked days, tie-broken by best (min) rank then video_id. Bounded SQL only
+    (the membership subquery, no per-id IN). Returns the renderRankMovement shape
+    {run_dates, series:[{video_id, title, link, points:[{run_date, rank}]}]}."""
+    where = ["r.bucket = :bucket"]
+    params: dict = {"bucket": bucket}
+    if start_date:
+        where.append("r.run_date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where.append("r.run_date <= :end_date")
+        params["end_date"] = end_date
+    wc = " AND ".join(where)
+    snap_rows = conn.execute(
+        f"""
+        SELECT s.video_id, s.captured_at, s.view_count, s.subscriber_count
+        FROM stats_snapshots s
+        WHERE s.video_id IN (
+            SELECT DISTINCT r.video_id FROM rankings r WHERE {wc}
+        )
+        """,
+        params,
+    ).fetchall()
+    meta = {
+        m["video_id"]: m
+        for m in conn.execute(
+            f"""
+            SELECT v.video_id, v.title, v.link, c.subscriber_count AS cur_subs
+            FROM videos v
+            LEFT JOIN channels c ON c.channel_id = v.channel_id
+            WHERE v.video_id IN (
+                SELECT DISTINCT r.video_id FROM rankings r WHERE {wc}
+            )
+            """,
+            params,
+        ).fetchall()
+    }
+    by_video: dict[str, list] = {}
+    for row in snap_rows:
+        by_video.setdefault(row["video_id"], []).append(
+            {"captured_at": row["captured_at"], "view_count": row["view_count"],
+             "subscriber_count": row["subscriber_count"]}
+        )
+    # Per video, per Eastern day: ratio with historical subs (fallback to current).
+    day_entries: dict = {}  # eastern_date -> [(ratio, view_count, video_id), ...]
+    for vid, series in by_video.items():
+        cur_subs = meta[vid]["cur_subs"] if vid in meta else None
+        for day, snap in _latest_snapshot_by_eastern_day(series).items():
+            vc = snap["view_count"]
+            subs = snap["subscriber_count"]
+            if subs is None:
+                subs = cur_subs  # pre-v14 rows: fall back to the current channel subs
+            if vc is None or subs is None:
+                continue
+            ratio = round(vc / max(subs, 1), 2)  # board formula, swipefile.py:717
+            day_entries.setdefault(day, []).append((ratio, vc, vid))
+    # Rank each day by the board's key (ratio desc, view desc, video_id asc); 1 = best.
+    rank_by_video: dict[str, dict] = {}
+    for day, entries in day_entries.items():
+        entries.sort(key=lambda e: (-e[0], -e[1], e[2]))
+        for rank, (_ratio, _vc, vid) in enumerate(entries, start=1):
+            rank_by_video.setdefault(vid, {})[day] = rank
+    series_objs = []
+    for vid, day_rank in rank_by_video.items():
+        m = meta.get(vid)
+        series_objs.append(
+            {
+                "video_id": vid,
+                "title": m["title"] if m else None,
+                "link": m["link"] if m else None,
+                "points": [
+                    {"run_date": d.isoformat(), "rank": day_rank[d]}
+                    for d in sorted(day_rank)
+                ],
+            }
+        )
+
+    def _best_rank(s):
+        return min((p["rank"] for p in s["points"]), default=float("inf"))
+
+    cohort = sorted(
+        series_objs, key=lambda s: (-len(s["points"]), _best_rank(s), s["video_id"])
+    )[:cap]
+    run_dates = sorted({p["run_date"] for s in cohort for p in s["points"]})
+    return {"run_dates": run_dates, "series": cohort}
+
+
 def fetch_dashboard_lifecycle(
     conn: sqlite3.Connection,
     bucket: str,
@@ -2625,9 +2760,9 @@ def fetch_dashboard_lifecycle(
       full history; each item carries link for a clickable tooltip and a `velocity`
       series (the views/day-over-time / fall-off curve).
     - lifespan_distribution: tracked-lifespan histogram over the full population.
-    - rank_history covers a DISJOINT bump cohort (top by most runs ranked, then best
-      rank). Rank is inherently a board metric, so this one stays on rankings; its
-      series already carry link.
+    - rank_history is rank recomputed PER DAY from snapshots (_lifecycle_rank_history):
+      each population video ranked against the lane that day by views-to-subs ratio,
+      so lines span the full tracked life, not the 2-3 days it was on the board.
     - maturation is a CURRENT-STATE cross-section: each in-window video's
       absolute-latest snapshot versus its published_at, with video_id/title/link.
 
@@ -2636,11 +2771,22 @@ def fetch_dashboard_lifecycle(
     lane+window returns run_count 0, empty lists, and None medians; never raises."""
     cap = config.LIFECYCLE_COHORT_SIZE
 
-    # Rankings spine: drives the lane+window run_count (a board fact that now gates
-    # only the Rank-movement chart) and the bump cohort.
-    rh = fetch_rank_history(conn, bucket, None, start_date, end_date)
-    rank_series = rh["series"]
-    run_count = len(rh["run_dates"])
+    # Board run_count: distinct rankings run_dates in the window. Informational only
+    # now - the Rank-movement chart no longer gates on it (it self-guards on having
+    # >= 2 ranked DAYS). Bounded; fetch_rank_history is untouched (it backs Trends).
+    rc_where = ["r.bucket = :bucket"]
+    rc_params: dict = {"bucket": bucket}
+    if start_date:
+        rc_where.append("r.run_date >= :start_date")
+        rc_params["start_date"] = start_date
+    if end_date:
+        rc_where.append("r.run_date <= :end_date")
+        rc_params["end_date"] = end_date
+    run_count = conn.execute(
+        f"SELECT COUNT(DISTINCT r.run_date) FROM rankings r "
+        f"WHERE {' AND '.join(rc_where)}",
+        rc_params,
+    ).fetchone()[0]
 
     # One bounded query: full snapshot history for the rankings-defined population.
     # Feeds cohort selection, the summary medians, and the lifespan distribution.
@@ -2648,17 +2794,9 @@ def fetch_dashboard_lifecycle(
     summary = _lifecycle_summary(population)
     lifespan_distribution = _lifecycle_lifespan_distribution(population)
 
-    # Bump cohort (rank movement): videos appearing in the MOST runs (>=2),
-    # tie-broken by best (min) rank then video_id, charted from the rankings spine.
-    def _best_rank(s):
-        ranks = [p["rank"] for p in s["points"] if p["rank"] is not None]
-        return min(ranks) if ranks else float("inf")
-
-    repeat_series = [s for s in rank_series if len(s["points"]) >= 2]
-    bump_cohort = sorted(
-        repeat_series, key=lambda s: (-len(s["points"]), _best_rank(s), s["video_id"])
-    )[:cap]
-    rank_history = {"run_dates": rh["run_dates"], "series": bump_cohort}
+    # Rank movement: rank recomputed PER DAY from snapshots (full-length lines), not
+    # the board's stored rank (which caps a line at 2-3 board points).
+    rank_history = _lifecycle_rank_history(conn, bucket, start_date, end_date, cap)
 
     # Growth cohort: top LIFECYCLE_GROWTH_COHORT_SIZE by PEAK views/day, charted over
     # full history (View growth + Views-per-day + Velocity bars share it). Wider than

@@ -62,14 +62,25 @@ VALID_LANES = {"health", "habit", "overall"}
 
 @asynccontextmanager
 async def _lifespan(app: "FastAPI"):
-    """Ensure the schema exists and is migrated to the current version on startup
-    (idempotent + additive; offline-seeds the baseline models). The dashboard
-    otherwise relies on the pipeline having run init_db, so launching it standalone
-    against an un-migrated DB would 500 on every registry read (the dropdown, spend,
-    /api/models). This makes the dashboard self-sufficient and never-broken. The DB
-    path is resolved the same way every request resolves it (DASHBOARD_DB_PATH or
-    config.DB_PATH)."""
-    db.init_db(get_db_path())
+    """Ensure the schema on a FRESH database, but REFUSE to auto-migrate an existing
+    one. A missing or never-stamped DB is created + stamped (offline-seeds the baseline
+    models), so a standalone first launch works and never 500s on a registry read. An
+    existing DB stamped BEHIND SCHEMA_VERSION makes the server fail loud rather than
+    silently migrate: with --reload-dir at the repo root, editing db.py reloads the
+    server and a bare init_db here would migrate whatever DB it points at (including
+    the live seed), bypassing the backup gate. Migrate deliberately instead: stop the
+    server, back up and verify, run init_db by hand, then restart. The DB path resolves
+    the same way every request resolves it (DASHBOARD_DB_PATH or config.DB_PATH)."""
+    db_path = get_db_path()
+    if db.migration_pending(db_path):
+        raise RuntimeError(
+            f"Refusing to start: the database at {db_path} is behind the code's schema "
+            f"version {db.SCHEMA_VERSION}. The dashboard does not auto-migrate an "
+            f"existing database (that bypasses the backup gate). Stop the server, back "
+            f"up and verify, run the migration deliberately "
+            f"(python -c \"import db; db.init_db('{db_path}')\"), then restart."
+        )
+    db.init_db(db_path)
     yield
 
 

@@ -198,11 +198,15 @@ def test_refresh_updates_stats_preserves_user_and_content(tmp_path):
         assert row["top_comments"] == "orig comment"       # preserved
         assert row["user_notes"] == "mine"                 # user column intact
         assert row["starred"] == 1
-        # exactly one snapshot for this run
+        # exactly one snapshot for this run, carrying the channel's current subs (v14:
+        # the sweep is the live snapshot-write path; it captures subscriber_count off
+        # the sub count already fetched for the ratio, here the seeded c1 = 100000).
         snaps = conn.execute(
-            "SELECT view_count FROM stats_snapshots WHERE run_id=? AND video_id='v1'",
+            "SELECT view_count, subscriber_count FROM stats_snapshots "
+            "WHERE run_id=? AND video_id='v1'",
             (run_id,)).fetchall()
         assert [s["view_count"] for s in snaps] == [200000]
+        assert [s["subscriber_count"] for s in snaps] == [100000]
         # rankings recomputed
         ranked = conn.execute(
             "SELECT video_id FROM rankings WHERE bucket='overall'").fetchall()
@@ -211,6 +215,73 @@ def test_refresh_updates_stats_preserves_user_and_content(tmp_path):
         assert len(youtube._videos.calls) == 1
         assert len(youtube._search.calls) == 0
         assert budget.run_units == 1
+    finally:
+        conn.close()
+
+
+def test_discover_builder_snapshot_args_carry_subscriber_count(tmp_path):
+    """The discover builder (_build_records) emits 5-element snapshot_args including
+    subscriber_count, in lockstep with persist_snapshots / insert_snapshot. Discover
+    currently DISCARDS these (the sweep is the authoritative snapshot pass), but the
+    tuple shape must stay correct: a 4-tuple would unpack-error if it ever reached
+    persist_snapshots."""
+    # v1 on a known channel (c1); v2 on a channel ABSENT from channel_map (c2).
+    seen = {
+        "v1": fake_video("v1", channel_id="c1", view_count="5000"),
+        "v2": fake_video("v2", channel_id="c2", view_count="4000"),
+    }
+    query_map = {"v1": ["build habits"], "v2": ["build habits"]}
+    channel_map = {"c1": {
+        "subscriber_count": 100000, "channel_video_count": 10,
+        "channel_total_views": 1000000, "channel_created_date": "2020-01-01",
+        "channel_country": "US", "channel_keywords": "k"}}
+    state = {"comments": {"v1": "c", "v2": "c"}}
+
+    _videos, snapshot_args, _channels = swipefile._build_records(
+        state, seen, query_map, channel_map)
+    args = {a[0]: a for a in snapshot_args}
+    assert all(len(a) == 5 for a in snapshot_args)   # 5-tuples, not 4
+    assert args["v1"][4] == 100000                    # known channel: real subs
+    assert args["v2"][4] is None                      # absent channel: None, not 0
+
+    # End-to-end: persist_snapshots unpacks the 5-tuples and writes subs (NULL for v2).
+    db_path = str(tmp_path / "d.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        swipefile.persist_snapshots(conn, 1, snapshot_args, NOW1)
+        rows = {
+            r["video_id"]: r["subscriber_count"]
+            for r in conn.execute(
+                "SELECT video_id, subscriber_count FROM stats_snapshots")
+        }
+        assert rows["v1"] == 100000
+        assert rows["v2"] is None                      # NULL written, not 0
+    finally:
+        conn.close()
+
+
+def test_sweep_writes_null_subs_for_absent_channel(tmp_path):
+    """The sweep (live snapshot writer) captures subs from fetch_channel_subs; a
+    tracked video whose channel has no channels row gets subscriber_count NULL
+    (subs.get -> None), never a fake 0 that would inflate the ratio."""
+    db_path = str(tmp_path / "swipe.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        # Active tracked video on channel 'cX' with NO channels row.
+        db.upsert_video(conn, make_video_record(video_id="v9", channel_id="cX"), NOW1)
+        conn.commit()
+        run_id = db.start_run(conn, "refresh", NOW1)
+        budget = swipefile.QuotaBudget(0, 9500)
+        youtube = FakeYouTube(
+            video_items={"v9": fake_video("v9", channel_id="cX", view_count="123")})
+        swipefile._run_catalog_sweep(youtube, conn, run_id, budget, NOW1, NOW1[:10])
+        row = conn.execute(
+            "SELECT subscriber_count FROM stats_snapshots "
+            "WHERE run_id=? AND video_id='v9'",
+            (run_id,)).fetchone()
+        assert row["subscriber_count"] is None   # absent channel -> NULL, not 0
     finally:
         conn.close()
 

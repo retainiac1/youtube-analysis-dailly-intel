@@ -1,5 +1,9 @@
 """Phase 7 dashboard surface: the run-state / run-summary endpoints and the
 result-frame summary attachment."""
+import sqlite3
+
+import pytest
+
 import config
 import db
 
@@ -42,6 +46,41 @@ def test_run_state_and_run_summary_endpoints(tmp_path):
         assert summaries[0]["mode"] == "refresh"          # newest first (higher run_id)
     finally:
         appmod.app.dependency_overrides.clear()
+
+
+def test_lifespan_refuses_to_auto_migrate_existing_old_db(tmp_path, monkeypatch):
+    """Startup must REFUSE to auto-migrate an EXISTING behind-version DB (the
+    auto-migrate footgun: a --reload edit to db.py would otherwise silently migrate
+    the live seed and bypass the backup gate). A fresh/missing path is created and
+    starts cleanly; a current DB is a no-op."""
+    from fastapi.testclient import TestClient
+    from dashboard import app as appmod
+
+    # An existing DB stamped behind SCHEMA_VERSION: the lifespan must fail loud.
+    old = str(tmp_path / "old.db")
+    raw = sqlite3.connect(old)
+    raw.execute("CREATE TABLE videos (video_id TEXT PRIMARY KEY)")
+    raw.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION - 1}")
+    raw.commit()
+    raw.close()
+    monkeypatch.setenv("DASHBOARD_DB_PATH", old)
+    with pytest.raises(RuntimeError, match="Refusing to start"):
+        with TestClient(appmod.app):
+            pass
+    # Refusal does not migrate: the old DB is left at its prior version.
+    assert sqlite3.connect(old).execute(
+        "PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION - 1
+
+    # A missing path: created + stamped current, starts cleanly.
+    fresh = str(tmp_path / "fresh.db")
+    monkeypatch.setenv("DASHBOARD_DB_PATH", fresh)
+    with TestClient(appmod.app):
+        pass
+    assert db.migration_pending(fresh) is False
+
+    # A current DB: no-op, starts cleanly.
+    with TestClient(appmod.app):
+        pass
 
 
 def test_result_event_attaches_summary_or_omits():

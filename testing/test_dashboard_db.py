@@ -20,7 +20,7 @@ def test_fresh_db_creates_interpretations_and_stamps_current(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 13
+        assert version == db.SCHEMA_VERSION == 14
     finally:
         conn.close()
 
@@ -68,7 +68,7 @@ def test_seeded_v2_db_migrates_without_harming_seed(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 13
+        assert version == db.SCHEMA_VERSION == 14
         after = dict(
             conn.execute("SELECT * FROM videos WHERE video_id = 'seed'").fetchone()
         )
@@ -221,6 +221,75 @@ def test_fetch_dashboard_lifecycle_is_snapshot_driven(tmp_path):
         # Maturation tooltips can name + link the video.
         assert data["maturation"]
         assert all("video_id" in m and "link" in m for m in data["maturation"])
+    finally:
+        conn.close()
+
+
+def _seed_rank(conn):
+    """Two lane videos with a ratio crossover across two Eastern days, a
+    multi-snapshot day (latest-per-day collapse), and a NULL-subs row (fallback to
+    current channels subs). Subs are 1000 for both, so rank tracks view_count."""
+    for ch in ("chA", "chB"):
+        conn.execute(
+            f"INSERT INTO channels (channel_id, subscriber_count) VALUES ('{ch}', 1000)"
+        )
+    conn.execute(
+        "INSERT INTO videos (video_id, title, link, channel_id) VALUES "
+        "('vidA', 'Alpha', 'http://yt/vidA', 'chA')"
+    )
+    conn.execute(
+        "INSERT INTO videos (video_id, title, link, channel_id) VALUES "
+        "('vidB', 'Beta', 'http://yt/vidB', 'chB')"
+    )
+    # rankings = membership only; the recompute ignores rankings.rank.
+    for vid in ("vidA", "vidB"):
+        conn.execute(
+            "INSERT INTO rankings (run_date, bucket, rank, video_id, metric_value, "
+            f"captured_at) VALUES ('2026-06-11', 'health', "
+            f"{1 if vid == 'vidA' else 2}, '{vid}', 1.0, '2026-06-11T10:00:00-04:00')"
+        )
+    # (run_id, video_id, captured_at, view_count, subscriber_count)
+    snaps = [
+        (1, "vidA", "2026-06-10T09:00:00-04:00", 4000, 1000),  # same ET day, earlier
+        (2, "vidA", "2026-06-10T23:00:00-04:00", 5000, 1000),  # latest -> used
+        (3, "vidA", "2026-06-11T10:00:00-04:00", 6000, 1000),
+        (1, "vidB", "2026-06-10T10:00:00-04:00", 3000, 1000),
+        (3, "vidB", "2026-06-11T10:00:00-04:00", 9000, None),  # NULL subs -> fallback
+    ]
+    for rid, vid, cap, vc, subs in snaps:
+        conn.execute(
+            "INSERT INTO stats_snapshots (run_id, video_id, captured_at, view_count, "
+            f"like_count, comment_count, subscriber_count) VALUES ({rid}, '{vid}', "
+            f"'{cap}', {vc}, 0, 0, {'NULL' if subs is None else subs})"
+        )
+    conn.commit()
+
+
+def test_lifecycle_rank_history_recomputes_per_day(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        _seed_rank(conn)
+        rh = db._lifecycle_rank_history(conn, "health", None, None, 6)
+
+        # Full-length per-day lines (not the 1 board day), one point per ranked day.
+        assert rh["run_dates"] == ["2026-06-10", "2026-06-11"]
+        by_vid = {s["video_id"]: s for s in rh["series"]}
+        # vidA: 06-10 ratio 5.0 (latest 5000/1000, the 4000 intraday is collapsed
+        # away) -> rank 1; 06-11 ratio 6.0 vs vidB 9.0 -> rank 2 (the crossover).
+        assert by_vid["vidA"]["points"] == [
+            {"run_date": "2026-06-10", "rank": 1},
+            {"run_date": "2026-06-11", "rank": 2},
+        ]
+        # vidB: 06-10 ratio 3.0 -> rank 2; 06-11 ratio 9.0 (snapshot subs NULL, so it
+        # falls back to the current channels sub count 1000) -> rank 1.
+        assert by_vid["vidB"]["points"] == [
+            {"run_date": "2026-06-10", "rank": 2},
+            {"run_date": "2026-06-11", "rank": 1},
+        ]
+        # link carried for the tooltip.
+        assert by_vid["vidA"]["link"] == "http://yt/vidA"
     finally:
         conn.close()
 

@@ -42,7 +42,7 @@ EXPECTED_COLUMNS = {
     },
     "stats_snapshots": {
         "id", "run_id", "video_id", "captured_at", "view_count", "like_count",
-        "comment_count",
+        "comment_count", "subscriber_count",
     },
     "rankings": {
         "run_date", "bucket", "rank", "video_id", "metric_value", "captured_at",
@@ -137,7 +137,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 13
+        assert version == db.SCHEMA_VERSION == 14
     finally:
         conn.close()
 
@@ -338,6 +338,55 @@ def test_v3_to_current_migration_is_non_destructive(tmp_path):
         interp_after = dict(conn.execute("SELECT * FROM interpretations").fetchone())
         assert video_after == video_before
         assert interp_after == interp_before
+    finally:
+        conn.close()
+
+
+def test_v13_to_v14_adds_subscriber_count_nullable(tmp_path):
+    """v13 -> v14: stats_snapshots gains a nullable subscriber_count. The existing
+    row is preserved and reads NULL (past subs were overwritten and are
+    unrecoverable); a freshly written row carries a real value."""
+    db_path = str(tmp_path / "v13.db")
+    raw = sqlite3.connect(db_path)
+    raw.row_factory = sqlite3.Row
+    try:
+        # v13-shaped stats_snapshots (NO subscriber_count) plus one row, stamped 13.
+        raw.execute(
+            "CREATE TABLE stats_snapshots ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, video_id TEXT, "
+            "captured_at TEXT, view_count INTEGER, like_count INTEGER, "
+            "comment_count INTEGER, UNIQUE(run_id, video_id))"
+        )
+        raw.execute(
+            "INSERT INTO stats_snapshots (run_id, video_id, captured_at, view_count, "
+            "like_count, comment_count) VALUES "
+            "(1, 'v1', '2026-06-08T10:00:00-04:00', 1000, 50, 5)"
+        )
+        raw.execute("PRAGMA user_version = 13")
+        raw.commit()
+    finally:
+        raw.close()
+
+    db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == db.SCHEMA_VERSION == 14
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(stats_snapshots)")}
+        assert "subscriber_count" in cols
+        old = conn.execute(
+            "SELECT * FROM stats_snapshots WHERE video_id='v1'").fetchone()
+        assert old["view_count"] == 1000              # preserved
+        assert old["subscriber_count"] is None         # old row reads NULL
+        # A freshly written snapshot carries a real subscriber_count.
+        db.insert_snapshot(conn, 2, "v2", "2026-06-09T10:00:00-04:00",
+                           2000, 60, 6, 12345)
+        conn.commit()
+        new = conn.execute(
+            "SELECT subscriber_count FROM stats_snapshots WHERE video_id='v2'"
+        ).fetchone()
+        assert new["subscriber_count"] == 12345
     finally:
         conn.close()
 

@@ -385,8 +385,10 @@ function renderLifecycle(data) {
   );
   const bump = lcCard(
     "Rank movement",
-    "A different set: the videos that appeared in the most runs (not the " +
-      "fastest-growing set above). Rank 1 is best. Needs more than one run."
+    "Rank recomputed each day: each video's views-to-subscriber ratio against the " +
+      "other lane videos that day, over its full tracked life (rank 1 = best). " +
+      "Subscriber history is captured from the migration date onward, so earlier " +
+      "days use current subscriber counts."
   );
   const lifespan = lcCard(
     "Tracked-lifespan distribution",
@@ -417,17 +419,10 @@ function renderLifecycle(data) {
   charts.renderGrowthLines(viewGrowth.chart, data.growth || {}, lane);
   charts.renderVelocityLines(velocityLines.chart, data.growth || {}, lane, velEffective);
   charts.renderVelocityBars(velocity.chart, data.growth || {}, lane);
-  // Rank movement is the one board metric: it needs movement across runs.
-  if ((data.run_count || 0) < 2) {
-    bump.chart.appendChild(
-      el("p", {
-        class: "dashboard-status",
-        text: "Select a wider period to see rank movement across runs.",
-      })
-    );
-  } else {
-    charts.renderRankMovement(bump.chart, data.rank_history || {}, lane);
-  }
+  // Rank movement self-guards: renderRankMovement needs a series with >= 2 ranked
+  // DAYS (not >= 2 board runs), so a single board run still draws when the window
+  // spans multiple snapshot days. No tab-level run_count gate.
+  charts.renderRankMovement(bump.chart, data.rank_history || {}, lane);
   charts.renderBars(lifespan.chart, data.lifespan_distribution || [], lane);
   charts.renderRatioLines(ratio.chart, data.ratio_series || [], lane);
   charts.renderMaturation(maturation.chart, data.maturation || [], lane);

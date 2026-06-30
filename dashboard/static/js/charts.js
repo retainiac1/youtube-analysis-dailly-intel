@@ -905,7 +905,7 @@ export function renderRankMovement(el, data, lane) {
     (s) => s.points && s.points.length >= 2
   );
   if (!runDates.length || !series.length) {
-    showEmpty(el, "Not enough repeat appearances to show rank movement.");
+    showEmpty(el, "Select a wider period to see rank movement (need at least 2 ranked days).");
     return;
   }
   const t = THEMES[themeName()];

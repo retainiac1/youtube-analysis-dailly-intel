@@ -793,11 +793,14 @@ def persist_categories(conn, records: list[dict], now: str) -> None:
 
 
 def persist_snapshots(conn, run_id: int, snapshot_args, captured_at: str) -> None:
-    """Append one stats snapshot per video for this run, in one transaction."""
+    """Append one stats snapshot per video for this run, in one transaction. Each
+    arg is (video_id, view_count, like_count, comment_count, subscriber_count)."""
     with db.transaction(conn):
-        for video_id, view_count, like_count, comment_count in snapshot_args:
+        for (video_id, view_count, like_count, comment_count,
+             subscriber_count) in snapshot_args:
             db.insert_snapshot(conn, run_id, video_id, captured_at,
-                               view_count, like_count, comment_count)
+                               view_count, like_count, comment_count,
+                               subscriber_count)
 
 
 # --- Rankings (Phase 3) ------------------------------------------------------
@@ -989,9 +992,12 @@ def _run_catalog_sweep(youtube, conn, run_id: int, budget: "QuotaBudget",
                 preserved["top_comments"] or "",
             )
             video_records.append(record)
+            # v14: capture the channel's current sub count on the snapshot row (the
+            # value already fetched for the ratio); None when the channel is absent so
+            # the read falls back, never a fake 0 that would inflate the ratio.
             snapshot_args.append(
                 (record["video_id"], record["view_count"],
-                 record["like_count"], record["comment_count"])
+                 record["like_count"], record["comment_count"], subs.get(ch_id))
             )
             if db.is_view_growth(prior.get(item_id), record["view_count"]):
                 grown_ids.append(item_id)
@@ -1326,8 +1332,10 @@ def _build_records(state: dict, seen_videos: dict[str, dict],
         buckets = bucket_union(matched, q_to_bucket)
         record = build_video_record(video, matched, buckets, ch_info, comments)
         video_records.append(record)
+        # v14: capture channel subs on the snapshot row (None when unknown).
         snapshot_args.append(
-            (vid, record["view_count"], record["like_count"], record["comment_count"])
+            (vid, record["view_count"], record["like_count"],
+             record["comment_count"], ch_info.get("subscriber_count"))
         )
 
     channel_records = [build_channel_record(cid, info) for cid, info in channel_map.items()]
