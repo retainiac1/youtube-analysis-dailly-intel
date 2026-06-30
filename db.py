@@ -1997,26 +1997,40 @@ def fetch_snapshot_series(
 
 
 def _velocity_points(series: list[dict]) -> list[dict]:
-    """Views-per-day velocity between consecutive snapshots. captured_at is parsed
-    to a UTC instant via _parse_instant (the same helper the date-window filter
-    uses — never a lexical compare). A non-positive time delta (clock skew or
-    same-instant snapshots) is skipped so the division is always safe, mirroring
-    how the pipeline guards its metric math. A single-point (or empty) series has
-    no pairs and yields []."""
+    """Views-per-day as a clean one-point-per-DAY rate: collapse to one cumulative
+    total per Eastern calendar day FIRST, then difference across populated days
+    dividing by the real day gap (Δviews / Δdays).
+
+    Differencing raw consecutive snapshots is wrong: when two capture runs land
+    minutes apart, annualizing that sub-hour interval amplifies tiny view jitter into
+    huge spikes. Instead, for each Eastern day take that day's LATEST snapshot's
+    cumulative view_count as the day total (cumulative views only climb within a day,
+    so the last snapshot is the true end-of-day count). The day boundary is Eastern
+    via _parse_instant -> config.LOCAL_TZ (an 11pm and a 1am snapshot are different
+    days). The rate between two POPULATED days is (later total - earlier total) /
+    (calendar days between them), so a 2-day gap divides by 2; a missing day is never
+    fabricated as a zero point, it just widens the gap. The value is SIGNED (no abs):
+    cumulative counts are monotonic for a normal video so day-over-day differences
+    are positive, but a genuine view correction is plotted as-is, never abs'd into a
+    fake positive spike. A series with fewer than two populated days yields []."""
+    by_day: dict = {}  # eastern date -> (instant, view_count, captured_at) of the day's latest snapshot
+    for p in series:
+        ts = _parse_instant(p["captured_at"])
+        if ts is None or p["view_count"] is None:
+            continue
+        day = ts.astimezone(ZoneInfo(config.LOCAL_TZ)).date()
+        cur = by_day.get(day)
+        if cur is None or ts > cur[0]:
+            by_day[day] = (ts, p["view_count"], p["captured_at"])
+    days = sorted(by_day)
     out: list[dict] = []
-    for prev, cur in zip(series, series[1:]):
-        t0 = _parse_instant(prev["captured_at"])
-        t1 = _parse_instant(cur["captured_at"])
-        if t0 is None or t1 is None:
+    for prev_day, cur_day in zip(days, days[1:]):
+        gap = (cur_day - prev_day).days
+        if gap <= 0:
             continue
-        delta = (t1 - t0).total_seconds()
-        if delta <= 0:
-            continue
-        if prev["view_count"] is None or cur["view_count"] is None:
-            continue
-        views_per_day = (cur["view_count"] - prev["view_count"]) / delta * 86400
+        views_per_day = (by_day[cur_day][1] - by_day[prev_day][1]) / gap
         out.append(
-            {"captured_at": cur["captured_at"], "views_per_day": views_per_day}
+            {"captured_at": by_day[cur_day][2], "views_per_day": views_per_day}
         )
     return out
 
@@ -2360,19 +2374,6 @@ def _median(values: list):
     if n % 2:
         return nums[mid]
     return (nums[mid - 1] + nums[mid]) / 2
-
-
-def _latest_velocity(points: list):
-    """The most-recent views/day for a snapshot list (the velocity of the LAST
-    consecutive pair), or None when fewer than two usable snapshots. Orders by
-    _parse_instant (never a lexical captured_at sort) and reuses _velocity_points,
-    so the selector value equals the growth chart's last dashed-line point."""
-    ordered = sorted(
-        (p for p in points if _parse_instant(p["captured_at"]) is not None),
-        key=lambda p: _parse_instant(p["captured_at"]),
-    )
-    vp = _velocity_points(ordered)
-    return vp[-1]["views_per_day"] if vp else None
 
 
 # Tracked-lifespan distribution band edges, in DAYS (first-to-last snapshot span).

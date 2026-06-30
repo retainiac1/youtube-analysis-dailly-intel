@@ -2348,3 +2348,40 @@ def test_migration_pending(tmp_path):
     conn.commit()
     conn.close()
     assert db.migration_pending(db_path) is True        # stamped behind -> pending
+
+
+# --- _velocity_points: one-point-per-day rate (daily collapse, then Δviews/Δdays) ---
+
+def test_velocity_points_collapses_intraday_and_divides_by_real_gap():
+    # Two snapshots on the SAME Eastern day (09:00=5000, 23:00=5200) must collapse to
+    # one day-total using the LATEST (5200); the intraday pair must NOT be differenced.
+    # The next populated day is 2 days later (7200), so the rate is (7200-5200)/2=1000,
+    # NOT the raw 2000 delta and NOT a sub-hour-amplified value.
+    series = [
+        {"captured_at": "2026-06-10T09:00:00-04:00", "view_count": 5000},
+        {"captured_at": "2026-06-10T23:00:00-04:00", "view_count": 5200},
+        {"captured_at": "2026-06-12T10:00:00-04:00", "view_count": 7200},
+    ]
+    out = db._velocity_points(series)
+    # Only ONE point: 06-10 -> 06-12. The intraday 5000->5200 pair produced no point.
+    assert len(out) == 1
+    assert out[0]["views_per_day"] == 1000  # (7200 - 5200) / 2-day gap
+    assert out[0]["captured_at"] == "2026-06-12T10:00:00-04:00"
+
+
+def test_velocity_points_buckets_by_eastern_day_boundary():
+    # 23:00 ET and 01:00 ET are only 2 hours apart but fall on DIFFERENT Eastern days,
+    # so they are a 1-DAY gap, not a 2-hour interval. New rate = (1300-1000)/1 = 300;
+    # the old per-snapshot code would have annualized 2 hours into ~3600/day.
+    series = [
+        {"captured_at": "2026-06-10T23:00:00-04:00", "view_count": 1000},
+        {"captured_at": "2026-06-11T01:00:00-04:00", "view_count": 1300},
+    ]
+    out = db._velocity_points(series)
+    assert len(out) == 1
+    assert out[0]["views_per_day"] == 300
+
+
+def test_velocity_points_single_day_has_no_pairs():
+    series = [{"captured_at": "2026-06-10T09:00:00-04:00", "view_count": 5000}]
+    assert db._velocity_points(series) == []
