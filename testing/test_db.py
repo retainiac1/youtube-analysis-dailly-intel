@@ -60,6 +60,7 @@ EXPECTED_COLUMNS = {
     "llm_invocations": {
         "id", "run_date", "scope", "model", "temperature", "seed", "filter",
         "input_tokens", "output_tokens", "generated_at", "duration_ms",
+        "context_mode",
     },
     "app_preferences": {"key", "value", "updated_at"},
     "models": {
@@ -137,7 +138,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 14
+        assert version == db.SCHEMA_VERSION == 15
     finally:
         conn.close()
 
@@ -372,7 +373,7 @@ def test_v13_to_v14_adds_subscriber_count_nullable(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 14
+        assert version == db.SCHEMA_VERSION == 15
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(stats_snapshots)")}
         assert "subscriber_count" in cols
         old = conn.execute(
@@ -387,6 +388,85 @@ def test_v13_to_v14_adds_subscriber_count_nullable(tmp_path):
             "SELECT subscriber_count FROM stats_snapshots WHERE video_id='v2'"
         ).fetchone()
         assert new["subscriber_count"] == 12345
+    finally:
+        conn.close()
+
+
+def test_v14_to_v15_adds_context_mode_nullable(tmp_path):
+    """v14 -> v15: llm_invocations gains a nullable context_mode. An existing row
+    (logged before the interpretation context-mode switch) is preserved and reads
+    NULL; a freshly logged invocation carries its mode ('aggregated'/'raw')."""
+    db_path = str(tmp_path / "v14.db")
+    raw = sqlite3.connect(db_path)
+    raw.row_factory = sqlite3.Row
+    try:
+        # v14-shaped llm_invocations (duration_ms but NO context_mode), one row, 14.
+        raw.execute(
+            "CREATE TABLE llm_invocations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, run_date TEXT, scope TEXT, "
+            "model TEXT, temperature REAL, seed INTEGER, filter TEXT, "
+            "input_tokens INTEGER, output_tokens INTEGER, generated_at TEXT, "
+            "duration_ms INTEGER)"
+        )
+        raw.execute(
+            "INSERT INTO llm_invocations (run_date, scope, model, temperature, seed, "
+            "filter, input_tokens, output_tokens, generated_at, duration_ms) VALUES "
+            "('2026-06-30', 'overall', 'anthropic:claude', 0.2, NULL, NULL, "
+            "100, 50, '2026-06-30T10:00:00-04:00', 1200)"
+        )
+        raw.execute("PRAGMA user_version = 14")
+        raw.commit()
+    finally:
+        raw.close()
+
+    db.init_db(db_path)
+
+    conn = db.get_connection(db_path)
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == db.SCHEMA_VERSION == 15
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(llm_invocations)")}
+        assert "context_mode" in cols
+        old = conn.execute(
+            "SELECT * FROM llm_invocations WHERE run_date='2026-06-30'").fetchone()
+        assert old["input_tokens"] == 100             # preserved
+        assert old["context_mode"] is None            # old row reads NULL
+        # A freshly logged invocation carries its context mode.
+        db.log_invocation(conn, "2026-07-01", "overall", "anthropic:claude", 0.2,
+                          None, None, 200, 80, "2026-07-01T10:00:00-04:00",
+                          context_mode="raw")
+        conn.commit()
+        new = conn.execute(
+            "SELECT context_mode FROM llm_invocations WHERE run_date='2026-07-01'"
+        ).fetchone()
+        assert new["context_mode"] == "raw"
+    finally:
+        conn.close()
+
+
+def test_init_db_refuses_to_downgrade(tmp_path):
+    """init_db must REFUSE to lower user_version (older code run against a newer DB),
+    symmetric to the dashboard lifespan's refuse-to-start-behind. Without this, a
+    repo-root reload of a reverted db.py silently downgrades the live seed's stamp.
+    The guard runs BEFORE any CREATE/ALTER, so a future-stamped DB is left unchanged."""
+    db_path = str(tmp_path / "future.db")
+    raw = sqlite3.connect(db_path)
+    try:
+        # A DB stamped one version AHEAD of the code. No tables needed: the guard
+        # fires before the CREATE loop.
+        raw.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(RuntimeError):
+        db.init_db(db_path)
+
+    # The stamp is untouched: init_db refused rather than lowering it.
+    conn = sqlite3.connect(db_path)
+    try:
+        assert (conn.execute("PRAGMA user_version").fetchone()[0]
+                == db.SCHEMA_VERSION + 1)
     finally:
         conn.close()
 

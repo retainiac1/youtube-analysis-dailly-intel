@@ -63,7 +63,13 @@ import config
 # counts, classify_cost, snapshot_count). Unconditional CREATE IF NOT EXISTS —
 # additive, idempotent, born empty, not version-gated; the once-a-day discover cap
 # reads run_log (discover_ran_today), NOT this table.
-SCHEMA_VERSION = 14
+# v15: added llm_invocations.context_mode (the interpretation data-context that
+# produced a generation: 'aggregated' or 'raw'). NULLABLE (NULL = a legacy row or a
+# non-interpretation caller like price_refresh / swipefile classify that does not set
+# it),
+# so those paths stay unaffected. Guarded ALTER in the same atomic block (like v5's
+# duration_ms); a fresh DB already has it from the CREATE above.
+SCHEMA_VERSION = 15
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -193,7 +199,8 @@ SCHEMA_STATEMENTS: list[str] = [
         input_tokens INTEGER,
         output_tokens INTEGER,
         generated_at TEXT,
-        duration_ms INTEGER    -- v5: generator run time (NULL for un-instrumented rows)
+        duration_ms INTEGER,   -- v5: generator run time (NULL for un-instrumented rows)
+        context_mode TEXT      -- v15: interpretation data-context ('aggregated'/'raw'); NULL for non-interpretation callers
     )
     """,
     """
@@ -452,6 +459,23 @@ def init_db(db_path: str) -> None:
     conn = get_connection(db_path)
     try:
         current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        # Refuse to LOWER a version, symmetric to the dashboard lifespan's refusal to
+        # start behind one. Without this, running older code against a newer DB (the
+        # repo-root --reload-dir re-runs init_db on any db.py change, including a git
+        # stash/checkout that reverts db.py) would silently stamp user_version DOWN at
+        # the block below, misrepresenting the schema and masking newer columns. Placed
+        # BEFORE any CREATE/ALTER so a newer DB is a pure, side-effect-free refuse. A
+        # fresh DB reads current_version 0 (SQLite default), so 0 > SCHEMA_VERSION is
+        # false and creation proceeds normally.
+        if current_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Refusing to migrate: the database at {db_path} is at schema version "
+                f"{current_version}, AHEAD of this code's schema version "
+                f"{SCHEMA_VERSION}. You are running older code against a newer database; "
+                f"lowering user_version would misrepresent the schema and mask newer "
+                f"columns. Run the code version that matches the database, or migrate "
+                f"deliberately with matching code."
+            )
         # Additive tables: safe to autocommit (idempotent, no existing data touched).
         for statement in SCHEMA_STATEMENTS:
             conn.execute(statement)
@@ -565,6 +589,15 @@ def init_db(db_path: str) -> None:
             if "subscriber_count" not in _column_names(conn, "stats_snapshots"):
                 conn.execute(
                     "ALTER TABLE stats_snapshots ADD COLUMN subscriber_count INTEGER"
+                )
+            # v14 -> v15: add llm_invocations.context_mode (nullable). A fresh DB
+            # already has it from the CREATE above, so the guard skips the ALTER. NOT
+            # back-populated: existing rows predate the interpretation context-mode
+            # switch, so they stay NULL (a NULL mode means legacy / non-interpretation
+            # caller), and the non-interpretation callers of log_invocation never set it.
+            if "context_mode" not in _column_names(conn, "llm_invocations"):
+                conn.execute(
+                    "ALTER TABLE llm_invocations ADD COLUMN context_mode TEXT"
                 )
             # Stamp LAST, so the version is never ahead of the schema.
             if current_version != SCHEMA_VERSION:
@@ -750,25 +783,28 @@ def set_starred(conn: sqlite3.Connection, video_id: str, starred: bool,
 def log_invocation(conn: sqlite3.Connection, run_date: str, scope: str,
                    model: str, temperature: float, seed, filter,
                    input_tokens: int, output_tokens: int, now: str,
-                   *, duration_ms=None) -> None:
+                   *, duration_ms=None, context_mode=None) -> None:
     """Append one row to the llm_invocations log recording the full parameter set
     that produced a generation. Append-only (autoincrement id), so re-running a
     lane adds a new row rather than overwriting. `model` is canonical
     "provider:model"; `seed` is NULL when the provider did not apply one; `filter`
     is NULL in v1. `duration_ms` (keyword-only) is the measured generator run time,
-    NULL when not measured. Does not commit — the caller wraps it in `transaction`."""
+    NULL when not measured. `context_mode` (keyword-only) is the interpretation
+    data-context ('aggregated'/'raw'); NULL for non-interpretation callers
+    (price_refresh, swipefile classify), which do not set it. Does not commit; the
+    caller wraps it in `transaction`."""
     conn.execute(
         """
         INSERT INTO llm_invocations
             (run_date, scope, model, temperature, seed, filter,
-             input_tokens, output_tokens, generated_at, duration_ms)
+             input_tokens, output_tokens, generated_at, duration_ms, context_mode)
         VALUES (:run_date, :scope, :model, :temperature, :seed, :filter,
-                :input_tokens, :output_tokens, :now, :duration_ms)
+                :input_tokens, :output_tokens, :now, :duration_ms, :context_mode)
         """,
         {"run_date": run_date, "scope": scope, "model": model,
          "temperature": temperature, "seed": seed, "filter": filter,
          "input_tokens": input_tokens, "output_tokens": output_tokens,
-         "now": now, "duration_ms": duration_ms},
+         "now": now, "duration_ms": duration_ms, "context_mode": context_mode},
     )
 
 
