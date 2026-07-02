@@ -5,6 +5,7 @@ chart across runs), and /api/distribution (view-count histogram). Seeds via the
 charts_client fixture (see conftest.py)."""
 
 import config
+import db
 
 
 # --- /api/snapshots ----------------------------------------------------------
@@ -120,43 +121,80 @@ def test_rank_history_bad_lane_is_422(charts_client):
     assert resp.status_code == 422
 
 
-# --- /api/distribution -------------------------------------------------------
+# --- /api/distribution (period-aware, as-of-window) --------------------------
+# The histogram now buckets each distinct lane video by its LATEST snapshot at or
+# before end_date (not videos.view_count, which is current state). The seed makes the
+# distinction visible: vidA has a 06-08 snapshot of 5000 but a current view_count of
+# 150000; vidB's only snapshot (30000) is on 06-08; vidFall/vidNull have no snapshots.
 
-def test_distribution_matches_shared_buckets(charts_client):
+def test_distribution_buckets_on_snapshot_not_current_view_count(charts_client):
     resp = charts_client.get(
         "/api/distribution",
-        params={"run_date": "2026-06-08", "lane": "health"},
+        params={"lane": "health", "end_date": "2026-06-08"},
     )
     assert resp.status_code == 200
     data = resp.json()
-    # Ranked health views on 06-08: vidA 150000, vidB 30000, vidNull NULL (dropped).
-    expected = config.distribution_buckets([150000, 30000])
+    # As-of-06-08 snapshots: vidA 5000 (NOT its current 150000), vidB 30000. vidFall
+    # and vidNull have no snapshot, so they are omitted.
+    expected = config.distribution_buckets([5000, 30000])
     assert {b["label"]: b["count"] for b in data["buckets"]} == expected
-    # Buckets are returned in canonical order, and the NULL view is excluded.
-    assert [b["label"] for b in data["buckets"]] == list(
-        config.DISTRIBUTION_BUCKETS
-    )
+    assert [b["label"] for b in data["buckets"]] == list(config.DISTRIBUTION_BUCKETS)
     assert data["total"] == 2
-    # Each bucket carries the videos behind it (title + view_count), sorted desc.
     by_label = {b["label"]: b for b in data["buckets"]}
-    assert by_label[">=100k"]["videos"] == [
-        {"title": "Rising star", "view_count": 150000}
+    # vidA buckets on its in-window snapshot (5-10k), NOT >=100k (its current size).
+    assert by_label["5-10k"]["videos"] == [
+        {"title": "Rising star", "view_count": 5000}
     ]
+    assert by_label[">=100k"]["videos"] == []
     assert by_label["20-50k"]["videos"] == [
         {"title": "New entrant", "view_count": 30000}
     ]
-    # A bucket with no ranked videos carries an empty list (count agrees).
-    assert by_label["<1k"]["videos"] == []
+
+
+def test_distribution_ceiling_excludes_snapshots_past_end_date(charts_client):
+    # A window ending 06-07: vidA keeps getting snapshotted past end_date (its 06-08
+    # snapshot of 5000), but it must bucket on the in-window value 4000 (1-5k), not
+    # 5000. vidB's only snapshot (06-08) is past the ceiling, so vidB is omitted.
+    data = charts_client.get(
+        "/api/distribution",
+        params={"lane": "health", "end_date": "2026-06-07"},
+    ).json()
+    assert data["total"] == 1
+    by_label = {b["label"]: b for b in data["buckets"]}
+    assert by_label["1-5k"]["videos"] == [{"title": "Rising star", "view_count": 4000}]
+    assert by_label["5-10k"]["videos"] == []
+    assert by_label["20-50k"]["videos"] == []
+
+
+def test_distribution_single_run_window_uses_that_run_value(charts_client):
+    # start=end=06-08 collapses to that run: vidA 5000, vidB 30000 (vidNull no snapshot).
+    data = charts_client.get(
+        "/api/distribution",
+        params={"lane": "health", "start_date": "2026-06-08", "end_date": "2026-06-08"},
+    ).json()
+    assert data["total"] == 2
+    by_label = {b["label"]: b for b in data["buckets"]}
+    assert by_label["5-10k"]["videos"] == [{"title": "Rising star", "view_count": 5000}]
+    assert by_label["20-50k"]["videos"] == [
+        {"title": "New entrant", "view_count": 30000}
+    ]
+
+
+def test_distribution_all_time_uses_absolute_latest_snapshot(charts_client):
+    # No dates: no ceiling, so each video's absolute-latest snapshot. Same result as
+    # end=06-08 here (06-08 is the newest snapshot), confirming the None-ceiling path.
+    data = charts_client.get("/api/distribution", params={"lane": "health"}).json()
+    assert data["total"] == 2
+    assert {b["label"]: b["count"] for b in data["buckets"]} == (
+        config.distribution_buckets([5000, 30000])
+    )
 
 
 def test_distribution_bucket_videos_sorted_desc(charts_client):
-    # Two videos land in the same bucket: 22137 and 18680 both in 10-20k? No,
-    # 22137 -> 20-50k. Use a bucket we can verify ordering in via the seed: the
-    # >=100k bucket has a single video, so assert the general invariant instead:
-    # within every bucket, view_counts are non-increasing.
+    # Within every bucket, view_counts are non-increasing (the endpoint sorts desc).
     data = charts_client.get(
         "/api/distribution",
-        params={"run_date": "2026-06-08", "lane": "health"},
+        params={"lane": "health", "end_date": "2026-06-08"},
     ).json()
     for b in data["buckets"]:
         vcs = [v["view_count"] for v in b["videos"]]
@@ -166,7 +204,7 @@ def test_distribution_bucket_videos_sorted_desc(charts_client):
 def test_distribution_empty_lane_is_all_zero(charts_client):
     data = charts_client.get(
         "/api/distribution",
-        params={"run_date": "2026-06-08", "lane": "habit"},
+        params={"lane": "habit", "end_date": "2026-06-08"},
     ).json()
     assert data["total"] == 0
     assert all(b["count"] == 0 for b in data["buckets"])
@@ -175,6 +213,41 @@ def test_distribution_empty_lane_is_all_zero(charts_client):
 def test_distribution_bad_lane_is_422(charts_client):
     resp = charts_client.get(
         "/api/distribution",
-        params={"run_date": "2026-06-08", "lane": "bogus"},
+        params={"lane": "bogus", "end_date": "2026-06-08"},
     )
     assert resp.status_code == 422
+
+
+def test_fetch_distribution_window_picks_latest_by_instant_not_lexical(tmp_path):
+    # Two snapshots for one video with DIFFERENT offsets, chosen so lexical order and
+    # chronological order DISAGREE: the "+05:00" row has the later calendar date string
+    # ("2026-06-09...") but an EARLIER instant (21:00Z 06-08) than the "-04:00" row
+    # (03:00Z 06-09). SQL MAX(captured_at) would pick the +05:00 row (222); the
+    # instant-correct pick is the -04:00 row (111). Asserts the never-lexical-MAX rule.
+    db_path = str(tmp_path / "instant.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO videos (video_id, title, view_count, link) "
+            "VALUES ('vidX', 'Offset case', 999, 'http://yt/vidX')"
+        )
+        conn.executemany(
+            "INSERT INTO stats_snapshots (run_id, video_id, captured_at, view_count) "
+            "VALUES (?, 'vidX', ?, ?)",
+            [
+                (1, "2026-06-08T23:00:00-04:00", 111),  # 2026-06-09T03:00Z (later)
+                (2, "2026-06-09T02:00:00+05:00", 222),  # 2026-06-08T21:00Z (earlier)
+            ],
+        )
+        conn.execute(
+            "INSERT INTO rankings (run_date, bucket, rank, video_id, metric_value, "
+            "captured_at) VALUES ('2026-06-08', 'health', 1, 'vidX', 1.0, "
+            "'2026-06-08T10:00:00-04:00')"
+        )
+        conn.commit()
+        # All-time (no ceiling): absolute latest by instant is the -04:00 row (111).
+        rows = db.fetch_distribution_window(conn, "health", None, None)
+        assert rows == [{"video_id": "vidX", "title": "Offset case", "view_count": 111}]
+    finally:
+        conn.close()

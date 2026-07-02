@@ -2663,6 +2663,79 @@ def _lifecycle_maturation(
     return out
 
 
+def fetch_distribution_window(
+    conn: sqlite3.Connection,
+    bucket: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list:
+    """View-count distribution population for one lane over [start_date, end_date],
+    read-only. One row per distinct in-window video, carrying its AS-OF-WINDOW view
+    count, so a period histogram reflects the window, not today.
+
+    This borrows _lifecycle_maturation's mechanics (rankings-membership population,
+    stats_snapshots join, latest-snapshot pick by _parse_instant, never SQL MAX) but
+    NOT its unbounded "absolute latest" semantics: _lifecycle_maturation is current
+    state, wrong for a period chart. Here the snapshot pick gets a CEILING at end_date
+    end-of-day Eastern: for each population video, the newest snapshot whose captured_at
+    is at or before that ceiling. When end_date is None (all-time) there is no ceiling,
+    so it collapses to the absolute-latest snapshot; a single-run window (end=run_date)
+    collapses to that run's value. Population membership comes ONLY from rankings (the
+    same bounded, deduped subquery the other dashboard producers use); stats_snapshots
+    is not lane-scoped, so membership gates it.
+
+    Returns [{video_id, title, view_count}] with a real (non-NULL) view_count; a video
+    with no snapshot at or under the ceiling, or a NULL view_count, is omitted. The
+    caller buckets via config.distribution_bucket (the single source of the bucket
+    boundaries)."""
+    where = ["r.bucket = :bucket"]
+    params: dict = {"bucket": bucket}
+    if start_date:
+        where.append("r.run_date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        where.append("r.run_date <= :end_date")
+        params["end_date"] = end_date
+    rows = conn.execute(
+        f"""
+        SELECT s.video_id, s.captured_at, s.view_count, v.title
+        FROM stats_snapshots s
+        JOIN videos v ON v.video_id = s.video_id
+        WHERE s.video_id IN (
+            SELECT DISTINCT r.video_id
+            FROM rankings r
+            WHERE {" AND ".join(where)}
+        )
+        """,
+        params,
+    ).fetchall()
+    # The as-of-window ceiling as an instant: reuse _parse_instant so end_date is read
+    # as end-of-day Eastern (naive -> Eastern -> UTC), consistent with every other
+    # snapshot compare. None when the window is unbounded on the end (all-time).
+    ceiling = _parse_instant(f"{end_date}T23:59:59.999999") if end_date else None
+    # Pick each video's newest snapshot AT OR BEFORE the ceiling, by instant (NOT lexical
+    # captured_at, which misorders offset/DST-varying timestamps).
+    latest: dict[str, dict] = {}
+    for row in rows:
+        ts = _parse_instant(row["captured_at"])
+        if ts is None:
+            continue
+        if ceiling is not None and ts > ceiling:
+            continue
+        cur = latest.get(row["video_id"])
+        if cur is None or ts > cur["ts"]:
+            latest[row["video_id"]] = {"ts": ts, "row": row}
+    out = []
+    for rec in latest.values():
+        row = rec["row"]
+        vc = row["view_count"]
+        if vc is None:
+            continue
+        out.append({"video_id": row["video_id"], "title": row["title"],
+                    "view_count": vc})
+    return out
+
+
 def _lifecycle_rank_history(
     conn: sqlite3.Connection,
     bucket: str,

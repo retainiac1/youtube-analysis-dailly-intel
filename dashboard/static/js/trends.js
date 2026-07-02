@@ -2,16 +2,16 @@
 // chart renderers in charts.js. Caches the last payloads so a theme toggle can
 // redraw without refetching.
 //
-// Scoping (see the plan): the histogram is the current run + lane; the bump chart
-// and trajectory span the current LANE across all runs (the run picker does not
-// constrain them). So a run change refreshes only the histogram; a lane change
-// refreshes all three; a tracked-set change refreshes only the trajectory.
+// Scoping (see the plan): the bump chart and trajectory span the current LANE across
+// all runs (the run picker does not constrain them). A lane change refreshes both; a
+// tracked-set change refreshes only the trajectory. (The view-count histogram moved to
+// the Dashboard as a period-aware card in Phase 2.)
 
 import * as api from "./api.js";
 import * as charts from "./charts.js";
 
 let els = null;
-const cache = { rankHistory: null, distribution: null, snapshots: null, lane: "health" };
+const cache = { rankHistory: null, snapshots: null, lane: "health" };
 
 export function init(elements) {
   els = elements;
@@ -25,12 +25,6 @@ export async function refreshBump(state) {
     state.lane, [], state.startDate, state.endDate
   );
   charts.renderBump(els.bump, cache.rankHistory, state.lane);
-}
-
-export async function refreshHistogram(state) {
-  cache.lane = state.lane;
-  cache.distribution = await api.getDistribution(state.runDate, state.lane);
-  charts.renderHistogram(els.distribution, cache.distribution, state.lane);
 }
 
 // Trim each snapshot series to the date filter window. captured_at is an Eastern
@@ -69,11 +63,10 @@ export async function refreshTrajectory(state) {
   charts.renderTrajectory(els.trajectory, cache.snapshots, state.lane);
 }
 
-// Lane change (and first mount): all three charts.
+// Lane change (and first mount): both charts.
 export async function refreshAll(state) {
   await Promise.all([
     refreshBump(state),
-    refreshHistogram(state),
     refreshTrajectory(state),
   ]);
 }
@@ -82,8 +75,6 @@ export async function refreshAll(state) {
 // theme). No refetch.
 export function rerenderFromCache() {
   if (cache.rankHistory) charts.renderBump(els.bump, cache.rankHistory, cache.lane);
-  if (cache.distribution)
-    charts.renderHistogram(els.distribution, cache.distribution, cache.lane);
   charts.renderTrajectory(
     els.trajectory,
     cache.snapshots || { series: [] },

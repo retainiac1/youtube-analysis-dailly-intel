@@ -493,41 +493,43 @@ def api_dashboard_lifecycle(
 
 @app.get("/api/distribution")
 def api_distribution(
-    run_date: str = Query(..., min_length=1),
     lane: str = Query(..., min_length=1),
+    start_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     conn: sqlite3.Connection = Depends(get_conn),
 ):
-    """View-count distribution histogram for one run's ranked lane, using the
-    shared config.distribution_buckets so the buckets match the pipeline's tuning
-    view exactly (swipefile.py is never imported). Buckets are returned in the
-    canonical config.DISTRIBUTION_BUCKETS order. An empty lane returns all-zero
-    counts and total 0, not an error."""
+    """View-count distribution histogram for one lane over the selected window (not
+    one run): the lane's distinct videos, each counted once by its AS-OF-WINDOW view
+    count (newest snapshot at or before end_date, from db.fetch_distribution_window).
+    Same lane/bounds as the other dashboard producers. Buckets use the shared
+    config.distribution_bucket so the boundaries match the pipeline exactly
+    (swipefile.py is never imported), returned in canonical config.DISTRIBUTION_BUCKETS
+    order. An empty lane+window returns all-zero counts and total 0, not an error."""
     bucket = _lane_to_bucket(lane)
-    rows = db.run_with_db_retry(lambda: db.fetch_lane(conn, run_date, bucket))
-    # Group each ranked video (with a real view_count) into its bucket, so the
-    # histogram tooltip can list the videos behind each bar. Classify via the
-    # shared config.distribution_bucket so the boundaries match the pipeline
-    # exactly (never re-defined here, never importing swipefile).
+    rows = db.run_with_db_retry(
+        lambda: db.fetch_distribution_window(conn, bucket, start_date, end_date)
+    )
+    # Group each distinct video (rows already carry a real view_count) into its bucket,
+    # so the histogram tooltip can list the videos behind each bar. Classify via the
+    # shared config.distribution_bucket so the boundaries match the pipeline exactly
+    # (never re-defined here, never importing swipefile).
     by_bucket: dict[str, list[dict]] = {label: [] for label in config.DISTRIBUTION_BUCKETS}
-    total = 0
     for row in rows:
         vc = row["view_count"]
-        if vc is None:
-            continue
-        total += 1
         by_bucket[config.distribution_bucket(vc)].append(
             {"title": row["title"], "view_count": vc}
         )
     for videos in by_bucket.values():
         videos.sort(key=lambda v: v["view_count"], reverse=True)
     return {
-        "run_date": run_date,
         "lane": lane,
+        "start_date": start_date,
+        "end_date": end_date,
         "buckets": [
             {"label": label, "count": len(by_bucket[label]), "videos": by_bucket[label]}
             for label in config.DISTRIBUTION_BUCKETS
         ],
-        "total": total,
+        "total": len(rows),
     }
 
 

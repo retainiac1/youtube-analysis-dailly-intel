@@ -30,6 +30,12 @@ const intFmt = new Intl.NumberFormat();
 
 let mountEl = null;
 let panelEl = null;
+// The period-aware view-count distribution: a persistent card ABOVE the sub-tab nav (a
+// lane+window overview that belongs to no single sub-tab). distEl is its chart mount,
+// built once and never inside panelEl, so a sub-tab swap (which replaceChildren's
+// panelEl) never wipes it. distCache holds the last payload for a theme redraw.
+let distEl = null;
+let distCache = null;
 let activeSection = DEFAULT_SECTION;
 let built = false;
 // The lane + window the panel was last rendered for. Reassigned (new object) on every
@@ -90,7 +96,22 @@ function buildNav() {
 function ensureBuilt() {
   if (built) return;
   panelEl = el("div", { id: "dashboard-section-panel" });
-  mountEl.replaceChildren(buildNav(), panelEl);
+  distEl = el("div", { class: "chart-mount" });
+  const distCard = el(
+    "section",
+    { class: "glass-panel chart-card dashboard-distribution" },
+    [
+      el("h3", { class: "heading-sm", text: "View-count distribution" }),
+      el("p", {
+        class: "dashboard-caption",
+        text: "Distinct lane videos over the selected period, by latest view count.",
+      }),
+      distEl,
+    ]
+  );
+  // Overview card first, then the tabbed detail. distCard + nav are stable siblings;
+  // only panelEl is swapped on a sub-tab change.
+  mountEl.replaceChildren(distCard, buildNav(), panelEl);
   built = true;
 }
 
@@ -111,7 +132,30 @@ export async function refresh(state) {
   ensureBuilt();
   lastState = { lane: state.lane, startDate: state.startDate, endDate: state.endDate };
   for (const k of Object.keys(cache)) delete cache[k];
-  await renderActive();
+  // The persistent distribution card and the active sub-tab both refetch for the new
+  // lane/window; they are independent, so run them concurrently.
+  await Promise.all([renderActive(), refreshDistribution(lastState)]);
+}
+
+// Fetch + draw the period-aware view-count distribution for the given lane/window. Uses
+// the same lastState-identity supersede guard as renderActive: a lane/window change
+// mid-flight reassigns lastState, so a stale result is dropped.
+async function refreshDistribution(s) {
+  let data;
+  try {
+    data = await api.getDistribution(s.lane, s.startDate, s.endDate);
+  } catch (err) {
+    if (s === lastState) {
+      distCache = null;
+      distEl.replaceChildren(
+        el("p", { class: "dashboard-status error", text: String(err.message || err) })
+      );
+    }
+    return;
+  }
+  if (s !== lastState) return;
+  distCache = data;
+  charts.renderHistogram(distEl, data, s.lane);
 }
 
 function fetchSection(section, s) {
@@ -433,4 +477,5 @@ function renderLifecycle(data) {
 export function rerenderFromCache() {
   if (!built || !lastState) return;
   if (cache[activeSection]) renderSection(activeSection, cache[activeSection]);
+  if (distCache) charts.renderHistogram(distEl, distCache, laneNow());
 }

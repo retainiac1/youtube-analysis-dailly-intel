@@ -102,8 +102,11 @@ export function getRankHistory(lane, videoIds, startDate, endDate) {
   return getJSON(`/api/rank-history?${qs}`);
 }
 
-export function getDistribution(runDate, lane) {
-  const qs = buildQuery({ run_date: runDate, lane }, null);
+// Period-aware view-count distribution: distinct lane videos over the window, each
+// by its as-of-window view count. start_date/end_date go in the filters arg so
+// buildQuery drops them when null (all time), like the other dashboard reads.
+export function getDistribution(lane, startDate, endDate) {
+  const qs = buildQuery({ lane }, { start_date: startDate, end_date: endDate });
   return getJSON(`/api/distribution?${qs}`);
 }
 

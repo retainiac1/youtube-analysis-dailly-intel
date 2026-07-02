@@ -444,7 +444,6 @@ async function init() {
   setupWrites();
   trends.init({
     bump: document.getElementById("chart-bump"),
-    distribution: document.getElementById("chart-distribution"),
     trajectory: document.getElementById("chart-trajectory"),
   });
   // interpretation.js mounts into the inner container (it replaceChildren's its
