@@ -262,6 +262,19 @@ DEFAULT_EXTRACT_RUN_TIMEOUT_SECONDS = 1800
 DEFAULT_EXTRACT_TERMINATE_GRACE_SECONDS = 10
 DEFAULT_EXTRACT_SSE_KEEPALIVE_SECONDS = 15
 
+# Raw-mode interpretation spend guard. The "raw" interpretation context dumps every
+# distinct video row in the window to the model (potentially ~30x the fixed-size
+# aggregated payload), so it is the token exposure. INTERP_RAW_COST_CAP_USD bounds the
+# ESTIMATED cost of one raw run; a priced run estimated above it is refused before
+# spending (aggregated mode is uncapped). The estimate turns the built prompt's char
+# length into tokens via INTERP_CHARS_PER_TOKEN and assumes INTERP_EST_OUTPUT_TOKENS for
+# the bounded JSON reply. chars/token is deliberately 3 (below the ~4 prose heuristic):
+# the raw payload is dense JSON, which tokenizes at fewer chars per token, so 3 OVER-counts
+# tokens rather than under-counting -- the safe direction for a spend guard.
+DEFAULT_INTERP_RAW_COST_CAP_USD = 0.25
+DEFAULT_INTERP_CHARS_PER_TOKEN = 3
+DEFAULT_INTERP_EST_OUTPUT_TOKENS = 1500
+
 # name -> default, for every externalized tunable. load_settings() merges the
 # parsed TOML over these, so a missing key always resolves to its default.
 SETTINGS_DEFAULTS: dict[str, object] = {
@@ -293,6 +306,9 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "EXTRACT_RUN_TIMEOUT_SECONDS": DEFAULT_EXTRACT_RUN_TIMEOUT_SECONDS,
     "EXTRACT_TERMINATE_GRACE_SECONDS": DEFAULT_EXTRACT_TERMINATE_GRACE_SECONDS,
     "EXTRACT_SSE_KEEPALIVE_SECONDS": DEFAULT_EXTRACT_SSE_KEEPALIVE_SECONDS,
+    "INTERP_RAW_COST_CAP_USD": DEFAULT_INTERP_RAW_COST_CAP_USD,
+    "INTERP_CHARS_PER_TOKEN": DEFAULT_INTERP_CHARS_PER_TOKEN,
+    "INTERP_EST_OUTPUT_TOKENS": DEFAULT_INTERP_EST_OUTPUT_TOKENS,
 }
 
 # Resolve relative to THIS file, not CWD, so it works regardless of where the
@@ -393,6 +409,9 @@ PRICE_VALIDATION = _settings["PRICE_VALIDATION"]
 EXTRACT_RUN_TIMEOUT_SECONDS = _settings["EXTRACT_RUN_TIMEOUT_SECONDS"]
 EXTRACT_TERMINATE_GRACE_SECONDS = _settings["EXTRACT_TERMINATE_GRACE_SECONDS"]
 EXTRACT_SSE_KEEPALIVE_SECONDS = _settings["EXTRACT_SSE_KEEPALIVE_SECONDS"]
+INTERP_RAW_COST_CAP_USD = _settings["INTERP_RAW_COST_CAP_USD"]
+INTERP_CHARS_PER_TOKEN = _settings["INTERP_CHARS_PER_TOKEN"]
+INTERP_EST_OUTPUT_TOKENS = _settings["INTERP_EST_OUTPUT_TOKENS"]
 
 # The per-model max_tokens defaults — strict, no fallback (see load_required_settings).
 _required = load_required_settings()
@@ -625,6 +644,9 @@ REQUIRED_KEYS: dict[str, type] = {
     "EXTRACT_RUN_TIMEOUT_SECONDS": int,
     "EXTRACT_TERMINATE_GRACE_SECONDS": int,
     "EXTRACT_SSE_KEEPALIVE_SECONDS": int,
+    "INTERP_RAW_COST_CAP_USD": float,
+    "INTERP_CHARS_PER_TOKEN": int,
+    "INTERP_EST_OUTPUT_TOKENS": int,
 }
 
 # Keys that must be strictly positive ints (type is checked via REQUIRED_KEYS).
@@ -634,7 +656,8 @@ POSITIVE_INT_KEYS: frozenset[str] = frozenset(
      "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER", "OLLAMA_TIMEOUT_SECONDS",
      "DEFAULT_MAX_TOKENS", "DEFAULT_MAX_TOKENS_REASONING", "MAX_TOKENS_UPPER_BOUND",
      "EXTRACT_RUN_TIMEOUT_SECONDS", "EXTRACT_TERMINATE_GRACE_SECONDS",
-     "EXTRACT_SSE_KEEPALIVE_SECONDS"}
+     "EXTRACT_SSE_KEEPALIVE_SECONDS",
+     "INTERP_CHARS_PER_TOKEN", "INTERP_EST_OUTPUT_TOKENS"}
 )
 
 
@@ -737,6 +760,12 @@ def validate_config(cfg: object | None = None) -> None:
 
     if getattr(cfg, "SAFETY_BUFFER") >= getattr(cfg, "DAILY_QUOTA_LIMIT"):
         raise ConfigError("Config key SAFETY_BUFFER must be < DAILY_QUOTA_LIMIT")
+
+    # The raw-interpretation spend cap is a positive dollar amount (float; bool/int
+    # already rejected by the REQUIRED_KEYS type check). A non-positive cap would refuse
+    # every priced raw run.
+    if getattr(cfg, "INTERP_RAW_COST_CAP_USD") <= 0:
+        raise ConfigError("Config key INTERP_RAW_COST_CAP_USD must be > 0")
 
     # The factory defaults must not exceed the typo-guard ceiling. The reasoning
     # default deliberately sits BELOW the ceiling so a reasoning model keeps headroom

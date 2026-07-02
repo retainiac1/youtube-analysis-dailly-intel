@@ -11,6 +11,8 @@ def make_good_config() -> SimpleNamespace:
         WINDOW_DAYS=3,
         REFRESH_MAX_AGE_DAYS=30,
         TOP_N=20,
+        LIFECYCLE_COHORT_SIZE=6,
+        LIFECYCLE_GROWTH_COHORT_SIZE=20,
         DAILY_QUOTA_LIMIT=10000,
         SAFETY_BUFFER=500,
         QUOTA_RESET_TZ="America/Los_Angeles",
@@ -27,6 +29,9 @@ def make_good_config() -> SimpleNamespace:
         EXTRACT_RUN_TIMEOUT_SECONDS=1800,
         EXTRACT_TERMINATE_GRACE_SECONDS=10,
         EXTRACT_SSE_KEEPALIVE_SECONDS=15,
+        INTERP_RAW_COST_CAP_USD=0.25,
+        INTERP_CHARS_PER_TOKEN=3,
+        INTERP_EST_OUTPUT_TOKENS=1500,
         SEARCH_QUERIES=[
             {"q": "build habits", "bucket": "habit"},
             {"q": "zone 2 cardio", "bucket": "health"},
@@ -126,6 +131,34 @@ def test_bool_is_rejected_for_int_key():
     cfg = make_good_config()
     cfg.TOP_N = True  # bool is an int subclass; must still be rejected
     with pytest.raises(config.ConfigError, match="TOP_N"):
+        config.validate_config(cfg)
+
+
+def test_interp_raw_cost_cap_non_positive_raises():
+    cfg = make_good_config()
+    cfg.INTERP_RAW_COST_CAP_USD = 0.0     # a non-positive cap would refuse every priced run
+    with pytest.raises(config.ConfigError, match="INTERP_RAW_COST_CAP_USD"):
+        config.validate_config(cfg)
+
+
+def test_interp_raw_cost_cap_non_number_raises():
+    cfg = make_good_config()
+    cfg.INTERP_RAW_COST_CAP_USD = "cheap"  # must be a float, not a string
+    with pytest.raises(config.ConfigError, match="INTERP_RAW_COST_CAP_USD"):
+        config.validate_config(cfg)
+
+
+def test_interp_chars_per_token_non_positive_raises():
+    cfg = make_good_config()
+    cfg.INTERP_CHARS_PER_TOKEN = 0        # divisor must be a positive int
+    with pytest.raises(config.ConfigError, match="INTERP_CHARS_PER_TOKEN"):
+        config.validate_config(cfg)
+
+
+def test_interp_est_output_tokens_non_positive_raises():
+    cfg = make_good_config()
+    cfg.INTERP_EST_OUTPUT_TOKENS = -1     # assumed output tokens must be a positive int
+    with pytest.raises(config.ConfigError, match="INTERP_EST_OUTPUT_TOKENS"):
         config.validate_config(cfg)
 
 

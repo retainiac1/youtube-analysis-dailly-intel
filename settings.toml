@@ -31,6 +31,14 @@ DEFAULT_MAX_TOKENS = 512            # factory default for a NON-reasoning cloud 
 DEFAULT_MAX_TOKENS_REASONING = 5000 # factory default for a REASONING cloud model; positive int, <= MAX_TOKENS_UPPER_BOUND. Generous so thinking tokens don't starve the answer.
 MAX_TOKENS_UPPER_BOUND = 8192      # typo-guard ceiling for an edited max_tokens; positive int. Deliberately ABOVE the reasoning default so a reasoning model has headroom to be tuned up without a config edit. The provider enforces its own real ceiling.
 
+# Raw-mode interpretation spend guard. The "raw" interpretation context dumps every distinct
+# video row in the window to the model (the token firehose vs the fixed-size aggregated mode),
+# so it is pre-estimated and capped. INTERP_RAW_COST_CAP_USD bounds ONE raw run's estimated
+# cost; a priced run above it is refused before spending (aggregated is never capped).
+INTERP_RAW_COST_CAP_USD = 0.25     # USD ceiling for one raw interpretation's estimated cost; positive number (float literal). A "did you mean that?" guard tuned to bite on a surprise large window or an expensive-model selection (a real month-window run estimates ~$0.01). A priced run estimated above this is refused; a paid model with no current price is fail-closed refused; local (free) models always run.
+INTERP_CHARS_PER_TOKEN = 3         # chars-per-token divisor for the pre-run token estimate; positive int. Deliberately 3 (below the ~4 prose heuristic): dense JSON tokenizes denser, so 3 OVER-counts tokens -- the safe direction for a spend guard.
+INTERP_EST_OUTPUT_TOKENS = 1500    # assumed output tokens for the bounded 12-section JSON reply; positive int. A ceiling estimate for the cost math, not a cap on the model.
+
 # Search queries, each tagged with a bucket. bucket must be "health" or "habit".
 [[SEARCH_QUERIES]]
 q = "build habits"
