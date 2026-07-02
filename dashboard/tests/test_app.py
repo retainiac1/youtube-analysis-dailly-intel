@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 
@@ -159,7 +160,19 @@ def test_interpretation_scope_keys_the_lookup(client):
 VALID_MODEL = "openai:gpt-5.4-nano"
 
 
-def _fake_generate(text="Synthesized summary.", input_tokens=100, output_tokens=30):
+def _valid_interpretation_json():
+    """A schema-conformant interpretation response, built from the contract's section
+    keys so the endpoint exercises the real happy path (not the degrade path)."""
+    keys = list(interpret.INTERP_SECTION_KEYS)
+    return json.dumps({
+        "sections": {k: f"insight {k}" for k in keys},
+        "recommendation": {"suggestion": "make more X", "based_on": keys[:2]},
+    })
+
+
+def _fake_generate(text=None, input_tokens=100, output_tokens=30):
+    if text is None:
+        text = _valid_interpretation_json()
     def fake(model, prompt, *, temperature, seed, supports_temperature=None,
              supports_seed=None, think=None, is_reasoning=False, max_tokens=None):
         return llm.GenerateResult(text, input_tokens, output_tokens, seed_applied=seed,
@@ -187,7 +200,12 @@ def test_interpret_persists_and_logs(client, seeded_db_path, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["skipped"] is False
-    assert body["text"] == "Synthesized summary."
+    # The returned text is the contract JSON, code-stamped; the happy path is not partial.
+    parsed = json.loads(body["text"])
+    assert parsed["contract_version"] == 1
+    assert parsed["context_mode"] == "aggregated"
+    assert set(parsed["sections"]) == set(interpret.INTERP_SECTION_KEYS)
+    assert body["partial"] is False
     assert body["input_tokens"] == 100 and body["output_tokens"] == 30
     assert body["seed_applied"] == 7
     assert body["model"] == VALID_MODEL  # echoed for immediate card render
@@ -213,7 +231,7 @@ def test_interpret_persists_and_logs(client, seeded_db_path, monkeypatch):
     # The stored text + run time are now readable via the existing read endpoint.
     read = client.get("/api/interpretation",
                       params={"run_date": "2026-06-08", "scope": "health"}).json()
-    assert read["text"] == "Synthesized summary."
+    assert json.loads(read["text"])["contract_version"] == 1
     assert read["duration_ms"] == body["duration_ms"]
 
 

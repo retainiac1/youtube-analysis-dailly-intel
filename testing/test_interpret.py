@@ -1,9 +1,24 @@
+import json
+
 import pytest
 
 import config
 import db
 import interpret
 import llm
+
+
+def _valid_contract_json(based_on=None):
+    """A schema-conformant interpretation response: every section a string, a grounded
+    recommendation. Built from interpret.INTERP_SECTION_KEYS so it tracks the contract."""
+    keys = list(interpret.INTERP_SECTION_KEYS)
+    return json.dumps({
+        "sections": {k: f"insight {k}" for k in keys},
+        "recommendation": {
+            "suggestion": "make more X",
+            "based_on": list(based_on) if based_on is not None else keys[:2],
+        },
+    })
 
 
 # --- fixtures --------------------------------------------------------------
@@ -55,13 +70,17 @@ def _seed_ranking(conn, run_date, bucket, rank, video_id, metric_value,
         )
 
 
-def _make_fake_generate(rec, *, text="One. Two. Three.", input_tokens=120,
+def _make_fake_generate(rec, *, text=None, input_tokens=120,
                         output_tokens=40, seed_applied="echo"):
     """A stand-in for llm.generate that records its call and returns a real
-    GenerateResult. seed_applied="echo" returns the seed it was passed (a
-    seed-honoring provider); pass an explicit value (e.g. None) to model a
-    provider that drops the seed. `think`/`is_reasoning` are recorded; the applied
-    think mirrors the adapter contract (None when think did not apply, else int)."""
+    GenerateResult. `text` defaults to a valid contract JSON (so the validator passes
+    and a conformant object is stored); pass a custom/broken string to exercise the
+    degrade path. seed_applied="echo" returns the seed it was passed (a seed-honoring
+    provider); pass an explicit value (e.g. None) to model a provider that drops the
+    seed. `think`/`is_reasoning` are recorded; the applied think mirrors the adapter
+    contract (None when think did not apply, else int)."""
+    if text is None:
+        text = _valid_contract_json()
     def fake(model, prompt, *, temperature, seed, supports_temperature=None,
              supports_seed=None, think=None, is_reasoning=False, max_tokens=None):
         rec.append({"model": model, "prompt": prompt,
@@ -177,9 +196,8 @@ def test_build_prompt_top_comments_trimmed(conn):
 def test_synthesize_lane_writes_interpretation_and_logs(conn, monkeypatch):
     rec = []
     monkeypatch.setattr(interpret, "generate",
-                        _make_fake_generate(rec, text="A summary.",
-                                            input_tokens=200, output_tokens=30,
-                                            seed_applied=42))
+                        _make_fake_generate(rec, input_tokens=200,
+                                            output_tokens=30, seed_applied=42))
     _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
     conn.commit()
 
@@ -188,7 +206,15 @@ def test_synthesize_lane_writes_interpretation_and_logs(conn, monkeypatch):
         temperature=0.7, seed=42,
     )
     assert result["skipped"] is False
-    assert result["text"] == "A summary."
+    # The stored text is the contract JSON, code-stamped, all 12 sections as strings.
+    parsed = json.loads(result["text"])
+    assert parsed["contract_version"] == interpret.INTERP_CONTRACT_VERSION == 1
+    assert parsed["context_mode"] == "aggregated"
+    assert set(parsed["sections"]) == set(interpret.INTERP_SECTION_KEYS)
+    assert all(isinstance(v, str) for v in parsed["sections"].values())
+    assert set(parsed["recommendation"]["based_on"]).issubset(
+        interpret.INTERP_SECTION_KEYS)
+    assert result["partial"] is False
     # The measured run time is returned and is a non-negative int (timed around the
     # mocked generate(), so it is tiny but present).
     assert isinstance(result["duration_ms"], int) and result["duration_ms"] >= 0
@@ -200,14 +226,16 @@ def test_synthesize_lane_writes_interpretation_and_logs(conn, monkeypatch):
     ).fetchall()
     assert len(interp) == 1
     assert interp[0]["model"] == "openai:gpt-5.4-nano"
-    assert interp[0]["text"] == "A summary."
+    stored = json.loads(interp[0]["text"])
+    assert stored["contract_version"] == 1
+    assert set(stored["sections"]) == set(interpret.INTERP_SECTION_KEYS)
     # The applied parameters are persisted on the interpretation row too.
     assert interp[0]["temperature"] == 0.7
     assert interp[0]["seed"] == 42
 
     inv = conn.execute(
         "SELECT model, temperature, seed, filter, input_tokens, "
-        "output_tokens, duration_ms FROM llm_invocations"
+        "output_tokens, duration_ms, context_mode FROM llm_invocations"
     ).fetchall()
     assert len(inv) == 1
     assert inv[0]["model"] == "openai:gpt-5.4-nano"
@@ -216,6 +244,8 @@ def test_synthesize_lane_writes_interpretation_and_logs(conn, monkeypatch):
     assert inv[0]["filter"] is None
     assert inv[0]["input_tokens"] == 200
     assert inv[0]["output_tokens"] == 30
+    # The context mode is recorded on the invocation.
+    assert inv[0]["context_mode"] == "aggregated"
     # The logged duration matches what the result reported.
     assert inv[0]["duration_ms"] == result["duration_ms"]
 
@@ -423,3 +453,196 @@ def test_cli_scope_limits_to_one_lane(db_path, monkeypatch):
         assert scopes == ["health"]
     finally:
         conn.close()
+
+
+# --- validate_interpretation -----------------------------------------------
+
+def test_validate_interpretation_accepts_valid_object():
+    v = interpret.validate_interpretation(_valid_contract_json())
+    assert v["ok"] is True
+    assert set(v["sections"]) == set(interpret.INTERP_SECTION_KEYS)
+    assert v["missing"] == []
+    assert v["errors"] == []
+    keys = list(interpret.INTERP_SECTION_KEYS)
+    assert v["recommendation"]["based_on"] == keys[:2]
+
+
+def test_validate_interpretation_fills_and_flags_missing_sections():
+    keys = list(interpret.INTERP_SECTION_KEYS)
+    obj = {
+        "sections": {k: f"insight {k}" for k in keys[3:]},   # first 3 missing
+        "recommendation": {"suggestion": "do X", "based_on": [keys[5]]},
+    }
+    v = interpret.validate_interpretation(obj)
+    assert v["ok"] is False
+    for k in keys[:3]:
+        assert v["sections"][k] == interpret.INTERP_NO_DATA
+        assert k in v["missing"]
+    assert v["sections"][keys[3]] == f"insight {keys[3]}"    # present preserved
+    assert set(v["sections"]) == set(keys)                   # all 12 present
+
+
+def test_validate_interpretation_degrades_on_malformed_json():
+    v = interpret.validate_interpretation("this is not json {")
+    assert v["ok"] is False
+    assert v["missing"] == list(interpret.INTERP_SECTION_KEYS)
+    assert all(val == interpret.INTERP_NO_DATA for val in v["sections"].values())
+    assert v["recommendation"]["based_on"] == []
+    assert v["errors"]                                       # a reason recorded
+
+
+def test_validate_interpretation_drops_sentinel_and_unknown_based_on():
+    keys = list(interpret.INTERP_SECTION_KEYS)
+    sections = {k: f"insight {k}" for k in keys}
+    sentinel_key = keys[0]
+    sections[sentinel_key] = interpret.INTERP_NO_DATA        # an empty section
+    obj = {
+        "sections": sections,
+        "recommendation": {
+            "suggestion": "do X",
+            "based_on": [sentinel_key, "not_a_real_key", keys[1]],
+        },
+    }
+    v = interpret.validate_interpretation(obj)
+    # sentinel-valued and unknown keys dropped; the real non-sentinel one kept.
+    assert v["recommendation"]["based_on"] == [keys[1]]
+
+
+def test_validate_interpretation_fully_empty_window_ok():
+    obj = {
+        "sections": {k: interpret.INTERP_NO_DATA
+                     for k in interpret.INTERP_SECTION_KEYS},
+        "recommendation": {"suggestion": interpret.INTERP_NO_DATA, "based_on": []},
+    }
+    v = interpret.validate_interpretation(obj)
+    # Empty based_on is valid when every section is the sentinel: no grounding error.
+    assert v["errors"] == []
+    assert v["ok"] is True
+    assert v["recommendation"]["based_on"] == []
+
+
+# --- context modes ----------------------------------------------------------
+
+def test_synthesize_lane_records_aggregated_context_mode(conn, monkeypatch):
+    rec = []
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate(rec))
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    result = interpret.synthesize_lane(
+        conn, "2026-06-09", "overall", "openai:gpt-5.4-nano",
+        temperature=1.0, seed=None, context_mode="aggregated")
+    assert result["context_mode"] == "aggregated"
+    assert "computed aggregates" in rec[0]["prompt"]        # aggregated builder used
+    mode = conn.execute(
+        "SELECT context_mode FROM llm_invocations").fetchone()["context_mode"]
+    assert mode == "aggregated"
+
+
+def test_synthesize_lane_raw_mode_dumps_rows_and_records_mode(conn, monkeypatch):
+    rec = []
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate(rec))
+    seen_cols = []
+    orig_rows = db._dashboard_video_rows
+
+    def spy(conn_, bucket, start, end, select_cols, extra_join=""):
+        seen_cols.append(select_cols)
+        return orig_rows(conn_, bucket, start, end, select_cols, extra_join)
+    monkeypatch.setattr(db, "_dashboard_video_rows", spy)
+
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0, title="Raw One")
+    conn.commit()
+    result = interpret.synthesize_lane(
+        conn, "2026-06-09", "overall", "openai:gpt-5.4-nano",
+        temperature=1.0, seed=None, context_mode="raw")
+    assert result["context_mode"] == "raw"
+    # The raw path pulled the broad per-video column set (beyond the population
+    # check that uses only v.video_id).
+    assert interpret._RAW_SELECT_COLS in seen_cols
+    mode = conn.execute(
+        "SELECT context_mode FROM llm_invocations").fetchone()["context_mode"]
+    assert mode == "raw"
+    assert json.loads(result["text"])["context_mode"] == "raw"
+
+
+def test_synthesize_lane_rejects_bad_context_mode(conn, monkeypatch):
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate([]))
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    with pytest.raises(llm.LLMError):
+        interpret.synthesize_lane(
+            conn, "2026-06-09", "overall", "openai:gpt-5.4-nano",
+            temperature=1.0, seed=None, context_mode="bogus")
+
+
+# --- raw-mode estimate + spend cap ------------------------------------------
+
+def test_estimate_raw_interpretation_priced_breakdown(conn):
+    # A priced paid model over a seeded lane: coherent breakdown, under the default cap.
+    # The estimate prices at TODAY's date, which init_db's seeded window (valid_from=today)
+    # covers, so no custom price window is needed.
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    est = interpret.estimate_raw_interpretation(
+        conn, "overall", "2026-06-09", "2026-06-09", "openai:gpt-5.4-nano")
+    assert est["row_count"] == 1
+    assert est["est_input_tokens"] > 0
+    assert est["est_output_tokens"] == config.INTERP_EST_OUTPUT_TOKENS
+    assert est["est_cost_usd"] is not None and est["est_cost_usd"] > 0
+    assert est["cap_usd"] == config.INTERP_RAW_COST_CAP_USD
+    assert est["over_cap"] is False and est["refused"] is False
+
+
+def test_estimate_raw_interpretation_local_is_free(conn):
+    # A local (ollama) model is free: est_cost_usd 0.0, never refused, whatever the cap.
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    est = interpret.estimate_raw_interpretation(
+        conn, "overall", "2026-06-09", "2026-06-09", "ollama:qwen3.5:9b")
+    assert est["est_cost_usd"] == 0.0
+    assert est["refused"] is False and est["reason"] is None
+
+
+def test_estimate_raw_interpretation_paid_unpriced_refused(conn):
+    # A PAID model whose current price window is gone cannot be bounded: fail closed.
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.execute("DELETE FROM model_prices WHERE model = ?", ("openai:gpt-5.4-nano",))
+    conn.commit()
+    est = interpret.estimate_raw_interpretation(
+        conn, "overall", "2026-06-09", "2026-06-09", "openai:gpt-5.4-nano")
+    assert est["est_cost_usd"] is None
+    assert est["refused"] is True and est["reason"] == "unpriced"
+
+
+def test_synthesize_lane_raw_over_cap_refuses_without_spending(conn, monkeypatch):
+    rec = []
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate(rec))
+    # A cap tiny enough that any priced run exceeds it.
+    monkeypatch.setattr(config, "INTERP_RAW_COST_CAP_USD", 1e-12)
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    result = interpret.synthesize_lane(
+        conn, "2026-06-09", "overall", "openai:gpt-5.4-nano",
+        temperature=1.0, seed=None, context_mode="raw")
+    assert result["refused"] is True
+    assert result["estimate"]["reason"] == "over_cap"
+    assert rec == []                                  # generate NOT called: no spend
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM interpretations").fetchone()["c"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM llm_invocations").fetchone()["c"] == 0
+
+
+def test_synthesize_lane_aggregated_ignores_cap(conn, monkeypatch):
+    # Aggregated mode never estimates or caps: a tiny cap does not block it.
+    rec = []
+    monkeypatch.setattr(interpret, "generate", _make_fake_generate(rec))
+    monkeypatch.setattr(config, "INTERP_RAW_COST_CAP_USD", 1e-12)
+    _seed_ranking(conn, "2026-06-09", "overall", 1, "v1", 3.0)
+    conn.commit()
+    result = interpret.synthesize_lane(
+        conn, "2026-06-09", "overall", "openai:gpt-5.4-nano",
+        temperature=1.0, seed=None, context_mode="aggregated")
+    assert result.get("refused") is None and result["skipped"] is False
+    assert len(rec) == 1                              # generate called: run proceeds
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM interpretations").fetchone()["c"] == 1
