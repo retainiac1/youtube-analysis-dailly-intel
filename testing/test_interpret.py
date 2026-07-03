@@ -624,7 +624,7 @@ def test_synthesize_lane_raw_over_cap_refuses_without_spending(conn, monkeypatch
         conn, "2026-06-09", "overall", "openai:gpt-5.4-nano",
         temperature=1.0, seed=None, context_mode="raw")
     assert result["refused"] is True
-    assert result["estimate"]["reason"] == "over_cap"
+    assert result["estimate"]["reason"] == interpret.INTERP_REFUSE_OVER_CAP
     assert rec == []                                  # generate NOT called: no spend
     assert conn.execute(
         "SELECT COUNT(*) c FROM interpretations").fetchone()["c"] == 0

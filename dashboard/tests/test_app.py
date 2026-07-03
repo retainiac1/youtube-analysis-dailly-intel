@@ -324,6 +324,68 @@ def test_interpret_empty_lane_skips(client, seeded_db_path, monkeypatch):
     assert _count(seeded_db_path, "llm_invocations") == 0
 
 
+# --- GET /api/interpret/raw-estimate (pre-run raw cost, fail-closed) ---------
+# The seeded health lane has one video; the model is priced. These exercise the real
+# route -> interpret.estimate_raw_interpretation path (no LLM call, no spend).
+
+def test_raw_estimate_under_cap_is_allowed(client):
+    resp = client.get("/api/interpret/raw-estimate", params={
+        "scope": "health", "model": VALID_MODEL})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["refused"] is False and body["reason"] is None
+    assert body["row_count"] == 1 and body["est_cost_usd"] is not None
+
+
+def test_raw_estimate_over_cap_refuses_with_constant_reason(client, monkeypatch):
+    monkeypatch.setattr(config, "INTERP_RAW_COST_CAP_USD", 1e-12)  # any priced run exceeds
+    resp = client.get("/api/interpret/raw-estimate", params={
+        "scope": "health", "model": VALID_MODEL})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["refused"] is True
+    assert body["reason"] == interpret.INTERP_REFUSE_OVER_CAP
+
+
+def test_raw_estimate_unpriced_refuses_with_constant_reason(client, monkeypatch):
+    # A paid model with no current price window is fail-closed refused.
+    monkeypatch.setattr(db, "fetch_effective_price", lambda *a, **k: None)
+    resp = client.get("/api/interpret/raw-estimate", params={
+        "scope": "health", "model": VALID_MODEL})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["refused"] is True
+    assert body["reason"] == interpret.INTERP_REFUSE_UNPRICED
+
+
+def test_raw_estimate_local_model_is_free_and_allowed(client):
+    resp = client.get("/api/interpret/raw-estimate", params={
+        "scope": "health", "model": "ollama:qwen3.5:9b"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["refused"] is False and body["est_cost_usd"] == 0.0
+
+
+def test_raw_estimate_bad_model_is_422(client):
+    resp = client.get("/api/interpret/raw-estimate", params={
+        "scope": "health", "model": "nope:nope"})
+    assert resp.status_code == 422
+
+
+def test_raw_estimate_bad_lane_is_422(client):
+    resp = client.get("/api/interpret/raw-estimate", params={
+        "scope": "bogus", "model": VALID_MODEL})
+    assert resp.status_code == 422
+
+
+def test_interpret_defaults_exposes_context_modes_and_refuse_reasons(client):
+    """The server owns the context-mode + refuse-reason spec; the UI keys its toggle
+    and its reason -> copy map on these exact strings, so they cannot drift."""
+    body = client.get("/api/interpret-defaults").json()
+    assert body["context_modes"] == list(interpret.INTERP_CONTEXT_MODES)
+    assert body["refuse_reasons"] == list(interpret.INTERP_REFUSE_REASONS)
+
+
 def test_interpret_llm_error_is_clean_400(client, monkeypatch):
     def boom(*a, **k):
         raise llm.LLMError("missing OPENAI_API_KEY for openai")

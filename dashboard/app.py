@@ -691,6 +691,37 @@ def api_interpret(
     return result
 
 
+@app.get("/api/interpret/raw-estimate")
+def api_interpret_raw_estimate(
+    scope: str = Query(..., min_length=1),
+    model: str = Query(..., min_length=1),
+    start_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """Pre-run cost estimate for a RAW-mode interpretation of one lane over the selected
+    window, so the UI can surface (and the user accept) the token exposure before spending.
+    Aggregated mode is fixed-size and never estimated; raw is the firehose. `scope` matches
+    the interpret family (`/api/interpret`), not the dashboard chart family's `lane`. Returns
+    interpret.estimate_raw_interpretation's breakdown as-is (row_count, est_input_tokens,
+    est_output_tokens, est_cost_usd, cap_usd, over_cap, refused, reason) - the SAME
+    single-source estimator the synthesize_lane raw breaker calls, so this surface and the
+    enforced cap cannot disagree. A `refused` estimate (reason in interpret.INTERP_REFUSE_REASONS)
+    is the signal for the client to disable Run (over cap, or paid-but-unpriced fail-closed)."""
+    bucket = _lane_to_bucket(scope)  # 422 on a bad lane
+    allowed = _allowed_models(conn)
+    if model not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"model must be one of {allowed}",
+        )
+    return db.run_with_db_retry(
+        lambda: interpret.estimate_raw_interpretation(
+            conn, bucket, start_date, end_date, model
+        )
+    )
+
+
 @app.get("/api/interpret-defaults")
 def api_interpret_defaults(conn: sqlite3.Connection = Depends(get_conn)):
     """Prepopulation for the generate controls: the model dropdown options, the
@@ -736,6 +767,11 @@ def api_interpret_defaults(conn: sqlite3.Connection = Depends(get_conn)):
         # multi-select renders all options with these pre-checked.
         "available_fields": interpret.PROMPT_FIELD_OPTIONS,
         "selected_fields": _stored_prompt_fields(conn),
+        # Server-owned context-mode spec: the toggle options and the refuse-reason CODES
+        # the raw estimate can carry, so the UI keys its mode toggle and its reason -> copy
+        # map on the SAME strings the server emits (no drift, fail-closed on an unknown code).
+        "context_modes": list(interpret.INTERP_CONTEXT_MODES),
+        "refuse_reasons": list(interpret.INTERP_REFUSE_REASONS),
     }
 
 

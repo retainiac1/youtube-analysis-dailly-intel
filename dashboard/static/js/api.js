@@ -180,6 +180,15 @@ export function getInterpretDefaults() {
   return getJSON("/api/interpret-defaults");
 }
 
+// Pre-run raw-mode cost estimate for a lane over the selected window. Mirrors
+// getInterpretation's shape: the arg is `lane` but it is sent as `scope` (the interpret
+// family's param name); start/end drop when null. Resolves to the estimator breakdown
+// {row_count, est_cost_usd, cap_usd, over_cap, refused, reason, ...}.
+export function estimateRawInterpret(lane, startDate, endDate, model) {
+  const qs = buildQuery({ scope: lane, model }, { start_date: startDate, end_date: endDate });
+  return getJSON(`/api/interpret/raw-estimate?${qs}`);
+}
+
 // Trigger synthesis for one lane (run_date, scope=lane) with the chosen model +
 // parameters. Resolves to {scope, skipped, ...} — on success also text, tokens,
 // seed_applied, think_applied, thinking, model; on an empty lane just

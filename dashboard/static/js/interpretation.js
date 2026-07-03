@@ -13,11 +13,43 @@ import * as api from "./api.js";
 
 let el = null;            // the page mount (<main id="interpretation">)
 let resultEl = null;      // where the stored/generated summary renders
-let controls = null;      // { modelSelect, tempInput, seedInput, thinkInput, thinkControl, runBtn, errorEl, stopwatchEl }
+let controls = null;      // { modelSelect, tempInput, seedInput, thinkInput, thinkControl, runBtn, errorEl, stopwatchEl, contextSelect, estimateEl }
 let caps = {};            // { "provider:model": { temperature, seed, reasoning, think } }
 let defaultTemperature = 1.0;
 let currentState = { runDate: null, lane: "health" };
 let buildPromise = null;  // ensures the scaffold (and one defaults fetch) is built once
+
+// Context-mode options + the refuse-reason CODES the raw estimate can carry, both from
+// the server (/api/interpret-defaults). Keying the toggle and the refused check on the
+// server's own strings means they cannot drift. Fallbacks only cover a defaults-fetch
+// failure (Run is already disabled in that case).
+const AGGREGATED = "aggregated";
+const RAW = "raw";
+let contextModes = [AGGREGATED, RAW];
+let refuseReasons = new Set();       // filled from defaults; the known refused codes
+
+// Run enable/disable is the AND of several conditions; compute it in one place so the
+// raw-estimate path, the run-in-flight path, and the no-models path cannot fight.
+const runState = { hasModels: false, running: false, mode: AGGREGATED,
+                   estimateInFlight: false, estimateRefused: false };
+let estimateSeq = 0;      // latest-wins token: a stale estimate response is dropped
+let estimateTimer = null; // debounce handle for the estimate trigger
+const ESTIMATE_DEBOUNCE_MS = 250;
+
+// Refused-reason copy, keyed on the server's reason CODES (interpret.INTERP_REFUSE_*).
+// These literals are the coupling point; the backend exposes the same codes via
+// /api/interpret-defaults (asserted in tests), and an UNRECOGNIZED code still keeps Run
+// disabled (fail closed) with generic copy, so a drift can never enable a refused run.
+const REASON_COPY = {
+  over_cap: (e) => `Estimated ${usd(e.est_cost_usd)} is over the ${usd(e.cap_usd)} cap. `
+    + "Narrow the period or switch to aggregated.",
+  unpriced: () => "This model has no current price, so raw cost cannot be bounded. "
+    + "Switch to aggregated or price the model.",
+};
+
+function usd(v) {
+  return v == null ? "$?" : `$${Number(v).toFixed(2)}`;
+}
 
 export function init(mount) {
   el = mount;
@@ -200,8 +232,18 @@ async function buildScaffold() {
     fieldsDropdown,
   ]);
 
+  // Context-mode toggle: aggregated (cheap, fixed-size) vs raw (the token firehose,
+  // gated by the pre-run estimate below). Options come from the server in the defaults
+  // fetch; default aggregated.
+  const contextSelect = node("select", { class: "interpret-select", attrs: { "aria-label": "Context mode" } });
+  // Pre-run raw cost estimate caption. Hidden in aggregated mode; in raw mode it shows
+  // the row count + estimated cost vs the cap, or the refused reason (Run disabled).
+  const estimateEl = node("p", { class: "interpret-estimate", attrs: { "aria-live": "polite" } });
+  estimateEl.hidden = true;
+
   controls = { modelSelect, tempInput, seedInput, thinkInput, thinkControl, runBtn,
-               errorEl, stopwatchEl, fieldsToggle, fieldsPanel, fieldsDropdown };
+               errorEl, stopwatchEl, fieldsToggle, fieldsPanel, fieldsDropdown,
+               contextSelect, estimateEl };
 
   // Run + run-time travel together as one flex item so they wrap as a unit.
   const runGroup = node("div", { class: "interpret-run-group" }, [runBtn, runtime]);
@@ -210,12 +252,14 @@ async function buildScaffold() {
     node("h2", { class: "heading-sm", text: "Generate interpretation" }),
     node("div", { class: "interpret-controls-row" }, [
       labeled("Model", modelSelect),
+      labeled("Context", contextSelect),
       labeled("Temperature", tempInput),
       labeled("Seed", seedInput),
       thinkControl,
       fieldsControl,
       runGroup,
     ]),
+    estimateEl,
     errorEl,
   ]);
 
@@ -223,7 +267,12 @@ async function buildScaffold() {
   el.replaceChildren(panel, resultEl);
 
   runBtn.addEventListener("click", onRun);
-  modelSelect.addEventListener("change", () => applyCapabilities(modelSelect.value));
+  modelSelect.addEventListener("change", () => {
+    applyCapabilities(modelSelect.value);
+    // A new model changes the raw price, so re-estimate when in raw mode.
+    if (runState.mode === RAW) scheduleEstimate();
+  });
+  contextSelect.addEventListener("change", onContextModeChange);
 
   // Fields dropdown wiring: toggle open/closed, keep the count label fresh, and
   // close on an outside click.
@@ -254,16 +303,30 @@ async function buildScaffold() {
     if (d.model) modelSelect.value = d.model;
     tempInput.value = d.temperature != null ? d.temperature : "";
     seedInput.value = d.seed != null ? d.seed : "";
+    // Server-owned context-mode spec: build the toggle from the server's modes and
+    // remember its refuse-reason codes (the ones the estimate can carry).
+    contextModes = (d.context_modes && d.context_modes.length) ? d.context_modes : contextModes;
+    refuseReasons = new Set(d.refuse_reasons || []);
+    for (const m of contextModes) {
+      contextSelect.appendChild(node("option", { text: labelForMode(m), attrs: { value: m } }));
+    }
+    contextSelect.value = AGGREGATED;
+    runState.mode = AGGREGATED;
     applyCapabilities(modelSelect.value);
     buildFieldOptions(d.available_fields || [], d.selected_fields || []);
-    if (!(d.models && d.models.length)) {
-      runBtn.disabled = true;
-      errorEl.textContent = "No models are configured.";
-    }
+    runState.hasModels = !!(d.models && d.models.length);
+    if (!runState.hasModels) errorEl.textContent = "No models are configured.";
+    applyRunEnabled();
   } catch (err) {
-    runBtn.disabled = true;
+    runState.hasModels = false;
+    applyRunEnabled();
     errorEl.textContent = `Could not load model options: ${err.message || err}`;
   }
+}
+
+// Title-case a context-mode code for the toggle label ("aggregated" -> "Aggregated").
+function labelForMode(m) {
+  return m.charAt(0).toUpperCase() + m.slice(1);
 }
 
 // Render one checkbox per available field, pre-checking the persisted selection,
@@ -304,7 +367,97 @@ function readParams() {
   // Disabled/hidden -> null ("not applicable"); the server normalizes either way,
   // and null persists as NULL while false persists as 0 (the honored-off case).
   const think = controls.thinkInput.disabled ? null : controls.thinkInput.checked;
-  return { model: controls.modelSelect.value, temperature, seed, think };
+  return {
+    model: controls.modelSelect.value, temperature, seed, think,
+    context_mode: controls.contextSelect.value,
+  };
+}
+
+// --- context mode + raw estimate (latest-wins, fail-closed) ------------------
+
+// Central Run enable/disable: OFF when no models, mid-run, or (raw mode) while an
+// estimate is in flight or the estimate refused. One place so the paths cannot fight.
+function applyRunEnabled() {
+  controls.runBtn.disabled = !runState.hasModels || runState.running
+    || (runState.mode === RAW && (runState.estimateInFlight || runState.estimateRefused));
+}
+
+function clearEstimate() {
+  runState.estimateInFlight = false;
+  runState.estimateRefused = false;
+  controls.estimateEl.hidden = true;
+  controls.estimateEl.textContent = "";
+  controls.estimateEl.classList.remove("refused");
+}
+
+function onContextModeChange() {
+  runState.mode = controls.contextSelect.value;
+  if (runState.mode === RAW) {
+    scheduleEstimate();       // fetch the pre-run cost before enabling Run
+  } else {
+    clearEstimate();          // aggregated is cheap: no estimate, Run free
+    applyRunEnabled();
+  }
+}
+
+// Debounce the estimate trigger so rapid model/window/lane changes do not spam the route.
+function scheduleEstimate() {
+  if (runState.mode !== RAW) return;
+  // Disable Run immediately (fail closed) until a CURRENT estimate resolves.
+  runState.estimateInFlight = true;
+  runState.estimateRefused = false;
+  applyRunEnabled();
+  controls.estimateEl.hidden = false;
+  controls.estimateEl.classList.remove("refused");
+  controls.estimateEl.textContent = "Estimating raw cost...";
+  clearTimeout(estimateTimer);
+  estimateTimer = setTimeout(runEstimate, ESTIMATE_DEBOUNCE_MS);
+}
+
+async function runEstimate() {
+  if (runState.mode !== RAW) return;
+  const seq = ++estimateSeq;   // latest-wins token
+  let est;
+  try {
+    est = await api.estimateRawInterpret(
+      currentState.lane, currentState.startDate, currentState.endDate,
+      controls.modelSelect.value);
+  } catch (err) {
+    if (seq !== estimateSeq) return;         // superseded: drop the stale response
+    runState.estimateInFlight = false;
+    runState.estimateRefused = true;         // fail closed on an estimate error
+    controls.estimateEl.hidden = false;
+    controls.estimateEl.classList.add("refused");
+    controls.estimateEl.textContent = `Could not estimate raw cost: ${err.message || err}`;
+    applyRunEnabled();
+    return;
+  }
+  if (seq !== estimateSeq) return;           // a newer estimate started: drop this one
+  runState.estimateInFlight = false;
+  runState.estimateRefused = !!est.refused;
+  renderEstimate(est);
+  applyRunEnabled();
+}
+
+function renderEstimate(est) {
+  controls.estimateEl.hidden = false;
+  if (est.refused) {
+    // Keyed on the server's reason CODE; an unknown code still keeps Run disabled
+    // (runState.estimateRefused true) with generic copy, so drift cannot enable a run.
+    const copy = REASON_COPY[est.reason];
+    controls.estimateEl.classList.add("refused");
+    controls.estimateEl.textContent = copy
+      ? copy(est)
+      : "Raw generation is refused for this window and model. Switch to aggregated.";
+    if (!refuseReasons.has(est.reason)) {
+      console.error(`Unknown raw-estimate refuse reason: ${est.reason}`);
+    }
+    return;
+  }
+  controls.estimateEl.classList.remove("refused");
+  const cost = est.est_cost_usd == null ? "free" : usd(est.est_cost_usd);
+  controls.estimateEl.textContent =
+    `Raw over ${est.row_count} video(s): about ${cost} (cap ${usd(est.cap_usd)}).`;
 }
 
 async function onRun() {
@@ -312,10 +465,11 @@ async function onRun() {
     controls.errorEl.textContent = "Select a run first.";
     return;
   }
-  const { model, temperature, seed, think } = readParams();
-  const { runBtn, errorEl, stopwatchEl } = controls;
+  const { model, temperature, seed, think, context_mode } = readParams();
+  const { errorEl, stopwatchEl } = controls;
   errorEl.textContent = "";
-  runBtn.disabled = true;
+  runState.running = true;
+  applyRunEnabled();
 
   const start = performance.now();
   const tick = () => {
@@ -335,9 +489,10 @@ async function onRun() {
       fields: selectedFields(),
       // Generate for the SELECTED window (the shared date filter), not just the active
       // run: the producers aggregate over [startDate, endDate] and the row is keyed by
-      // that window. context_mode is added by Gate C (defaults to aggregated server-side).
+      // that window. context_mode is the aggregated/raw toggle (raw is estimate-gated).
       startDate: currentState.startDate,
       endDate: currentState.endDate,
+      contextMode: context_mode,
     });
     clearInterval(timer);
     // Branch on skipped FIRST: an empty lane wrote nothing, so show the skip state
@@ -368,7 +523,8 @@ async function onRun() {
     tick(); // freeze the elapsed at the moment of failure
     errorEl.textContent = err.message || String(err);
   } finally {
-    runBtn.disabled = false;
+    runState.running = false;
+    applyRunEnabled();   // re-evaluate (raw + refused stays disabled)
   }
 }
 
@@ -377,6 +533,10 @@ async function onRun() {
 export async function refresh(state) {
   currentState = state;
   await ensureBuilt();
+
+  // The window/lane may have changed; a raw estimate is window+lane specific, so
+  // re-estimate (debounced, latest-wins) when raw mode is active.
+  if (runState.mode === RAW) scheduleEstimate();
 
   if (!state.runDate) {
     renderEmpty("The interpretation fills in once the pipeline records a run.");

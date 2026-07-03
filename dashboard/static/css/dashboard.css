@@ -859,6 +859,18 @@ html { scroll-padding-top: var(--header-h, 0px); }
   min-height: 1rem;
 }
 
+/* Pre-run raw cost estimate caption (Context = raw). Muted by default; the refused
+   variant turns red like .interpret-error to signal Run is blocked. Hidden in aggregated
+   mode via the [hidden] attribute (author display would otherwise beat UA hidden). */
+.interpret-estimate {
+  margin: 0.7rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+.interpret-estimate.refused { color: var(--accent-red, #ff6b6b); }
+.interpret-estimate[hidden] { display: none; }
+
 /* --- Extract page terminal (streamed run output) ------------------------- */
 /* The center output surface on the Extract page's #extract-main column, mirroring
    where Interpretation shows its result card. A plain monospace log area; Phase 3

@@ -60,6 +60,15 @@ INTERP_NO_DATA = "no data"
 # The data context that produced an interpretation, recorded per run.
 INTERP_CONTEXT_MODES = ("aggregated", "raw")
 
+# The reason codes a refused raw-mode estimate can carry (see _raw_cost_estimate). These
+# cross the server/UI boundary: the pre-run estimate endpoint returns one, and the frontend
+# maps it to copy AND fail-closes on it, so the code is defined ONCE here and reused by the
+# estimator, exposed via /api/interpret-defaults, and asserted against in tests. A silent
+# string mismatch here would let a refused run render with Run enabled.
+INTERP_REFUSE_OVER_CAP = "over_cap"    # priced estimate exceeds INTERP_RAW_COST_CAP_USD
+INTERP_REFUSE_UNPRICED = "unpriced"    # paid model with no current price window (fail closed)
+INTERP_REFUSE_REASONS = (INTERP_REFUSE_OVER_CAP, INTERP_REFUSE_UNPRICED)
+
 # The 12 section keys, in canonical order, each bound to the Dashboard tab and the
 # `fetch_dashboard_*` payload key(s) that feed it. SINGLE source: this drives the
 # aggregated payload assembly and the ordered key tuple below. `breakouts` is one
@@ -353,7 +362,7 @@ def _raw_cost_estimate(conn, model: str, prompt: str, row_count: int) -> dict:
         price = db.fetch_effective_price(conn, model, now_local_iso()[:10])
         if price is None:
             refused = True                                     # paid + unpriced: fail closed
-            reason = "unpriced"
+            reason = INTERP_REFUSE_UNPRICED
         else:
             prices = {model: {"input": price["input_per_1m"],
                               "output": price["output_per_1m"]}}
@@ -361,7 +370,7 @@ def _raw_cost_estimate(conn, model: str, prompt: str, row_count: int) -> dict:
                                          prices)
             over_cap = est_cost_usd is not None and est_cost_usd > cap_usd
             refused = over_cap
-            reason = "over_cap" if over_cap else None
+            reason = INTERP_REFUSE_OVER_CAP if over_cap else None
     return {"row_count": row_count, "est_input_tokens": est_input_tokens,
             "est_output_tokens": est_output_tokens, "est_cost_usd": est_cost_usd,
             "cap_usd": cap_usd, "over_cap": over_cap, "refused": refused,
