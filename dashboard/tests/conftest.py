@@ -37,9 +37,10 @@ def seeded_db_path(tmp_path):
             "'2026-06-08T10:00:00-04:00')"
         )
         conn.execute(
-            "INSERT INTO interpretations (run_date, scope, text, model, "
-            "generated_at) VALUES ('2026-06-08', 'health', 'Looks strong.', "
-            "'model-x', '2026-06-08T10:05:00-04:00')"
+            "INSERT INTO interpretations (window_key, scope, start_date, end_date, "
+            "run_date, text, model, generated_at) VALUES "
+            "('2026-06-08:2026-06-08', 'health', '2026-06-08', '2026-06-08', "
+            "'2026-06-08', 'Looks strong.', 'model-x', '2026-06-08T10:05:00-04:00')"
         )
         conn.execute(
             "INSERT INTO quota_ledger (pacific_date, units_used, updated_at) "

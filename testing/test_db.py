@@ -54,8 +54,8 @@ EXPECTED_COLUMNS = {
     "quota_ledger": {"pacific_date", "units_used", "updated_at"},
     "categories": {"category_id", "title", "region_code", "last_updated_at"},
     "interpretations": {
-        "run_date", "scope", "text", "model", "generated_at", "temperature",
-        "seed", "think",
+        "window_key", "scope", "start_date", "end_date", "run_date", "text",
+        "model", "generated_at", "temperature", "seed", "think", "duration_ms",
     },
     "llm_invocations": {
         "id", "run_date", "scope", "model", "temperature", "seed", "filter",
@@ -138,7 +138,7 @@ def test_user_version_is_set(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 15
+        assert version == db.SCHEMA_VERSION == 16
     finally:
         conn.close()
 
@@ -373,7 +373,7 @@ def test_v13_to_v14_adds_subscriber_count_nullable(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 15
+        assert version == db.SCHEMA_VERSION == 16
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(stats_snapshots)")}
         assert "subscriber_count" in cols
         old = conn.execute(
@@ -424,7 +424,7 @@ def test_v14_to_v15_adds_context_mode_nullable(tmp_path):
     conn = db.get_connection(db_path)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 15
+        assert version == db.SCHEMA_VERSION == 16
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(llm_invocations)")}
         assert "context_mode" in cols
         old = conn.execute(
@@ -440,6 +440,93 @@ def test_v14_to_v15_adds_context_mode_nullable(tmp_path):
             "SELECT context_mode FROM llm_invocations WHERE run_date='2026-07-01'"
         ).fetchone()
         assert new["context_mode"] == "raw"
+    finally:
+        conn.close()
+
+
+def test_v15_to_v16_rekeys_interpretations(tmp_path):
+    """v15 -> v16: interpretations is re-keyed from (run_date, scope) to
+    (window_key, scope) via a table rebuild. Legacy rows backfill as single-run windows
+    (window_key = run_date:run_date, start=end=run_date) with duration_ms denormalized
+    from the NEWEST matching invocation; existing text is preserved, a fresh windowed
+    write coexists with the backfilled single-run row (the collision the re-key fixes),
+    and a re-run is a no-op."""
+    db_path = str(tmp_path / "v15.db")
+    raw = sqlite3.connect(db_path)
+    raw.row_factory = sqlite3.Row
+    try:
+        # v15-shaped interpretations (old PK, NO window_key/start/end/duration_ms).
+        raw.execute(
+            "CREATE TABLE interpretations ("
+            "run_date TEXT, scope TEXT, text TEXT, model TEXT, generated_at TEXT, "
+            "temperature REAL, seed INTEGER, think INTEGER, "
+            "PRIMARY KEY (run_date, scope))"
+        )
+        # v15-shaped llm_invocations (already has context_mode) for the duration backfill.
+        raw.execute(
+            "CREATE TABLE llm_invocations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, run_date TEXT, scope TEXT, "
+            "model TEXT, temperature REAL, seed INTEGER, filter TEXT, "
+            "input_tokens INTEGER, output_tokens INTEGER, generated_at TEXT, "
+            "duration_ms INTEGER, context_mode TEXT)"
+        )
+        raw.execute(
+            "INSERT INTO interpretations (run_date, scope, text, model, generated_at, "
+            "temperature, seed, think) VALUES "
+            "('2026-06-30', 'overall', 'Legacy summary.', 'anthropic:claude', "
+            "'2026-06-30T10:00:00-04:00', 0.2, NULL, NULL)"
+        )
+        # Two invocations for the same (run_date, scope): the NEWER (higher id -> 2200)
+        # is the one the deterministic ORDER BY id DESC backfill must pick.
+        raw.execute(
+            "INSERT INTO llm_invocations (run_date, scope, model, generated_at, "
+            "duration_ms) VALUES ('2026-06-30', 'overall', 'm', 'g', 900)"
+        )
+        raw.execute(
+            "INSERT INTO llm_invocations (run_date, scope, model, generated_at, "
+            "duration_ms) VALUES ('2026-06-30', 'overall', 'm', 'g', 2200)"
+        )
+        raw.execute("PRAGMA user_version = 15")
+        raw.commit()
+    finally:
+        raw.close()
+
+    db.init_db(db_path)
+    db.init_db(db_path)  # re-runnable: a second migration must be a clean no-op
+
+    conn = db.get_connection(db_path)
+    try:
+        assert (conn.execute("PRAGMA user_version").fetchone()[0]
+                == db.SCHEMA_VERSION == 16)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(interpretations)")}
+        assert {"window_key", "start_date", "end_date", "duration_ms"}.issubset(cols)
+        # No leftover rebuild scratch table.
+        assert conn.execute(
+            "SELECT count(*) c FROM sqlite_master WHERE name='interpretations_new'"
+        ).fetchone()["c"] == 0
+
+        row = conn.execute(
+            "SELECT * FROM interpretations WHERE scope='overall'").fetchone()
+        assert row["text"] == "Legacy summary."            # legacy text preserved
+        # Backfilled as a single-run window; the SQL image equals the Python helper.
+        assert row["window_key"] == db.interpretation_window_key("2026-06-30",
+                                                                 "2026-06-30")
+        assert row["window_key"] == "2026-06-30:2026-06-30"
+        assert row["start_date"] == "2026-06-30" and row["end_date"] == "2026-06-30"
+        assert row["run_date"] == "2026-06-30"
+        assert row["duration_ms"] == 2200                  # NEWEST invocation (id DESC)
+
+        # A different window for the same scope coexists.
+        with db.transaction(conn):
+            db.upsert_interpretation(
+                conn, db.interpretation_window_key(None, None), "overall", "All time.",
+                "m", "2026-07-01T10:00:00-04:00", run_date="2026-07-01",
+                start_date=None, end_date=None,
+            )
+        assert db.fetch_interpretation(
+            conn, "2026-06-30:2026-06-30", "overall")["text"] == "Legacy summary."
+        assert db.fetch_interpretation(
+            conn, "all:all", "overall")["text"] == "All time."
     finally:
         conn.close()
 
@@ -1151,23 +1238,27 @@ def test_fetch_effective_price_ignores_deleted(tmp_path):
 def test_upsert_interpretation_inserts_and_overwrites(tmp_path):
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
+    wk = db.interpretation_window_key("2026-06-08", "2026-06-08")
 
     conn = db.get_connection(db_path)
     try:
         with db.transaction(conn):
             db.upsert_interpretation(
-                conn, "2026-06-08", "overall", "First.",
+                conn, wk, "overall", "First.",
                 "anthropic:claude-haiku-4-5", "2026-06-08T11:00:00-04:00",
+                run_date="2026-06-08", start_date="2026-06-08", end_date="2026-06-08",
             )
             # A different scope must be untouched by the overwrite below.
             db.upsert_interpretation(
-                conn, "2026-06-08", "health", "Health summary.",
+                conn, wk, "health", "Health summary.",
                 "anthropic:claude-haiku-4-5", "2026-06-08T11:00:00-04:00",
+                run_date="2026-06-08", start_date="2026-06-08", end_date="2026-06-08",
             )
         with db.transaction(conn):
             db.upsert_interpretation(
-                conn, "2026-06-08", "overall", "Second.",
+                conn, wk, "overall", "Second.",
                 "openai:gpt-5.4-nano", "2026-06-08T12:00:00-04:00",
+                run_date="2026-06-08", start_date="2026-06-08", end_date="2026-06-08",
             )
 
         rows = conn.execute(
@@ -1185,35 +1276,65 @@ def test_upsert_interpretation_inserts_and_overwrites(tmp_path):
         conn.close()
 
 
+def test_upsert_interpretation_distinct_windows_same_scope_coexist(tmp_path):
+    """Two DIFFERENT windows for the same scope get distinct rows (the collision the
+    v16 re-key fixes): a single-run window and an all-time window both persist."""
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    run_key = db.interpretation_window_key("2026-06-08", "2026-06-08")
+    all_key = db.interpretation_window_key(None, None)
+    assert run_key != all_key
+    conn = db.get_connection(db_path)
+    try:
+        with db.transaction(conn):
+            db.upsert_interpretation(
+                conn, run_key, "health", "Single run.", "model-x",
+                "2026-06-08T11:00:00-04:00",
+                run_date="2026-06-08", start_date="2026-06-08", end_date="2026-06-08",
+            )
+            db.upsert_interpretation(
+                conn, all_key, "health", "All time.", "model-x",
+                "2026-06-08T11:00:00-04:00",
+                run_date="2026-06-08", start_date=None, end_date=None,
+            )
+        assert db.fetch_interpretation(conn, run_key, "health")["text"] == "Single run."
+        assert db.fetch_interpretation(conn, all_key, "health")["text"] == "All time."
+    finally:
+        conn.close()
+
+
 def test_upsert_interpretation_persists_and_overwrites_temperature_seed(tmp_path):
     """The applied temperature/seed are stored and overwritten on re-run; seed is
     NULL when the provider omitted it (the Anthropic case)."""
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
+    wk = db.interpretation_window_key("2026-06-08", "2026-06-08")
     conn = db.get_connection(db_path)
     try:
         with db.transaction(conn):
             db.upsert_interpretation(
-                conn, "2026-06-08", "overall", "First.",
+                conn, wk, "overall", "First.",
                 "openai:gpt-5.4-nano", "2026-06-08T11:00:00-04:00",
+                run_date="2026-06-08", start_date="2026-06-08", end_date="2026-06-08",
                 temperature=0.7, seed=42,
             )
         row = conn.execute(
             "SELECT temperature, seed FROM interpretations "
-            "WHERE run_date='2026-06-08' AND scope='overall'"
+            "WHERE window_key=? AND scope='overall'", (wk,)
         ).fetchone()
         assert row["temperature"] == 0.7 and row["seed"] == 42
 
         # Re-run the lane with a provider that dropped the seed (seed=None).
         with db.transaction(conn):
             db.upsert_interpretation(
-                conn, "2026-06-08", "overall", "Second.",
+                conn, wk, "overall", "Second.",
                 "anthropic:claude-haiku-4-5", "2026-06-08T12:00:00-04:00",
+                run_date="2026-06-08", start_date="2026-06-08", end_date="2026-06-08",
                 temperature=0.3, seed=None,
             )
         row = conn.execute(
             "SELECT temperature, seed FROM interpretations "
-            "WHERE run_date='2026-06-08' AND scope='overall'"
+            "WHERE window_key=? AND scope='overall'", (wk,)
         ).fetchone()
         assert row["temperature"] == 0.3
         assert row["seed"] is None  # overwritten to NULL, the honest 'no seed'
@@ -1259,45 +1380,39 @@ def test_log_invocation_appends_and_round_trips(tmp_path):
         conn.close()
 
 
-def test_fetch_interpretation_returns_latest_duration(tmp_path):
-    """fetch_interpretation reports the duration of the NEWEST invocation for the
-    (run_date, scope) — the run behind the current text — and NULL when none."""
+def test_fetch_interpretation_reads_denormalized_duration(tmp_path):
+    """fetch_interpretation reports the duration_ms stored ON the row (denormalized in
+    v16, no llm_invocations join), NULL when the write did not carry one."""
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
+    wk = db.interpretation_window_key("2026-06-08", "2026-06-08")
 
     conn = db.get_connection(db_path)
     try:
         with db.transaction(conn):
             db.upsert_interpretation(
-                conn, "2026-06-08", "overall", "A summary.",
+                conn, wk, "overall", "A summary.",
                 "openai:gpt-5.4-nano", "2026-06-08T11:05:00-04:00",
-            )
-            # Two invocations for the same lane; the later (higher id) is the one
-            # whose duration must be reported alongside the current text.
-            db.log_invocation(
-                conn, "2026-06-08", "overall", "openai:gpt-5.4-nano",
-                0.7, 42, None, 3000, 200, "2026-06-08T11:00:00-04:00",
-                duration_ms=900,
-            )
-            db.log_invocation(
-                conn, "2026-06-08", "overall", "openai:gpt-5.4-nano",
-                0.7, 42, None, 3100, 210, "2026-06-08T11:05:00-04:00",
+                run_date="2026-06-08", start_date="2026-06-08", end_date="2026-06-08",
                 duration_ms=1700,
             )
-
-        row = db.fetch_interpretation(conn, "2026-06-08", "overall")
+        row = db.fetch_interpretation(conn, wk, "overall")
         assert row["text"] == "A summary."
-        assert row["duration_ms"] == 1700  # newest invocation's duration
+        assert row["window_key"] == wk
+        assert row["start_date"] == "2026-06-08" and row["end_date"] == "2026-06-08"
+        assert row["duration_ms"] == 1700  # read straight off the row
 
-        # A lane with an interpretation but no invocation -> NULL duration.
+        # A row written without a measured duration -> NULL.
         with db.transaction(conn):
             db.upsert_interpretation(
-                conn, "2026-06-08", "health", "Seed text.",
+                conn, wk, "health", "Seed text.",
                 "model-x", "2026-06-08T11:05:00-04:00",
+                run_date="2026-06-08", start_date="2026-06-08", end_date="2026-06-08",
             )
-        seed_row = db.fetch_interpretation(conn, "2026-06-08", "health")
+        seed_row = db.fetch_interpretation(conn, wk, "health")
         assert seed_row["text"] == "Seed text."
         assert seed_row["duration_ms"] is None
+        assert db.fetch_interpretation(conn, wk, "habit") is None  # absent
     finally:
         conn.close()
 

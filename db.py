@@ -69,7 +69,16 @@ import config
 # it),
 # so those paths stay unaffected. Guarded ALTER in the same atomic block (like v5's
 # duration_ms); a fresh DB already has it from the CREATE above.
-SCHEMA_VERSION = 15
+# v16: re-keyed `interpretations` from (run_date, scope) to (window_key, scope) so a
+# window-scoped interpretation (e.g. "last 7 days") has its own row instead of
+# colliding with another window that shares the same active run_date. Adds window_key
+# (canonical id from interpretation_window_key), start_date/end_date (raw window bounds,
+# for display), and a DENORMALIZED duration_ms (so the read no longer joins
+# llm_invocations). SQLite cannot re-key a composite PK by ALTER, so this is a table
+# REBUILD (create-new, backfill, drop, rename), guarded + re-runnable, in the same
+# atomic block, version stamped last. Legacy rows backfill as single-run windows
+# (window_key = run_date:run_date). llm_invocations is unchanged.
+SCHEMA_VERSION = 16
 
 SCHEMA_STATEMENTS: list[str] = [
     """
@@ -176,15 +185,19 @@ SCHEMA_STATEMENTS: list[str] = [
     """,
     """
     CREATE TABLE IF NOT EXISTS interpretations (
-        run_date TEXT,
+        window_key TEXT,       -- v16: canonical window id (interpretation_window_key)
         scope TEXT,
+        start_date TEXT,       -- v16: raw window start (NULL = unbounded/"all"), display
+        end_date TEXT,         -- v16: raw window end (NULL = unbounded/"all"), display
+        run_date TEXT,         -- the active run_date at generation (provenance)
         text TEXT,
         model TEXT,
         generated_at TEXT,
         temperature REAL,      -- v7: the applied temperature (NULL if omitted)
         seed INTEGER,          -- v7: the applied seed (NULL if the provider omitted)
         think INTEGER,         -- v8: the applied think value (NULL = not applicable)
-        PRIMARY KEY (run_date, scope)
+        duration_ms INTEGER,   -- v16: denormalized generator run time (read drops the join)
+        PRIMARY KEY (window_key, scope)
     )
     """,
     """
@@ -599,6 +612,70 @@ def init_db(db_path: str) -> None:
                 conn.execute(
                     "ALTER TABLE llm_invocations ADD COLUMN context_mode TEXT"
                 )
+            # v15 -> v16: re-key interpretations from (run_date, scope) to
+            # (window_key, scope). SQLite cannot ALTER a composite PK, so REBUILD:
+            # create-new, backfill, drop, rename. Guarded on the new column so a
+            # completed migration (or a fresh DB, which already has window_key from the
+            # CREATE above) skips it; re-runnable because the whole block is atomic and a
+            # mid-way failure ROLLBACKs to v15.
+            if "window_key" not in _column_names(conn, "interpretations"):
+                # Capture user-defined (non-PK) indexes so the DROP does not silently
+                # lose them (PK auto-indexes have sql IS NULL and are recreated by the
+                # new CREATE TABLE, so they are excluded). interpretations has none
+                # today; this keeps a future index from being dropped on a later rebuild.
+                index_sql = [
+                    row[0] for row in conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='index' "
+                        "AND tbl_name='interpretations' AND sql IS NOT NULL"
+                    ).fetchall()
+                ]
+                conn.execute("DROP TABLE IF EXISTS interpretations_new")
+                conn.execute(
+                    """
+                    CREATE TABLE interpretations_new (
+                        window_key TEXT,
+                        scope TEXT,
+                        start_date TEXT,
+                        end_date TEXT,
+                        run_date TEXT,
+                        text TEXT,
+                        model TEXT,
+                        generated_at TEXT,
+                        temperature REAL,
+                        seed INTEGER,
+                        think INTEGER,
+                        duration_ms INTEGER,
+                        PRIMARY KEY (window_key, scope)
+                    )
+                    """
+                )
+                # Legacy rows are single-run windows: window_key = run_date:run_date,
+                # start=end=run_date. The `run_date || ':' || run_date` literal is the
+                # SQL image of interpretation_window_key(run_date, run_date) -- keep the
+                # two in lockstep (the ':' matches WINDOW_KEY_SEP); the migration test
+                # asserts they agree. duration_ms is denormalized from the NEWEST
+                # matching invocation (ORDER BY id DESC LIMIT 1 is deterministic; an
+                # unordered subquery could pick any matching row), NULL when none exists.
+                conn.execute(
+                    """
+                    INSERT INTO interpretations_new
+                        (window_key, scope, start_date, end_date, run_date, text, model,
+                         generated_at, temperature, seed, think, duration_ms)
+                    SELECT i.run_date || ':' || i.run_date, i.scope, i.run_date,
+                           i.run_date, i.run_date, i.text, i.model, i.generated_at,
+                           i.temperature, i.seed, i.think,
+                           (SELECT li.duration_ms FROM llm_invocations li
+                            WHERE li.run_date = i.run_date AND li.scope = i.scope
+                            ORDER BY li.id DESC LIMIT 1)
+                    FROM interpretations i
+                    """
+                )
+                conn.execute("DROP TABLE interpretations")
+                conn.execute(
+                    "ALTER TABLE interpretations_new RENAME TO interpretations"
+                )
+                for sql in index_sql:
+                    conn.execute(sql)
             # Stamp LAST, so the version is never ahead of the schema.
             if current_version != SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -711,34 +788,72 @@ def upsert_category(conn: sqlite3.Connection, record: dict, now: str) -> None:
     conn.execute(sql, {**record, "now": now})
 
 
-def upsert_interpretation(conn: sqlite3.Connection, run_date: str, scope: str,
-                          text: str, model: str, now: str,
+# --- Interpretation window key (v16) -----------------------------------------
+# A window-scoped interpretation is keyed by its [start_date, end_date] window, not by
+# a single run_date, so two windows that share an active run_date (e.g. "latest run" vs
+# "last 7 days") get distinct rows. The key is a canonical string built HERE, the one
+# place, and reused by upsert (write), fetch (read), and the v16 migration backfill so
+# they cannot drift. NULL bounds (the all-time window) map to a named sentinel, which
+# also sidesteps NULL-in-a-composite-PK (SQLite treats NULLs as distinct, which would
+# break uniqueness). A single-run window is start==end==run_date.
+WINDOW_ALL = "all"            # sentinel for an unbounded (None) window bound
+WINDOW_KEY_SEP = ":"          # separator between the start and end bounds in the key
+
+
+def interpretation_window_key(start_date: str | None, end_date: str | None) -> str:
+    """The canonical interpretations key for a window. `f"{start}:{end}"` with each
+    None bound replaced by WINDOW_ALL. Single-run window -> "2026-07-01:2026-07-01";
+    all-time -> "all:all". Must stay in lockstep with the SQL image used by the v16
+    backfill (run_date || ':' || run_date); the migration test asserts they agree."""
+    start = start_date if start_date else WINDOW_ALL
+    end = end_date if end_date else WINDOW_ALL
+    return f"{start}{WINDOW_KEY_SEP}{end}"
+
+
+def upsert_interpretation(conn: sqlite3.Connection, window_key: str, scope: str,
+                          text: str, model: str, now: str, *,
+                          run_date: str,
+                          start_date: str | None = None,
+                          end_date: str | None = None,
                           temperature: float | None = None,
                           seed: int | None = None,
-                          think: int | None = None) -> None:
-    """Insert or overwrite the single interpretation for (run_date, scope). On
-    conflict the text, model, generated_at, and the APPLIED temperature/seed/think
-    are replaced (re-running a lane overwrites its summary). `model` is the canonical
-    "provider:model" string; temperature/seed/think are the values that actually
-    governed the run (NULL when not applicable — e.g. Anthropic's seed, or think on a
-    model whose adapter does not honor it). Composite-PK shape, so the SQL is written
-    inline rather than via _build_upsert_sql (that helper is shaped for single-key
-    tables). Does not commit — the caller wraps it in `transaction`."""
+                          think: int | None = None,
+                          duration_ms: int | None = None) -> None:
+    """Insert or overwrite the single interpretation for (window_key, scope). On
+    conflict the text, model, generated_at, the window bounds/run_date provenance, the
+    APPLIED temperature/seed/think, and duration_ms are replaced (re-running a window
+    overwrites its summary). `window_key` comes from interpretation_window_key(start,
+    end); `run_date` is the active run_date at generation (provenance). `model` is the
+    canonical "provider:model" string; temperature/seed/think are the values that
+    actually governed the run (NULL when not applicable, e.g. Anthropic's seed, or
+    think on a model whose adapter does not honor it). `duration_ms` is denormalized
+    here so fetch_interpretation reads it directly instead of joining llm_invocations.
+    Composite-PK shape, so the SQL is written inline rather than via _build_upsert_sql
+    (that helper is shaped for single-key tables). Does not commit: the caller wraps it
+    in `transaction`."""
     conn.execute(
         """
         INSERT INTO interpretations
-            (run_date, scope, text, model, generated_at, temperature, seed, think)
-        VALUES (:run_date, :scope, :text, :model, :now, :temperature, :seed, :think)
-        ON CONFLICT(run_date, scope) DO UPDATE SET
+            (window_key, scope, start_date, end_date, run_date, text, model,
+             generated_at, temperature, seed, think, duration_ms)
+        VALUES (:window_key, :scope, :start_date, :end_date, :run_date, :text, :model,
+                :now, :temperature, :seed, :think, :duration_ms)
+        ON CONFLICT(window_key, scope) DO UPDATE SET
+            start_date = excluded.start_date,
+            end_date = excluded.end_date,
+            run_date = excluded.run_date,
             text = excluded.text,
             model = excluded.model,
             generated_at = excluded.generated_at,
             temperature = excluded.temperature,
             seed = excluded.seed,
-            think = excluded.think
+            think = excluded.think,
+            duration_ms = excluded.duration_ms
         """,
-        {"run_date": run_date, "scope": scope, "text": text, "model": model,
-         "now": now, "temperature": temperature, "seed": seed, "think": think},
+        {"window_key": window_key, "scope": scope, "start_date": start_date,
+         "end_date": end_date, "run_date": run_date, "text": text, "model": model,
+         "now": now, "temperature": temperature, "seed": seed, "think": think,
+         "duration_ms": duration_ms},
     )
 
 
@@ -1015,31 +1130,24 @@ def fetch_lane(
 
 
 def fetch_interpretation(
-    conn: sqlite3.Connection, run_date: str, scope: str
+    conn: sqlite3.Connection, window_key: str, scope: str
 ) -> sqlite3.Row | None:
-    """Return the interpretations row for (run_date, scope) or None when absent,
-    plus `duration_ms` — the run time of the invocation that produced the current
-    text. scope holds a bucket value (health / habit / overall). duration_ms is
-    NULL when no invocation exists for the row (e.g. the seed's pre-instrumentation
-    rows).
+    """Return the interpretations row for (window_key, scope) or None when absent.
+    `window_key` comes from interpretation_window_key(start, end). scope holds a bucket
+    value (health / habit / overall).
 
-    The duration subquery picks the NEWEST llm_invocations row for the same
-    (run_date, scope). That is the run behind the current text ONLY because
-    synthesize_lane logs the invocation and upserts the interpretation in ONE
-    transaction (the pinned write order): the highest invocation id always matches
-    the stored text. Do not reorder those writes, or this duration would belong to
-    a different run than the displayed text. duration_ms is the LAST selected
-    column (appended), so name-indexed consumers are undisturbed. The applied
-    temperature/seed/think are also selected for provenance display (NULL when not
-    applicable)."""
+    duration_ms is read DIRECTLY from the row (denormalized at write time in v16), not
+    joined from llm_invocations: synthesize_lane stamps the measured generator run time
+    onto the row it upserts, so every new row carries it. It is NULL only for legacy
+    rows with no invocation to backfill from (the seed's pre-instrumentation rows). The
+    applied temperature/seed/think and the window bounds/run_date provenance are also
+    selected for display."""
     return conn.execute(
-        "SELECT i.run_date, i.scope, i.text, i.model, i.generated_at, "
-        "       i.temperature, i.seed, i.think, "
-        "       (SELECT li.duration_ms FROM llm_invocations li "
-        "        WHERE li.run_date = i.run_date AND li.scope = i.scope "
-        "        ORDER BY li.id DESC LIMIT 1) AS duration_ms "
-        "FROM interpretations i WHERE i.run_date = ? AND i.scope = ?",
-        (run_date, scope),
+        "SELECT i.window_key, i.scope, i.start_date, i.end_date, i.run_date, "
+        "       i.text, i.model, i.generated_at, "
+        "       i.temperature, i.seed, i.think, i.duration_ms "
+        "FROM interpretations i WHERE i.window_key = ? AND i.scope = ?",
+        (window_key, scope),
     ).fetchone()
 
 

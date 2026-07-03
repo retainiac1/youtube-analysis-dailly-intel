@@ -333,6 +333,11 @@ async function onRun() {
       seed,
       think,
       fields: selectedFields(),
+      // Generate for the SELECTED window (the shared date filter), not just the active
+      // run: the producers aggregate over [startDate, endDate] and the row is keyed by
+      // that window. context_mode is added by Gate C (defaults to aggregated server-side).
+      startDate: currentState.startDate,
+      endDate: currentState.endDate,
     });
     clearInterval(timer);
     // Branch on skipped FIRST: an empty lane wrote nothing, so show the skip state
@@ -379,7 +384,7 @@ export async function refresh(state) {
   }
   let data;
   try {
-    data = await api.getInterpretation(state.runDate, state.lane);
+    data = await api.getInterpretation(state.lane, state.startDate, state.endDate);
   } catch (err) {
     renderError(String(err.message || err));
     return;

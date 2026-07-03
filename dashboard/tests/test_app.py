@@ -95,8 +95,14 @@ def test_quota_reports_used_and_cap(client):
     assert body["remaining"] == cap - 4200
 
 
+# The seeded interpretation is a single-run window for 2026-06-08, so its window_key is
+# "2026-06-08:2026-06-08"; the read is by scope + [start_date, end_date], not run_date.
+_SEED_WINDOW = {"start_date": "2026-06-08", "end_date": "2026-06-08"}
+
+
 def test_interpretation_present(client):
-    resp = client.get("/api/interpretation", params={"run_date": "2026-06-08", "scope": "health"})
+    resp = client.get("/api/interpretation",
+                      params={"scope": "health", **_SEED_WINDOW})
     assert resp.status_code == 200
     body = resp.json()
     assert body["text"] == "Looks strong."
@@ -104,7 +110,8 @@ def test_interpretation_present(client):
 
 
 def test_interpretation_absent_is_empty_text(client):
-    resp = client.get("/api/interpretation", params={"run_date": "2026-06-08", "scope": "habit"})
+    resp = client.get("/api/interpretation",
+                      params={"scope": "habit", **_SEED_WINDOW})
     assert resp.status_code == 200
     body = resp.json()
     assert body["text"] == ""
@@ -114,15 +121,16 @@ def test_interpretation_absent_is_empty_text(client):
 def test_interpretation_full_shape(client):
     """Populated row returns every field the Interpretation page renders."""
     resp = client.get(
-        "/api/interpretation", params={"run_date": "2026-06-08", "scope": "health"})
+        "/api/interpretation", params={"scope": "health", **_SEED_WINDOW})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["run_date"] == "2026-06-08"
+    assert body["start_date"] == "2026-06-08"
+    assert body["end_date"] == "2026-06-08"
     assert body["scope"] == "health"
     assert body["text"] == "Looks strong."
     assert body["model"] == "model-x"
     assert body["generated_at"] == "2026-06-08T10:05:00-04:00"
-    # Seeded interpretation has no llm_invocations row, so no measured run time.
+    # Seeded interpretation has no measured run time (duration_ms NULL on the row).
     assert body["duration_ms"] is None
 
 
@@ -130,7 +138,7 @@ def test_interpretation_absent_scope_is_clean_empty(client):
     """A scope with no row (overall) returns the clean empty contract, not an
     error: 200 with empty text and null metadata."""
     resp = client.get(
-        "/api/interpretation", params={"run_date": "2026-06-08", "scope": "overall"})
+        "/api/interpretation", params={"scope": "overall", **_SEED_WINDOW})
     assert resp.status_code == 200
     body = resp.json()
     assert body["text"] == ""
@@ -138,14 +146,26 @@ def test_interpretation_absent_scope_is_clean_empty(client):
     assert body["generated_at"] is None
 
 
+def test_interpretation_window_keys_the_lookup(client):
+    """The read is keyed by the window: the seeded single-run window (2026-06-08)
+    has a row, but a DIFFERENT window (all-time) does not, even for the same scope.
+    Guards that the window (not just scope) selects the interpretation."""
+    seeded = client.get(
+        "/api/interpretation", params={"scope": "health", **_SEED_WINDOW}).json()
+    other_window = client.get(
+        "/api/interpretation", params={"scope": "health"}).json()  # all-time
+    assert seeded["text"] == "Looks strong."
+    assert other_window["text"] == ""
+
+
 def test_interpretation_scope_keys_the_lookup(client):
-    """Same run, different scope: health has a row, habit does not. The page sends
-    scope=<active lane>, so the populated panel only appears for the lane with a
-    row; this guards that scope (not just run_date) selects the interpretation."""
+    """Same window, different scope: health has a row, habit does not. The page sends
+    scope=<active lane>, so the populated panel only appears for the lane with a row;
+    this guards that scope (with the window) selects the interpretation."""
     health = client.get(
-        "/api/interpretation", params={"run_date": "2026-06-08", "scope": "health"}).json()
+        "/api/interpretation", params={"scope": "health", **_SEED_WINDOW}).json()
     habit = client.get(
-        "/api/interpretation", params={"run_date": "2026-06-08", "scope": "habit"}).json()
+        "/api/interpretation", params={"scope": "habit", **_SEED_WINDOW}).json()
     assert health["text"] == "Looks strong."
     assert habit["text"] == ""
 
@@ -195,6 +215,7 @@ def test_interpret_persists_and_logs(client, seeded_db_path, monkeypatch):
     monkeypatch.setattr(interpret, "generate", _fake_generate())
     resp = client.post("/api/interpret", json={
         "run_date": "2026-06-08", "scope": "health",
+        "start_date": "2026-06-08", "end_date": "2026-06-08",
         "model": VALID_MODEL, "temperature": 0.7, "seed": 7,
     })
     assert resp.status_code == 200
@@ -228,9 +249,10 @@ def test_interpret_persists_and_logs(client, seeded_db_path, monkeypatch):
     assert row["temperature"] == 0.7 and row["seed"] == 7
     assert row["input_tokens"] == 100 and row["output_tokens"] == 30
     assert row["duration_ms"] == body["duration_ms"]  # logged == returned
-    # The stored text + run time are now readable via the existing read endpoint.
+    # The stored text + run time are now readable via the existing read endpoint,
+    # keyed by the same window.
     read = client.get("/api/interpretation",
-                      params={"run_date": "2026-06-08", "scope": "health"}).json()
+                      params={"scope": "health", **_SEED_WINDOW}).json()
     assert json.loads(read["text"])["contract_version"] == 1
     assert read["duration_ms"] == body["duration_ms"]
 
@@ -243,6 +265,7 @@ def test_interpret_persists_think_and_returns_thinking(client, seeded_db_path,
     monkeypatch.setattr(interpret, "generate", _fake_generate())
     resp = client.post("/api/interpret", json={
         "run_date": "2026-06-08", "scope": "health",
+        "start_date": "2026-06-08", "end_date": "2026-06-08",
         "model": "ollama:qwen3.5:9b", "temperature": 0.5, "seed": 7, "think": True,
     })
     assert resp.status_code == 200
@@ -259,7 +282,7 @@ def test_interpret_persists_think_and_returns_thinking(client, seeded_db_path,
     assert think == 1
     # The read path exposes the provenance; the content is NOT persisted.
     read = client.get("/api/interpretation",
-                      params={"run_date": "2026-06-08", "scope": "health"}).json()
+                      params={"scope": "health", **_SEED_WINDOW}).json()
     assert read["think"] == 1 and read["seed"] == 7
     assert "thinking" not in read
 
@@ -268,6 +291,7 @@ def test_interpret_think_off_persists_zero(client, seeded_db_path, monkeypatch):
     monkeypatch.setattr(interpret, "generate", _fake_generate())
     resp = client.post("/api/interpret", json={
         "run_date": "2026-06-08", "scope": "health",
+        "start_date": "2026-06-08", "end_date": "2026-06-08",
         "model": "ollama:qwen3.5:9b", "temperature": 0.5, "seed": 7, "think": False,
     })
     assert resp.status_code == 200

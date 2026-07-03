@@ -256,9 +256,13 @@ def _contract_instructions(scope: str, start_date: str, end_date: str) -> str:
     section keys and the sentinel from the constants (one source), so the prompt and
     the validator can never drift on either the key set or the empty marker."""
     keys = ", ".join(INTERP_SECTION_KEYS)
+    # An unbounded (None) bound is an all-time window; describe it in words rather than
+    # printing "None" into the prompt.
+    start_label = start_date if start_date else "the earliest run"
+    end_label = end_date if end_date else "the latest run"
     return (
-        f"You are analyzing the '{scope}' lane over the window {start_date} to "
-        f"{end_date}. Return ONLY a single JSON object (no prose, no code fence) with "
+        f"You are analyzing the '{scope}' lane over the window {start_label} to "
+        f"{end_label}. Return ONLY a single JSON object (no prose, no code fence) with "
         f'this exact shape: {{"sections": {{<one entry per section key>}}, '
         f'"recommendation": {{"suggestion": "<one concrete idea for next week\'s '
         f'videos>", "based_on": [<section keys that justify it>]}}}}.\n'
@@ -484,10 +488,13 @@ def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
             f"got {context_mode!r}"
         )
     bucket = scope
-    if start_date is None:
-        start_date = run_date
-    if end_date is None:
-        end_date = run_date
+    # `start_date`/`end_date` flow through UNCOERCED: None means an unbounded bound (an
+    # all-time window), which the producers and the membership subquery already handle.
+    # We do NOT default them to run_date -- that would bound an all-time request to a
+    # single run and key it run_date:run_date instead of all:all. Single-run callers
+    # (synthesize_run, the CLI) pass start=end=run_date explicitly. window_key is the
+    # storage key for this exact window (the one helper, shared with fetch + migration).
+    window_key = db.interpretation_window_key(start_date, end_date)
 
     # Population = the lane's distinct videos over the window (bounded rankings
     # membership). An empty population means nothing to interpret: skip like an empty
@@ -560,10 +567,15 @@ def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
             # actually governed (result.seed_applied), and the applied think value
             # (result.think_applied: NULL when think did not apply, 0/1 when it did),
             # mirroring what log_invocation records. The stored text is the contract JSON.
-            db.upsert_interpretation(conn, run_date, scope, text, model,
-                                     now, temperature=temperature,
+            # Keyed by window_key; run_date is provenance; duration_ms is denormalized
+            # onto the row so the read never joins llm_invocations.
+            db.upsert_interpretation(conn, window_key, scope, text, model, now,
+                                     run_date=run_date,
+                                     start_date=start_date, end_date=end_date,
+                                     temperature=temperature,
                                      seed=result.seed_applied,
-                                     think=result.think_applied)
+                                     think=result.think_applied,
+                                     duration_ms=duration_ms)
 
     db.run_with_db_retry(_write)
 
@@ -587,11 +599,14 @@ def synthesize_run(conn, run_date: str, model: str, *, temperature: float,
                    seed, scopes=SCOPES, fields=None,
                    context_mode="aggregated") -> list:
     """Synthesize every scope for a run sequentially with one model + parameter set
-    and one context mode, returning the per-scope outcomes (written or skipped-empty)."""
+    and one context mode, returning the per-scope outcomes (written or skipped-empty).
+    This is the single-run path (the CLI), so the window is explicitly start=end=run_date
+    -- synthesize_lane no longer defaults None bounds to run_date."""
     return [
         synthesize_lane(conn, run_date, scope, model,
                         temperature=temperature, seed=seed, fields=fields,
-                        context_mode=context_mode)
+                        context_mode=context_mode,
+                        start_date=run_date, end_date=run_date)
         for scope in scopes
     ]
 

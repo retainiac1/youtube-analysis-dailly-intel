@@ -136,10 +136,12 @@ export function getDashboardLifecycle(lane, startDate, endDate) {
 // --- Phase B: read-only interpretation --------------------------------------
 
 // scope IS the lane bucket (health / habit / overall), an identity mapping. The
-// endpoint returns 200 with empty text when no row exists; callers treat that as
-// the empty state, not an error.
-export function getInterpretation(runDate, lane) {
-  const qs = buildQuery({ run_date: runDate, scope: lane }, null);
+// interpretation is keyed to the selected window (start_date/end_date, null = all-time),
+// so it matches the date filter that drives the charts. start/end go in the filters arg
+// so buildQuery drops them when null. The endpoint returns 200 with empty text when no
+// row exists; callers treat that as the empty state, not an error.
+export function getInterpretation(lane, startDate, endDate) {
+  const qs = buildQuery({ scope: lane }, { start_date: startDate, end_date: endDate });
   return getJSON(`/api/interpretation?${qs}`);
 }
 
@@ -183,7 +185,8 @@ export function getInterpretDefaults() {
 // seed_applied, think_applied, thinking, model; on an empty lane just
 // {scope, skipped:true}. `think` is true/false for an honoring model, or null when
 // the toggle did not apply (the server normalizes either way).
-export function runInterpret({ runDate, scope, model, temperature, seed, think, fields }) {
+export function runInterpret({ runDate, scope, model, temperature, seed, think, fields,
+                               startDate, endDate, contextMode }) {
   return postJSON("/api/interpret", {
     run_date: runDate,
     scope,
@@ -192,6 +195,9 @@ export function runInterpret({ runDate, scope, model, temperature, seed, think, 
     seed,
     think,
     fields,
+    start_date: startDate,
+    end_date: endDate,
+    context_mode: contextMode,
   });
 }
 

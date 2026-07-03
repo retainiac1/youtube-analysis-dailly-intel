@@ -20,7 +20,7 @@ def test_fresh_db_creates_interpretations_and_stamps_current(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 15
+        assert version == db.SCHEMA_VERSION == 16
     finally:
         conn.close()
 
@@ -68,7 +68,7 @@ def test_seeded_v2_db_migrates_without_harming_seed(tmp_path):
     try:
         assert "interpretations" in _table_names(conn)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == db.SCHEMA_VERSION == 15
+        assert version == db.SCHEMA_VERSION == 16
         after = dict(
             conn.execute("SELECT * FROM videos WHERE video_id = 'seed'").fetchone()
         )
@@ -318,17 +318,20 @@ def test_fetch_interpretation_present_and_absent(tmp_path):
     db.init_db(db_path)
     conn = db.get_connection(db_path)
     try:
+        wk = db.interpretation_window_key("2026-06-08", "2026-06-08")
         conn.execute(
-            "INSERT INTO interpretations (run_date, scope, text, model, "
-            "generated_at) VALUES ('2026-06-08', 'health', 'Looks strong.', "
-            "'model-x', '2026-06-08T10:05:00-04:00')"
+            "INSERT INTO interpretations (window_key, scope, start_date, end_date, "
+            "run_date, text, model, generated_at) VALUES "
+            "(?, 'health', '2026-06-08', '2026-06-08', '2026-06-08', 'Looks strong.', "
+            "'model-x', '2026-06-08T10:05:00-04:00')",
+            (wk,),
         )
         conn.commit()
-        row = db.fetch_interpretation(conn, "2026-06-08", "health")
+        row = db.fetch_interpretation(conn, wk, "health")
         assert row is not None
         assert row["text"] == "Looks strong."
         assert row["model"] == "model-x"
-        assert db.fetch_interpretation(conn, "2026-06-08", "habit") is None
+        assert db.fetch_interpretation(conn, wk, "habit") is None
     finally:
         conn.close()
 

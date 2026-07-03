@@ -116,7 +116,8 @@ export async function refresh(state) {
   }
   let data;
   try {
-    data = await api.getInterpretation(state.runDate, state.lane);
+    // Window-keyed like the charts: fetch the interpretation for the selected period.
+    data = await api.getInterpretation(state.lane, state.startDate, state.endDate);
   } catch (err) {
     renderError(String(err.message || err));
     return;
