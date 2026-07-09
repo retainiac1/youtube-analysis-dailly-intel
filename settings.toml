@@ -22,6 +22,9 @@ EXTRACT_RUN_TIMEOUT_SECONDS = 1800       # SAFETY CEILING (not a perf target) fo
 EXTRACT_TERMINATE_GRACE_SECONDS = 10     # grace after SIGTERM before SIGKILL when the watchdog kills a wedged run; positive int.
 EXTRACT_SSE_KEEPALIVE_SECONDS = 15       # how often the SSE stream emits a comment ping while a run is quiet so idle connections aren't dropped; positive int.
 
+# Cross-process discover lock (run-pipeline.sh), for the scheduled launchd run. positive int.
+DISCOVER_LOCK_STALE_SECONDS = 3600       # age past which a held discover lock is treated as stale and reclaimed (holder crashed/wedged); positive int. Must sit well above the worst legitimate discover so a live holder is never reclaimed. The dashboard already SIGKILLs a wedged run at EXTRACT_RUN_TIMEOUT_SECONDS = 1800, so 3600 is 2x that ceiling.
+
 # Per-model LLM output-token caps (the models.max_tokens column defaults). These
 # three have NO in-code fallback: config.py loads them strictly and ConfigError-s
 # if the file/key is missing, because a silently-defaulted token cap is an invisible
