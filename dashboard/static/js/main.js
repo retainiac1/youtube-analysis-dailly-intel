@@ -10,7 +10,7 @@ import * as board from "./board.js";
 import * as trends from "./trends.js";
 import * as interpretation from "./interpretation.js";
 import * as extract from "./extract.js";
-import * as interpRail from "./interpretation-rail.js";
+import * as railModule from "./interpretation-rail.js";
 import * as spend from "./spend.js";
 import * as models from "./models.js";
 import * as priceRefresh from "./price-refresh.js";
@@ -58,6 +58,10 @@ const EXTRACT_SPEND_ID = "extract-spend-panel";
 let interpSpend = null;
 let pricesSpend = null;
 let extractSpend = null;
+// Two interpretation-rail instances (the rail is a factory): one on Trends, one on the
+// Dashboard. Created in init() once their mount elements exist.
+let trendsRail = null;
+let dashboardRail = null;
 
 // The active page is owned by the router (router.current()); run/lane/tracked are
 // shared state that persists across pages. tracked is EPHEMERAL in-memory view
@@ -105,7 +109,15 @@ async function onRunOrLaneChange() {
 // (summary keyed on run + lane) refreshes alongside them.
 async function refreshTrendsCharts() {
   await trends.refreshAll(state);
-  interpRail.refresh(state);
+  trendsRail.refresh(state);
+}
+
+// The Dashboard charts + its interpretation rail always refresh together (the rail is
+// window+lane keyed, so it must not lag the charts). One helper so every lane/window change
+// pairs them; see the three call sites (selectLane, enterDashboard, the date-filter listener).
+function refreshDashboardAll() {
+  dashboard.refresh(state);
+  dashboardRail.refresh(state);
 }
 
 function selectLane(lane) {
@@ -115,7 +127,7 @@ function selectLane(lane) {
   onRunOrLaneChange();
   if (router.current() === TRENDS_ROUTE) refreshTrendsCharts();
   if (router.current() === INTERPRETATION_ROUTE) interpretation.refresh(state);
-  if (router.current() === DASHBOARD_ROUTE) dashboard.refresh(state);
+  if (router.current() === DASHBOARD_ROUTE) refreshDashboardAll();
 }
 
 // Route handlers: show the page's content region and hide the others, and show or
@@ -158,8 +170,8 @@ function enterTrends() {
   // Render the charts on entry: an ECharts instance on a hidden element cannot
   // size itself, so charts are only rendered while Trends is visible.
   trends.refreshAll(state);
-  // The read-only interpretation rail beside the charts (run + lane scoped).
-  interpRail.refresh(state);
+  // The read-only interpretation rail beside the charts (window + lane scoped).
+  trendsRail.refresh(state);
 }
 
 function enterInterpretation() {
@@ -279,7 +291,7 @@ function enterDashboard() {
   dashboardEl.hidden = false;
   laneRow.hidden = false;
   dateFilterControl.hidden = false;
-  dashboard.refresh(state);
+  refreshDashboardAll();
 }
 
 // Arrow-key roving focus for a segmented tablist.
@@ -458,13 +470,19 @@ async function init() {
   interpSpend = spend.create(document.getElementById(INTERP_SPEND_ID));
   pricesSpend = spend.create(document.getElementById(PRICES_SPEND_ID));
   extractSpend = spend.create(document.getElementById(EXTRACT_SPEND_ID));
-  interpRail.init(document.getElementById("trends-interp-rail"));
+  // Two interpretation-rail instances (factory), one per mount: the Trends rail and the
+  // Dashboard rail (a sibling of the replaceChildren-owned #dashboard-main, so it is not
+  // wiped on a sub-tab switch).
+  trendsRail = railModule.create(document.getElementById("trends-interp-rail"));
+  dashboardRail = railModule.create(document.getElementById("dashboard-interp-rail"));
   models.init(modelsEl);
   // price-refresh.js owns the Prices content column (#prices-main), NOT the #prices
   // shell, so its replaceChildren never wipes the sibling spend-panel aside.
   priceRefresh.init(document.getElementById(PRICES_MAIN_ID));
   documentation.init(documentationEl);
-  dashboard.init(dashboardEl);
+  // dashboard.js owns the INNER #dashboard-main column (it replaceChildren's it), NOT the
+  // #dashboard shell, so its render never wipes the sibling interpretation rail aside.
+  dashboard.init(document.getElementById("dashboard-main"));
   board.setActiveTab(app, tabs, state.lane);
 
   // A successful generation changes the spend totals; refresh the panel. The event
@@ -525,7 +543,7 @@ async function init() {
       // it (month-to-date is unaffected but recomputes cheaply on the same call).
       interpSpend.refresh(state);
     }
-    if (route === DASHBOARD_ROUTE) dashboard.refresh(state);
+    if (route === DASHBOARD_ROUTE) refreshDashboardAll();
   });
 
   let runs;

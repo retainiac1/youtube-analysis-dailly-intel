@@ -90,6 +90,29 @@ SECTION_SOURCES = {
 }
 INTERP_SECTION_KEYS = tuple(SECTION_SOURCES)
 
+# Human labels for the 12 section keys, mirroring the Dashboard chart-card titles so the
+# interpretation panel's sections read consistently with the charts they describe. Defined
+# here (one source) and exposed via /api/interpret-defaults, so the frontend renderer never
+# hardcodes a parallel label map. One entry per INTERP_SECTION_KEYS, same order.
+INTERP_SECTION_LABELS = {
+    "subniche_volume": "Sub-niche volume",
+    "youtube_category": "YouTube category",
+    "topic_tags": "Topic tags",
+    "ratio_bands": "Views-to-subs ratio bands",
+    "breakouts": "Breakouts",
+    "title_anatomy": "Title anatomy",
+    "duration": "Duration",
+    "likes_vs_comments": "Likes vs comments",
+    "publish_times": "Publish times",
+    "growth": "Growth",
+    "survivorship": "Survivorship & rank",
+    "engagement": "Engagement",
+}
+# The ordered [{key, label}] the API exposes (INTERP_SECTION_KEYS order, one per key).
+INTERP_SECTION_LABEL_SPEC = [
+    {"key": k, "label": INTERP_SECTION_LABELS[k]} for k in INTERP_SECTION_KEYS
+]
+
 # tab -> the db producer, called once per tab in aggregated mode. The lifecycle
 # output also carries `summary` (whole-window medians), fed as recommendation
 # context rather than a 13th section.

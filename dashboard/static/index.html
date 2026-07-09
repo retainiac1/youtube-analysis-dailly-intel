@@ -133,11 +133,15 @@
         <aside class="glass-panel spend-panel" id="spend-panel" aria-label="LLM spend"></aside>
       </main>
 
-      <!-- The Dashboard page: lane-scoped, period-aggregated charts across four sub-tabs
-           (Topic mix, Breakout, Format & craft, Lifecycle). dashboard.js owns this region:
-           it renders the sub-tab nav once and swaps only the section panel. Lane + date
-           scoped, like Trends. -->
-      <main class="dashboard" id="dashboard" aria-live="polite" hidden></main>
+      <!-- The Dashboard page on the shared .page-aside shell: dashboard.js owns the inner
+           #dashboard-main column (the period-aware distribution card + the sub-tab nav +
+           the swapped section panel, all via replaceChildren), and an interpretation-rail
+           instance owns the sticky #dashboard-interp-rail aside beside it. Separate children
+           means a sub-tab render never wipes the rail. Lane + date scoped, like Trends. -->
+      <main class="dashboard page-aside" id="dashboard" aria-live="polite" hidden>
+        <div id="dashboard-main" class="page-aside-main"></div>
+        <aside class="glass-panel interpretation-rail" id="dashboard-interp-rail" aria-label="Interpretation"></aside>
+      </main>
 
       <!-- The Extract page on the shared .page-aside shell: extract.js owns #extract-main
            (it replaceChildren's it) with the run controls + the streamed terminal; a

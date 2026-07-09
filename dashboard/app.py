@@ -772,6 +772,11 @@ def api_interpret_defaults(conn: sqlite3.Connection = Depends(get_conn)):
         # map on the SAME strings the server emits (no drift, fail-closed on an unknown code).
         "context_modes": list(interpret.INTERP_CONTEXT_MODES),
         "refuse_reasons": list(interpret.INTERP_REFUSE_REASONS),
+        # The section-label spec (ordered, one per INTERP_SECTION_KEYS) + the empty-section
+        # sentinel, so the shared interpretation renderer reads labels/sentinel from ONE
+        # source and never hardcodes a parallel map.
+        "section_labels": interpret.INTERP_SECTION_LABEL_SPEC,
+        "no_data": interpret.INTERP_NO_DATA,
     }
 
 

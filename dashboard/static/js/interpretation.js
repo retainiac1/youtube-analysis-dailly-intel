@@ -10,6 +10,7 @@
 // silently ignore. The client never hardcodes provider rules.
 
 import * as api from "./api.js";
+import { renderInterpretationBody } from "./interp-render.js";
 
 let el = null;            // the page mount (<main id="interpretation">)
 let resultEl = null;      // where the stored/generated summary renders
@@ -27,6 +28,10 @@ const AGGREGATED = "aggregated";
 const RAW = "raw";
 let contextModes = [AGGREGATED, RAW];
 let refuseReasons = new Set();       // filled from defaults; the known refused codes
+// The section-label + no-data spec for the shared renderer, from the defaults fetch (this
+// page already fetches interpret-defaults, so no extra request). Empty until then; the
+// renderer degrades safely (raw values) if a card renders before it is populated.
+let sectionSpec = { sectionLabels: [], noData: null };
 
 // Run enable/disable is the AND of several conditions; compute it in one place so the
 // raw-estimate path, the run-in-flight path, and the no-models path cannot fight.
@@ -137,7 +142,11 @@ function renderCard(data) {
   if (meta) card.appendChild(node("p", { class: "interpretation-meta", text: meta }));
   const params = paramsLine(data);
   if (params) card.appendChild(node("p", { class: "interpretation-params", text: params }));
-  card.appendChild(node("div", { class: "interpretation-text", text: data.text }));
+  // The stored text is the structured contract JSON; render it as the readable per-section
+  // body via the shared renderer (the same one the rails use), not a raw string.
+  const bodyEl = node("div", { class: "interpretation-body" });
+  renderInterpretationBody(bodyEl, data, sectionSpec);
+  card.appendChild(bodyEl);
   // The thinking transcript, when think was on. It is transient (returned only on
   // the fresh /api/interpret response, never persisted), so it appears right after a
   // think-on generation and is absent on a re-read. Collapsed by default; the larger
@@ -307,6 +316,7 @@ async function buildScaffold() {
     // remember its refuse-reason codes (the ones the estimate can carry).
     contextModes = (d.context_modes && d.context_modes.length) ? d.context_modes : contextModes;
     refuseReasons = new Set(d.refuse_reasons || []);
+    sectionSpec = { sectionLabels: d.section_labels || [], noData: d.no_data };
     for (const m of contextModes) {
       contextSelect.appendChild(node("option", { text: labelForMode(m), attrs: { value: m } }));
     }

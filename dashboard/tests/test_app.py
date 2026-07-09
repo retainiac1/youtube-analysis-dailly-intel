@@ -386,6 +386,17 @@ def test_interpret_defaults_exposes_context_modes_and_refuse_reasons(client):
     assert body["refuse_reasons"] == list(interpret.INTERP_REFUSE_REASONS)
 
 
+def test_interpret_defaults_exposes_section_labels_and_no_data(client):
+    """The shared interpretation renderer keys its per-section labels + empty-section
+    sentinel on the server spec, so they cannot drift from interpret.py."""
+    body = client.get("/api/interpret-defaults").json()
+    labels = body["section_labels"]
+    # Ordered, one entry per section key, in INTERP_SECTION_KEYS order.
+    assert [s["key"] for s in labels] == list(interpret.INTERP_SECTION_KEYS)
+    assert all(s["label"] for s in labels)  # every section has a non-empty label
+    assert body["no_data"] == interpret.INTERP_NO_DATA
+
+
 def test_interpret_llm_error_is_clean_400(client, monkeypatch):
     def boom(*a, **k):
         raise llm.LLMError("missing OPENAI_API_KEY for openai")
