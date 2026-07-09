@@ -5,6 +5,7 @@
 
 import * as api from "./api.js";
 import * as charts from "./charts.js";
+import { loadSpec } from "./interp-render.js";
 
 const SECTIONS = [
   { key: "topic-mix", label: "Topic mix" },
@@ -13,6 +14,34 @@ const SECTIONS = [
   { key: "lifecycle", label: "Lifecycle" },
 ];
 const DEFAULT_SECTION = "topic-mix";
+
+// The 12 interpretation section keys (mirror interpret.SECTION_SOURCES). Each chart card is
+// tagged with one via data-interp-section so the sticky panel scroll-syncs to the chart in
+// view (Phase 3). ONE place for the literals; validated once at runtime against the server's
+// section_labels (validateSectionKeys) so a typo becomes a loud console error, not a silent
+// wrong-render. A card whose key is not in the interpretation degrades to the whole panel.
+const INTERP_SECTION = {
+  SUBNICHE: "subniche_volume",
+  CATEGORY: "youtube_category",
+  TOPIC_TAGS: "topic_tags",
+  RATIO_BANDS: "ratio_bands",
+  BREAKOUTS: "breakouts",
+  TITLE_ANATOMY: "title_anatomy",
+  DURATION: "duration",
+  LIKES_COMMENTS: "likes_vs_comments",
+  PUBLISH_TIMES: "publish_times",
+  GROWTH: "growth",
+  SURVIVORSHIP: "survivorship",
+  ENGAGEMENT: "engagement",
+};
+// Scroll-spy geometry: the active section is the tagged card straddling a trigger line ~28%
+// down the viewport (side-by-side cards resolve to the DOM-first = left one). At the page
+// bottom the last section is forced active, so the final chart of a tab is reachable even
+// when the page cannot scroll it up to the trigger line.
+const SECTION_SPY_TRIGGER_FRAC = 0.28;
+const SECTION_SPY_BOTTOM_PX = 8;
+// Dispatched on the active-section change; main.js routes it to the dashboard rail.
+const SECTION_IN_VIEW_EVENT = "dashboard:section-in-view";
 const SURVIVORSHIP_NOTE =
   "Best among caught, not best on YouTube. Conditioned on clearing the capture view bar.";
 // How many top videos the breakouts bar chart shows. Kept small so each title-labeled
@@ -43,6 +72,14 @@ let built = false;
 let lastState = null;
 const cache = {}; // section key -> last payload fetched for lastState
 
+// Phase 3 scroll-spy: a SINGLE IntersectionObserver over the tagged chart cards. Managed
+// only by syncObserver (disconnect-first) so there is ever exactly one instance and it
+// never holds detached nodes. `spyIntersecting` tracks the currently-in-band cards;
+// `spyActive` is the last-dispatched section (dedup).
+let sectionObserver = null;
+let spyActive = null;
+let spyRaf = 0;
+
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -56,6 +93,7 @@ function el(tag, attrs = {}, children = []) {
 
 export function init(mount) {
   mountEl = mount;
+  validateSectionKeys();  // fail loud (console) if a scroll-spy key drifts from the server spec
 }
 
 function buildNav() {
@@ -172,6 +210,7 @@ async function renderActive() {
   const s = lastState;
   if (!cache[section]) {
     panelEl.replaceChildren(el("p", { class: "dashboard-status", text: "Loading..." }));
+    syncObserver();  // the loading placeholder has no tagged cards: drop the stale observer
     let data;
     try {
       data = await fetchSection(section, s);
@@ -180,6 +219,7 @@ async function renderActive() {
         panelEl.replaceChildren(
           el("p", { class: "dashboard-status error", text: String(err.message || err) })
         );
+        syncObserver();  // error state has no tagged cards either
       }
       return;
     }
@@ -195,9 +235,12 @@ function laneNow() {
   return lastState ? lastState.lane : "health";
 }
 
-function chartCard(title) {
+function chartCard(title, section) {
   const chart = el("div", { class: "chart-mount" });
-  const card = el("section", { class: "glass-panel chart-card" }, [
+  const attrs = { class: "glass-panel chart-card" };
+  // Tag the card with its interpretation section so the scroll-spy can map it to the rail.
+  if (section) attrs["data-interp-section"] = section;
+  const card = el("section", attrs, [
     el("h3", { class: "heading-sm", text: title }),
     chart,
   ]);
@@ -209,12 +252,99 @@ function renderSection(section, data) {
   else if (section === "breakout") renderBreakout(data);
   else if (section === "format") renderFormat(data);
   else if (section === "lifecycle") renderLifecycle(data);
+  // The panel was rebuilt with fresh tagged cards: re-point the scroll-spy at them.
+  syncObserver();
+}
+
+// --- scroll-spy: sync the sticky interpretation rail to the chart in view ----
+
+// THE single manager of the section observer. disconnect-first, so there is only ever one
+// live instance and it never references detached card nodes. Called after EVERY panel
+// replaceChildren (renderSection + the loading/error clears in renderActive).
+function syncObserver() {
+  if (sectionObserver) sectionObserver.disconnect();
+  if (!panelEl) return;
+  const cards = panelEl.querySelectorAll("[data-interp-section]");
+  if (!cards.length) {
+    sectionObserver = null;
+    window.removeEventListener("scroll", onSpyScroll);
+    return;
+  }
+  // The IntersectionObserver wakes the spy when a card enters/leaves the viewport; the scroll
+  // listener (rAF-throttled) covers continuous scrolling in between. Both recompute the same
+  // geometry. addEventListener with the SAME function reference is idempotent, so repeated
+  // syncObserver calls never stack listeners.
+  sectionObserver = new IntersectionObserver(computeActiveSection, { threshold: 0 });
+  cards.forEach((c) => sectionObserver.observe(c));
+  window.addEventListener("scroll", onSpyScroll, { passive: true });
+  computeActiveSection();  // set the initial active section without waiting for a scroll
+}
+
+// rAF-throttled scroll handler: coalesce a burst of scroll events into one geometry pass.
+function onSpyScroll() {
+  if (spyRaf) return;
+  spyRaf = requestAnimationFrame(() => { spyRaf = 0; computeActiveSection(); });
+}
+
+// Pick the active section by geometry: at the page bottom, the LAST section (so the final
+// chart is reachable); otherwise the first tagged card straddling the trigger line (DOM-first,
+// so side-by-side cards resolve to the left), else the last card fully above the line, else
+// the first. Dispatch only on a real change (dedup).
+function computeActiveSection() {
+  if (!panelEl) return;
+  const cards = panelEl.querySelectorAll("[data-interp-section]");
+  if (!cards.length) return;
+  let target;
+  const doc = document.documentElement;
+  const atBottom = window.innerHeight + window.scrollY >= doc.scrollHeight - SECTION_SPY_BOTTOM_PX;
+  if (atBottom) {
+    target = cards[cards.length - 1];
+  } else {
+    const triggerY = window.innerHeight * SECTION_SPY_TRIGGER_FRAC;
+    let owner = null, lastAbove = null;
+    for (const c of cards) {
+      const r = c.getBoundingClientRect();
+      if (!owner && r.top <= triggerY && r.bottom > triggerY) owner = c;  // first straddling
+      if (r.bottom <= triggerY) lastAbove = c;                            // fully above the line
+    }
+    target = owner || lastAbove || cards[0];
+  }
+  const key = target.getAttribute("data-interp-section");
+  if (!key || key === spyActive) return;
+  spyActive = key;
+  document.dispatchEvent(new CustomEvent(SECTION_IN_VIEW_EVENT, { detail: { section: key } }));
+}
+
+// Disconnect the observer + scroll listener when leaving the Dashboard (registered in the
+// router's `leaves` table), so neither outlives the hidden DOM. A return re-runs renderSection
+// -> syncObserver and re-attaches to the fresh cards.
+export function teardown() {
+  if (sectionObserver) sectionObserver.disconnect();
+  sectionObserver = null;
+  window.removeEventListener("scroll", onSpyScroll);
+  if (spyRaf) { cancelAnimationFrame(spyRaf); spyRaf = 0; }
+  spyActive = null;
+}
+
+// One-time guard: every tagged section key must be a real interpretation section (the server
+// spec is the source). A typo becomes a loud console error (which the verify step's
+// no-console-errors check catches), not a silent wrong-render. Cached fetch, so no extra call.
+function validateSectionKeys() {
+  loadSpec().then((spec) => {
+    const valid = new Set((spec.sectionLabels || []).map((s) => s.key));
+    if (!valid.size) return;  // defaults fetch failed; the renderer already degrades
+    for (const key of Object.values(INTERP_SECTION)) {
+      if (!valid.has(key)) {
+        console.error(`dashboard scroll-spy: section key "${key}" is not in the server spec`);
+      }
+    }
+  });
 }
 
 function renderTopicMix(data) {
-  const sub = chartCard("Sub-niche volume");
-  const cat = chartCard("YouTube category");
-  const top = chartCard("Topic tags");
+  const sub = chartCard("Sub-niche volume", INTERP_SECTION.SUBNICHE);
+  const cat = chartCard("YouTube category", INTERP_SECTION.CATEGORY);
+  const top = chartCard("Topic tags", INTERP_SECTION.TOPIC_TAGS);
   panelEl.replaceChildren(
     el("div", { class: "dash-2col" }, [sub.card, cat.card]),
     top.card // full width (flex-column panel child stretches)
@@ -225,9 +355,12 @@ function renderTopicMix(data) {
 }
 
 function renderBreakout(data) {
-  const bands = chartCard("Views-to-subs ratio bands");
-  const ratio = chartCard("Top breakouts (views-to-subs)");
-  const lb = el("section", { class: "glass-panel chart-card dashboard-leaderboard" }, [
+  const bands = chartCard("Views-to-subs ratio bands", INTERP_SECTION.RATIO_BANDS);
+  const ratio = chartCard("Top breakouts (views-to-subs)", INTERP_SECTION.BREAKOUTS);
+  const lb = el("section", {
+    class: "glass-panel chart-card dashboard-leaderboard",
+    "data-interp-section": INTERP_SECTION.BREAKOUTS,
+  }, [
     el("h3", { class: "heading-sm", text: "Breakout leaderboard" }),
     leaderboardTable(data.leaderboard || []),
   ]);
@@ -263,9 +396,9 @@ function leaderboardTable(rows) {
 }
 
 function renderFormat(data) {
-  const dur = chartCard("Duration distribution");
-  const scatter = chartCard("Likes vs comments");
-  const heat = chartCard("Publish times (Eastern)");
+  const dur = chartCard("Duration distribution", INTERP_SECTION.DURATION);
+  const scatter = chartCard("Likes vs comments", INTERP_SECTION.LIKES_COMMENTS);
+  const heat = chartCard("Publish times (Eastern)", INTERP_SECTION.PUBLISH_TIMES);
   panelEl.replaceChildren(
     titleStatsStrip(data.title_stats || {}), // KPI strip on top (full width)
     el("div", { class: "dash-2col" }, [dur.card, scatter.card]), // paired, equal height
@@ -285,7 +418,10 @@ function titleStatsStrip(s) {
     ["Has a question", pct(s.pct_has_question)],
     ["Has an emoji", pct(s.pct_has_emoji)],
   ];
-  return el("section", { class: "dash-kpi-section" }, [
+  return el("section", {
+    class: "dash-kpi-section",
+    "data-interp-section": INTERP_SECTION.TITLE_ANATOMY,
+  }, [
     el("h3", { class: "heading-sm dash-kpi-heading", text: "Title anatomy" }),
     el(
       "div",
@@ -328,9 +464,13 @@ function lifecycleKpiStrip(data) {
   ]);
 }
 
-// A labeled lifecycle group: a heading-md title above its chart cards.
-function lifecycleGroup(title, children) {
-  return el("section", { class: "dashboard-lifecycle-group" }, [
+// A labeled lifecycle group: a heading-md title above its chart cards. The group (not each
+// inner card) is the scroll-spy unit, since one interpretation section covers the group.
+function lifecycleGroup(title, section, children) {
+  return el("section", {
+    class: "dashboard-lifecycle-group",
+    "data-interp-section": section,
+  }, [
     el("h2", { class: "heading-md", text: title }),
     ...children,
   ]);
@@ -447,14 +587,14 @@ function renderLifecycle(data) {
 
   panelEl.replaceChildren(
     lifecycleKpiStrip(data),
-    lifecycleGroup("Growth", [
+    lifecycleGroup("Growth", INTERP_SECTION.GROWTH, [
       el("div", { class: "dash-2col" }, [viewGrowth.card, velocityLines.card]),
       velocity.card,
     ]),
-    lifecycleGroup("Survivorship", [
+    lifecycleGroup("Survivorship", INTERP_SECTION.SURVIVORSHIP, [
       el("div", { class: "dash-2col" }, [bump.card, lifespan.card]),
     ]),
-    lifecycleGroup("Engagement", [
+    lifecycleGroup("Engagement", INTERP_SECTION.ENGAGEMENT, [
       el("div", { class: "dash-2col" }, [ratio.card, maturation.card]),
     ])
   );

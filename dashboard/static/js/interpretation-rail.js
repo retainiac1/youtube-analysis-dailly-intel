@@ -11,7 +11,7 @@
 
 import * as api from "./api.js";
 import { navigate } from "./router.js";
-import { loadSpec, renderInterpretationBody } from "./interp-render.js";
+import { loadSpec, renderInterpretationBody, renderInterpretationSection } from "./interp-render.js";
 
 const INTERPRETATION_ROUTE = "/interpretation";
 
@@ -65,6 +65,11 @@ function titleFor(lane, runDate) {
 export function create(mount) {
   const el = mount;
   let seq = 0;   // latest-wins: a response whose token is not the newest is dropped
+  // Loaded-interpretation state, so setActiveSection (scroll-spy) can re-render a single
+  // section without refetching. Cleared on empty/loading/error so setActiveSection is a no-op
+  // in those states. `activeKey` = the section the scroll-spy last selected (null = whole body).
+  let loaded = null;   // { data, spec, lane, runDate } or null
+  let activeKey = null;
 
   function renderTitleThen(lane, runDate, ...rest) {
     el.replaceChildren(
@@ -93,13 +98,19 @@ export function create(mount) {
     );
   }
 
-  function renderCard(data, lane, runDate, spec) {
+  // Render the loaded interpretation. With an activeKey, show that ONE section (scroll-synced);
+  // otherwise the whole body. renderInterpretationSection degrades to the whole body when the
+  // key is absent, so a bad/missing key is never blank.
+  function renderCardBody() {
+    if (!loaded) return;
+    const { data, spec, lane, runDate } = loaded;
     const title = node("h2", { class: "heading-sm rail-title", text: titleFor(lane, runDate) });
     const children = [title];
     const meta = metaLine(data.model, data.generated_at, data.duration_ms);
     if (meta) children.push(node("p", { class: "interpretation-meta", text: meta }));
     const bodyEl = node("div", { class: "rail-interp-body" });
-    renderInterpretationBody(bodyEl, data, spec);   // shared readable per-section render
+    if (activeKey) renderInterpretationSection(bodyEl, data, spec, activeKey);
+    else renderInterpretationBody(bodyEl, data, spec);
     children.push(bodyEl);
     children.push(tuneLink());
     el.replaceChildren(...children);
@@ -107,6 +118,7 @@ export function create(mount) {
 
   async function refresh(state) {
     const token = ++seq;
+    loaded = null;   // no card is loaded until the fetch resolves (setActiveSection no-ops)
     if (!state.runDate) {
       renderEmpty(state.lane, "this run");
       return;
@@ -130,8 +142,17 @@ export function create(mount) {
       renderEmpty(state.lane, state.runDate);     // absent row: 200 + empty text
       return;
     }
-    renderCard(data, state.lane, state.runDate, spec);
+    loaded = { data, spec, lane: state.lane, runDate: state.runDate };
+    renderCardBody();   // uses activeKey if the scroll-spy already picked one, else whole body
   }
 
-  return { refresh };
+  // Scroll-spy hook: show the section for the chart in view. No-op when no card is loaded
+  // (loading/empty/error states stay). A same-key call is a cheap no-op.
+  function setActiveSection(key) {
+    if (!loaded || key === activeKey) return;
+    activeKey = key;
+    renderCardBody();
+  }
+
+  return { refresh, setActiveSection };
 }

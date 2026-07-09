@@ -679,6 +679,17 @@ html { scroll-padding-top: var(--header-h, 0px); }
    label names the section (mirrors the chart-card title); the value is the model's prose.
    Used by the page card and both rails; the rail scopes tighter sizes below. */
 .interp-body { display: flex; flex-direction: column; gap: 1rem; max-width: 70ch; }
+/* Single-section body (Phase 3 scroll-sync): each new section fades in so the swap as the
+   reader scrolls is a soft cross-in, not a hard flip. The recommendation follows the section
+   (rail END, always reachable, since the single-section rail is short). */
+.interp-body-single { animation: interp-section-fade 0.18s ease; }
+@keyframes interp-section-fade {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .interp-body-single { animation: none; }
+}
 .interp-section-label {
   margin: 0 0 0.2rem;
   font-size: 0.7rem;

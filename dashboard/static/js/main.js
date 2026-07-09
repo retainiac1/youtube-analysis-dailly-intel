@@ -490,6 +490,13 @@ async function init() {
   // decoupled (it never imports interpretation.js) while main.js owns `state`.
   document.addEventListener("interpretation:generated", () => interpSpend.refresh(state));
 
+  // Scroll-spy (Phase 3): dashboard.js dispatches the section whose chart is in view; route it
+  // to the DASHBOARD rail only (the Trends rail is never scroll-synced). Guarded on the route
+  // so a stale event outside the Dashboard is ignored.
+  document.addEventListener("dashboard:section-in-view", (e) => {
+    if (router.current() === DASHBOARD_ROUTE) dashboardRail.setActiveSection(e.detail.section);
+  });
+
   // A completed extract run (success OR failure) may have spent classifier tokens, so
   // refresh the Extract spend panel. Unlike interpretation:generated (which only fires
   // while you are on the page), an extract run survives navigation and can finish while you
@@ -517,6 +524,9 @@ async function init() {
     // inside documentation.js.
     leaves: {
       "/documentation": documentation.teardown,
+      // Leaving the Dashboard disconnects the scroll-spy IntersectionObserver so it does not
+      // outlive the hidden DOM (same concern as documentation's pdf.js worker).
+      "/dashboard": dashboard.teardown,
     },
     links: pageNav,
     fallback: "/board",

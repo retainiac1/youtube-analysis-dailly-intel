@@ -32,12 +32,52 @@ export function loadSpec() {
 // recommendation. `data` is the interpretation read payload (data.text is the JSON string);
 // `spec` = {sectionLabels: [{key,label}], noData}. Never throws: a non-JSON / non-contract
 // text falls back to a plain-string render (legacy or degraded rows).
-export function renderInterpretationBody(container, data, spec) {
+// Parse the stored contract text; returns the object or null (non-JSON / non-contract).
+function parseContract(data) {
   const raw = data && data.text;
   let parsed = null;
   try { parsed = JSON.parse(raw); } catch { parsed = null; }
-  if (!parsed || typeof parsed !== "object" || !parsed.sections) {
-    container.replaceChildren(node("div", { class: "interpretation-text", text: raw || "" }));
+  if (!parsed || typeof parsed !== "object" || !parsed.sections) return null;
+  return parsed;
+}
+
+// One labeled section block: label + value, or a muted "no data" line for a sentinel/missing
+// value (kept, not hidden, so coverage is visible). Shared by the whole-body + single-section
+// renders so both look identical.
+function sectionEl(label, value, noData) {
+  const empty = value == null || value === noData;
+  return node("div", { class: "interp-section" }, [
+    node("h3", { class: "interp-section-label", text: label }),
+    node("p", {
+      class: empty ? "interp-section-value interp-nodata" : "interp-section-value",
+      text: empty ? "No data for this window." : value,
+    }),
+  ]);
+}
+
+// The recommendation block: the suggestion + the sections it cited, mapped to human labels
+// (so it reads "Growth, Engagement", not raw keys).
+function recommendationEl(rec, labelFor, noData) {
+  const box = node("div", { class: "interp-recommendation" }, [
+    node("h3", { class: "interp-section-label", text: "Recommendation" }),
+  ]);
+  if (!rec || !rec.suggestion || rec.suggestion === noData) {
+    box.appendChild(node("p", { class: "interp-section-value interp-nodata", text: "No recommendation yet." }));
+    return box;
+  }
+  box.appendChild(node("p", { class: "interp-section-value", text: rec.suggestion }));
+  const based = Array.isArray(rec.based_on) ? rec.based_on : [];
+  if (based.length) {
+    const names = based.map((k) => labelFor.get(k) || k).join(", ");
+    box.appendChild(node("p", { class: "interp-basedon", text: `Based on: ${names}` }));
+  }
+  return box;
+}
+
+export function renderInterpretationBody(container, data, spec) {
+  const parsed = parseContract(data);
+  if (!parsed) {
+    container.replaceChildren(node("div", { class: "interpretation-text", text: (data && data.text) || "" }));
     return;
   }
   const labels = (spec && spec.sectionLabels) || [];
@@ -51,40 +91,33 @@ export function renderInterpretationBody(container, data, spec) {
       text: "Partial response: some sections could not be parsed and are shown as no data.",
     }));
   }
-
-  // One labeled block per section, in the server's canonical order. A sentinel (or a
-  // missing) value renders a muted "no data" line, kept (not hidden) so the reader sees
-  // which sections had nothing rather than a silently shorter panel.
   const sections = parsed.sections || {};
   for (const { key, label } of labels) {
-    const value = sections[key];
-    const empty = value == null || value === noData;
-    body.appendChild(node("div", { class: "interp-section" }, [
-      node("h3", { class: "interp-section-label", text: label }),
-      node("p", {
-        class: empty ? "interp-section-value interp-nodata" : "interp-section-value",
-        text: empty ? "No data for this window." : value,
-      }),
-    ]));
+    body.appendChild(sectionEl(label, sections[key], noData));
   }
+  body.appendChild(recommendationEl(parsed.recommendation, labelFor, noData));
+  container.replaceChildren(body);
+}
 
-  // Recommendation: the suggestion + the sections it cited, mapped to their human labels
-  // (so it reads "Growth, Engagement", not raw keys) for consistency with the list above.
-  const rec = parsed.recommendation || {};
-  const recBox = node("div", { class: "interp-recommendation" }, [
-    node("h3", { class: "interp-section-label", text: "Recommendation" }),
+// Single-section render for the scroll-synced Dashboard rail: shows just the section matching
+// the chart in view, plus the recommendation (always reachable). DEGRADES to the whole body
+// when the key is absent/empty, the text is non-contract, or there are no labels, so the rail
+// is never blank or misleading.
+export function renderInterpretationSection(container, data, spec, key) {
+  const parsed = parseContract(data);
+  const labels = (spec && spec.sectionLabels) || [];
+  const noData = spec && spec.noData;
+  const labelFor = new Map(labels.map((l) => [l.key, l.label]));
+  const value = parsed && parsed.sections ? parsed.sections[key] : undefined;
+  const label = labelFor.get(key);
+  // Degrade to the whole panel when we cannot show a real single section.
+  if (!parsed || !label || value == null || value === noData) {
+    renderInterpretationBody(container, data, spec);
+    return;
+  }
+  const body = node("div", { class: "interp-body interp-body-single" }, [
+    sectionEl(label, value, noData),
+    recommendationEl(parsed.recommendation, labelFor, noData),
   ]);
-  if (!rec.suggestion || rec.suggestion === noData) {
-    recBox.appendChild(node("p", { class: "interp-section-value interp-nodata", text: "No recommendation yet." }));
-  } else {
-    recBox.appendChild(node("p", { class: "interp-section-value", text: rec.suggestion }));
-    const based = Array.isArray(rec.based_on) ? rec.based_on : [];
-    if (based.length) {
-      const names = based.map((k) => labelFor.get(k) || k).join(", ");
-      recBox.appendChild(node("p", { class: "interp-basedon", text: `Based on: ${names}` }));
-    }
-  }
-  body.appendChild(recBox);
-
   container.replaceChildren(body);
 }
