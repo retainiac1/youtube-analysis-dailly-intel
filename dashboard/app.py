@@ -44,16 +44,46 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 # fact, not just a message-less 500 in the browser. Writes to logs/dashboard.log
 # (gitignored) and also propagates to the console uvicorn shows. Configured once at
 # import; the guard makes it idempotent under --reload re-imports.
+#
+# The SAME file handler is attached to the backend modules' loggers (interpret, llm,
+# db, classify) by NAME, not to the root logger: the diagnostic WARNINGs those modules
+# emit (e.g. interpret's raw-response parse-failure dump) otherwise fall through to
+# logging.lastResort on uvicorn's stderr and are lost when the terminal scrolls.
+# Scoping by name deliberately EXCLUDES httpx and the provider SDKs, some of which log
+# request/response bodies -- routing those into a file would be noise and a data-leak
+# risk. Each logger is guarded independently so the wiring stays idempotent under
+# --reload re-imports.
 _LOG_DIR = _REPO_ROOT / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
-logger = logging.getLogger("dashboard")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    _log_handler = logging.FileHandler(_LOG_DIR / "dashboard.log")
-    _log_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+_LOG_PATH = _LOG_DIR / "dashboard.log"
+
+
+def _has_file_handler(lg: logging.Logger, path) -> bool:
+    """True when `lg` already writes to `path`. Guards the wiring below against
+    --reload re-imports: logger objects are process-global singletons and keep their
+    handlers across a module re-import, but each import builds a NEW FileHandler
+    object, so an identity check would stack a duplicate handler (and duplicate every
+    line) on every reload. Compare the resolved target file instead."""
+    target = str(path)
+    return any(
+        isinstance(h, logging.FileHandler) and h.baseFilename == target
+        for h in lg.handlers
     )
-    logger.addHandler(_log_handler)
+
+
+# Own loggers whose records must reach the file: the dashboard endpoints plus the
+# backend modules they import. INFO so an interpret/llm WARNING is always captured.
+# The dashboard logger also feeds the endpoint-failure handlers defined later.
+logger = logging.getLogger("dashboard")
+for _name in ("dashboard", "interpret", "llm", "db", "classify"):
+    _backend_logger = logging.getLogger(_name)
+    if not _has_file_handler(_backend_logger, _LOG_PATH):
+        _handler = logging.FileHandler(_LOG_PATH)
+        _handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        _backend_logger.setLevel(logging.INFO)
+        _backend_logger.addHandler(_handler)
 
 # The three leaderboard lanes. health/habit are rankings.bucket values and also
 # videos.buckets members; overall is the whole-pool lane (a rankings.bucket

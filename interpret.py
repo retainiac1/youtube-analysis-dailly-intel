@@ -25,6 +25,7 @@ Invariants (see docs/interpretations-generator-plan.MD):
 
 import argparse
 import json
+import logging
 import sys
 import time
 
@@ -32,6 +33,8 @@ import config
 import db
 from config import DB_PATH, ConfigError, VALID_BUCKETS, now_local_iso, validate_config
 from llm import estimate_cost, generate, split_model, LLMError
+
+logger = logging.getLogger(__name__)
 
 # Lane order matches compute_rankings keys: "overall" plus VALID_BUCKETS. Derived
 # from the single source of truth (config.VALID_BUCKETS) so adding a bucket does not
@@ -56,6 +59,13 @@ INTERP_CONTRACT_VERSION = 1
 # emptiness by equality with it (never a fuzzy match). A free-form "no data"
 # phrasing would defeat the grounding rule and any show/hide-empty logic.
 INTERP_NO_DATA = "no data"
+
+# Total-degrade error strings recorded by validate_interpretation when the raw model
+# response cannot be used at all (not JSON, or not a JSON object). Defined ONCE so the
+# validator and the diagnostic log gate in synthesize_lane match exactly (a literal
+# mismatch would silently disarm the log).
+INTERP_ERR_INVALID_JSON = "response was not valid JSON"
+INTERP_ERR_NOT_OBJECT = "response was not a JSON object"
 
 # The data context that produced an interpretation, recorded per run.
 INTERP_CONTEXT_MODES = ("aggregated", "raw")
@@ -436,10 +446,10 @@ def validate_interpretation(raw) -> dict:
             obj = json.loads(raw)
         except (ValueError, TypeError):
             obj = None
-            errors.append("response was not valid JSON")
+            errors.append(INTERP_ERR_INVALID_JSON)
     if not isinstance(obj, dict):
         if not errors:
-            errors.append("response was not a JSON object")
+            errors.append(INTERP_ERR_NOT_OBJECT)
         return {"sections": _degraded_sections(),
                 "recommendation": {"suggestion": INTERP_NO_DATA, "based_on": []},
                 "missing": list(INTERP_SECTION_KEYS), "errors": errors, "ok": False}
@@ -587,6 +597,19 @@ def synthesize_lane(conn, run_date: str, scope: str, model: str, *,
         stored["_partial"] = True
         stored["_errors"] = validated["errors"]
         stored["_missing"] = validated["missing"]
+    # Instrument the confirm gate: when the WHOLE response was unusable (not JSON /
+    # not a JSON object) the stored row keeps only the degraded object, so log the raw
+    # bytes here (the one place holding result.text). Head shows a code fence / prose
+    # wrapper; tail shows truncation (cut mid-object). This turns the next failure from
+    # a re-guess into a read. WARNING-level, error path only, so no log spam.
+    if (INTERP_ERR_INVALID_JSON in validated["errors"]
+            or INTERP_ERR_NOT_OBJECT in validated["errors"]):
+        raw = result.text or ""
+        logger.warning(
+            "interpret parse failure model=%s scope=%s window=%s errors=%s raw_len=%d\n"
+            "raw_head=%r\nraw_tail=%r",
+            model, scope, window_key, validated["errors"], len(raw),
+            raw[:1500], raw[-500:])
     text = json.dumps(stored)
 
     def _write():
