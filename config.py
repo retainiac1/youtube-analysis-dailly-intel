@@ -262,15 +262,6 @@ DEFAULT_EXTRACT_RUN_TIMEOUT_SECONDS = 1800
 DEFAULT_EXTRACT_TERMINATE_GRACE_SECONDS = 10
 DEFAULT_EXTRACT_SSE_KEEPALIVE_SECONDS = 15
 
-# Cross-process discover lock (run-pipeline.sh). The dashboard's single-flight guard is
-# in-process only; a scheduled launchd run is a separate process, so run-pipeline.sh takes
-# a filesystem lock (mkdir) around discover-capable runs to stop two discovers double-spending
-# quota. A would-be run reclaims the lock only if the holder's PID is dead OR the lock is
-# older than this. It MUST sit well above the worst legitimate discover (the in-process
-# watchdog already SIGKILLs a wedged dashboard run at EXTRACT_RUN_TIMEOUT_SECONDS = 1800), so
-# a live holder is never mistaken for stale. Fresh-checkout fallback; settings.toml overrides.
-DEFAULT_DISCOVER_LOCK_STALE_SECONDS = 3600
-
 # Raw-mode interpretation spend guard. The "raw" interpretation context dumps every
 # distinct video row in the window to the model (potentially ~30x the fixed-size
 # aggregated payload), so it is the token exposure. INTERP_RAW_COST_CAP_USD bounds the
@@ -315,7 +306,6 @@ SETTINGS_DEFAULTS: dict[str, object] = {
     "EXTRACT_RUN_TIMEOUT_SECONDS": DEFAULT_EXTRACT_RUN_TIMEOUT_SECONDS,
     "EXTRACT_TERMINATE_GRACE_SECONDS": DEFAULT_EXTRACT_TERMINATE_GRACE_SECONDS,
     "EXTRACT_SSE_KEEPALIVE_SECONDS": DEFAULT_EXTRACT_SSE_KEEPALIVE_SECONDS,
-    "DISCOVER_LOCK_STALE_SECONDS": DEFAULT_DISCOVER_LOCK_STALE_SECONDS,
     "INTERP_RAW_COST_CAP_USD": DEFAULT_INTERP_RAW_COST_CAP_USD,
     "INTERP_CHARS_PER_TOKEN": DEFAULT_INTERP_CHARS_PER_TOKEN,
     "INTERP_EST_OUTPUT_TOKENS": DEFAULT_INTERP_EST_OUTPUT_TOKENS,
@@ -419,7 +409,6 @@ PRICE_VALIDATION = _settings["PRICE_VALIDATION"]
 EXTRACT_RUN_TIMEOUT_SECONDS = _settings["EXTRACT_RUN_TIMEOUT_SECONDS"]
 EXTRACT_TERMINATE_GRACE_SECONDS = _settings["EXTRACT_TERMINATE_GRACE_SECONDS"]
 EXTRACT_SSE_KEEPALIVE_SECONDS = _settings["EXTRACT_SSE_KEEPALIVE_SECONDS"]
-DISCOVER_LOCK_STALE_SECONDS = _settings["DISCOVER_LOCK_STALE_SECONDS"]
 INTERP_RAW_COST_CAP_USD = _settings["INTERP_RAW_COST_CAP_USD"]
 INTERP_CHARS_PER_TOKEN = _settings["INTERP_CHARS_PER_TOKEN"]
 INTERP_EST_OUTPUT_TOKENS = _settings["INTERP_EST_OUTPUT_TOKENS"]
@@ -457,11 +446,13 @@ PUBLISHED_BEFORE = None
 DB_PATH = "data/database/swipefile.db"
 QUOTA_RESET_TZ = "America/Los_Angeles"
 
-# Cross-process discover lock directory (see DEFAULT_DISCOVER_LOCK_STALE_SECONDS).
-# run-pipeline.sh mkdir's this to serialize discover-capable runs across the dashboard
-# and a scheduled launchd fire. Resolved against the repo root like DB_PATH. Kept OUTSIDE
-# data/database/ on purpose so a backup (VACUUM INTO of that dir's DB) never sweeps it.
-DISCOVER_LOCK_PATH = "logs/discover.lock.d"
+# Cross-process discover lock file (see run-pipeline.sh and scripts/discover_lock.py).
+# run-pipeline.sh opens this on a shell fd and holds an OS advisory flock on it for the whole
+# run, serializing discover-capable runs across the dashboard and a scheduled launchd fire.
+# The kernel frees the lock when that process exits or crashes, so there is nothing to stale-
+# reclaim. Resolved against the repo root like DB_PATH. Kept OUTSIDE data/database/ so a
+# backup never sweeps it.
+DISCOVER_LOCK_PATH = "logs/discover.lock"
 
 # Root folder for the dashboard Documentation page. Its immediate subfolders are
 # tabs and the supported files inside them are documents (see dashboard/discovery.py).
@@ -494,7 +485,7 @@ EXIT_CLASSIFY_BUDGET = 8  # classify fallback-spend breaker tripped (primary thr
                           # per-run Haiku cap reached); distinct from a YouTube quota stop
 EXIT_DISCOVER_LOCKED = 9  # shell gate: another discover already in flight (cross-process
                           # lock held). Emitted by run-pipeline.sh before swipefile.py runs,
-                          # so it records NO run_log row (a skipped fire, not a failed run) —
+                          # so it records NO run_log row (a skipped fire, not a failed run);
                           # mirrors the dashboard's 409 ExtractBusy. No _EXIT_REASON slug.
 
 # The single "is this a quota stop?" set. The pipeline usually stops on its own
@@ -667,7 +658,6 @@ REQUIRED_KEYS: dict[str, type] = {
     "EXTRACT_RUN_TIMEOUT_SECONDS": int,
     "EXTRACT_TERMINATE_GRACE_SECONDS": int,
     "EXTRACT_SSE_KEEPALIVE_SECONDS": int,
-    "DISCOVER_LOCK_STALE_SECONDS": int,
     "INTERP_RAW_COST_CAP_USD": float,
     "INTERP_CHARS_PER_TOKEN": int,
     "INTERP_EST_OUTPUT_TOKENS": int,
@@ -680,7 +670,7 @@ POSITIVE_INT_KEYS: frozenset[str] = frozenset(
      "DAILY_QUOTA_LIMIT", "SAFETY_BUFFER", "OLLAMA_TIMEOUT_SECONDS",
      "DEFAULT_MAX_TOKENS", "DEFAULT_MAX_TOKENS_REASONING", "MAX_TOKENS_UPPER_BOUND",
      "EXTRACT_RUN_TIMEOUT_SECONDS", "EXTRACT_TERMINATE_GRACE_SECONDS",
-     "EXTRACT_SSE_KEEPALIVE_SECONDS", "DISCOVER_LOCK_STALE_SECONDS",
+     "EXTRACT_SSE_KEEPALIVE_SECONDS",
      "INTERP_CHARS_PER_TOKEN", "INTERP_EST_OUTPUT_TOKENS"}
 )
 

@@ -29,7 +29,6 @@ def make_good_config() -> SimpleNamespace:
         EXTRACT_RUN_TIMEOUT_SECONDS=1800,
         EXTRACT_TERMINATE_GRACE_SECONDS=10,
         EXTRACT_SSE_KEEPALIVE_SECONDS=15,
-        DISCOVER_LOCK_STALE_SECONDS=3600,
         INTERP_RAW_COST_CAP_USD=0.25,
         INTERP_CHARS_PER_TOKEN=3,
         INTERP_EST_OUTPUT_TOKENS=1500,
@@ -403,14 +402,11 @@ def test_non_positive_ollama_timeout_raises_named_error():
         "EXTRACT_RUN_TIMEOUT_SECONDS",
         "EXTRACT_TERMINATE_GRACE_SECONDS",
         "EXTRACT_SSE_KEEPALIVE_SECONDS",
-        "DISCOVER_LOCK_STALE_SECONDS",
     ],
 )
 def test_non_positive_extract_knob_raises_named_error(key):
-    # These seconds knobs bound a spawned or scheduled run: the Extract-page
-    # watchdog/keepalive and the cross-process discover-lock stale threshold. A zero or
-    # negative value would make the watchdog fire instantly, busy-loop the stream, or
-    # treat every live lock as stale.
+    # The Extract-page watchdog/keepalive seconds bound a spawned run; a zero or
+    # negative value would make the watchdog fire instantly or busy-loop the stream.
     cfg = make_good_config()
     setattr(cfg, key, 0)
     with pytest.raises(config.ConfigError, match=key):
